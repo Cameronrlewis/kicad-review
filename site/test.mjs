@@ -5805,6 +5805,34 @@ test('conditional asset requests validate access, expiry, descriptor and sibling
   }
 });
 
+
+test('finding 1: conditional SVG revalidation of a blob over 4.5M base64 characters answers 304, not an isolate exception', async () => {
+  const sealed = await signedIn();
+  const { randomBytes } = await import('node:crypto');
+  // Incompressible 3.6 MB payload: 4.8M base64 characters, inside the 8 MiB SVG limit.
+  const blob = randomBytes(3_600_000).toString('base64');
+  assert.ok(blob.length > 4_500_000);
+  const data = { version: 1, assets: { [imageId]: { kind: 'svg', name: 'sheet.svg' } }, blobs: { [imageId]: blob } };
+  const stored = `<script>window.REVIEW_DATA = ${JSON.stringify(data)};</script>`;
+  const restore = mockFetch(async url => {
+    url = String(url);
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/artifacts/56')) return Response.json({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', expired: false, size_in_bytes: stored.length, updated_at: '2026-10-29T00:00:00Z', workflow_run: { id: 9, repository_id: 5 } });
+    if (url.endsWith('/actions/runs/9')) return reviewRun();
+    if (url.endsWith('/artifacts/56/zip')) return new Response(null, { status: 302, headers: { Location: 'https://artifact.actions.githubusercontent.com/report56' } });
+    if (url === 'https://artifact.actions.githubusercontent.com/report56') return new Response(stored);
+    throw new Error(`unexpected URL ${url}`);
+  });
+  try {
+    const path = `/r/Cameronrlewis/repo/a/56/assets/${imageId}.svg`;
+    assert.equal((await call(path, { headers: { Cookie: `s=${sealed}` } })).status, 200);
+    const revalidated = await call(path, { headers: { Cookie: `s=${sealed}`, 'If-None-Match': `"${imageId}"` } });
+    assert.equal(revalidated.status, 304);
+  } finally {
+    restore();
+    (await import('./report-cache.js')).reportCache.clear();
+  }
+});
 test('finding 6: completed run paginates artifacts past page 1 and rejects ambiguous reports', async () => {
   const sealed = await signedIn();
   const filler = Array.from({ length: 100 }, (_, i) => ({ id: 1000 + i, name: `kicad-3d-${String(i).padStart(64, '0')}-board.glb.gz`, expired: false, workflow_run: { id: 12 } }));

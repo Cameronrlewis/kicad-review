@@ -328,14 +328,22 @@ export function assetFromReport(html, id, kind) {
   return assetFromData(readStoredData(html), id, kind);
 }
 
-const validBase64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}(?:==)?|[A-Za-z0-9+/]{3}=?)?$/;
+// Same language as /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}(?:==)?|[A-Za-z0-9+/]{3}=?)?$/ without its
+// per-group backtracking, which overflows the regexp stack on multi-megabyte blobs.
+function validBase64(value) {
+  const text = value.replace(/\s+/g, '');
+  if (/[^A-Za-z0-9+/=]/.test(text)) return false;
+  const pad = text.endsWith('==') ? 2 : text.endsWith('=') ? 1 : 0;
+  if (text.slice(0, text.length - pad).includes('=')) return false;
+  return pad ? text.length % 4 === 0 : text.length % 4 !== 1;
+}
 
 function assetFromData(data, id, kind, matched = false) {
   if (!/^[0-9a-f]{12}$/.test(id) || !['svg', 'json'].includes(kind)) return null;
   const meta = data?.assets?.[id], encoded = data?.blobs?.[id], max = IMAGE_ASSET_LIMITS[kind];
   if (meta?.kind !== kind || typeof encoded !== 'string' || !encoded.length || encoded.length > Math.ceil(max / 3) * 4) return null;
-  if (matched) return validBase64.test(encoded.replace(/\s+/g, '')) ? new Uint8Array(0) : null;
   try {
+    if (matched) return validBase64(encoded) ? new Uint8Array(0) : null;
     const bytes = unbase64(encoded);
     return bytes.length <= max ? bytes : null;
   } catch { return null; }
@@ -985,12 +993,12 @@ const routes = {
       const assetRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/(\d{1,20})\/assets\/([0-9a-f]{12})\.(svg|json)$/);
       if (request.method === 'GET' && assetRoute) {
         const [, owner, repo, id, digest, kind] = assetRoute;
-        return digestAsset(request, env, owner, repo, id, digest, kind);
+        return await digestAsset(request, env, owner, repo, id, digest, kind);
       }
       const modelRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/(\d{1,20})\/3d\/([^/]+)\/([^/]+)$/);
       if (request.method === 'GET' && modelRoute) {
         const [, owner, repo, id, digest, kind] = modelRoute;
-        return artifact3d(request, env, owner, repo, id, digest, kind);
+        return await artifact3d(request, env, owner, repo, id, digest, kind);
       }
       const downloadRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/(\d{1,20})\/download\/(\d{1,3})\/(fab|pdf|step|glb)$/);
       if (request.method === 'GET' && downloadRoute) {
