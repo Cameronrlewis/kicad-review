@@ -810,7 +810,18 @@ err = io.StringIO()
 with contextlib.redirect_stderr(err):
     dup_pages = sheet_pages(f"{t}/p", "H")
 assert [p["name"] for p in dup_pages] == ["H"], dup_pages
-assert "collides with another sheet using sanitized name 'A'; both skipped" in err.getvalue()
+assert "collides with another sheet using sanitized name 'A'; all colliding sibling sheets skipped" in err.getvalue()
+# Three siblings sharing one sanitized name: the warning must not say "both".
+write(t, {"p3/H.kicad_sch": "(kicad_sch " + sheet("A/B", "a.kicad_sch", "u1") + sheet("A_B", "b.kicad_sch", "u2")
+          + sheet("A\\\\B", "c.kicad_sch", "u3") + ")"})
+err = io.StringIO()
+with contextlib.redirect_stderr(err):
+    tri_pages = sheet_pages(f"{t}/p3", "H")
+assert [p["name"] for p in tri_pages] == ["H"], tri_pages
+tri_lines = [l for l in err.getvalue().splitlines() if "sanitized name 'A_B'" in l]
+assert len(tri_lines) == 3 and all(l.startswith("::warning::") and l.endswith("; all colliding sibling sheets skipped")
+                                   for l in tri_lines), err.getvalue()
+assert "both" not in err.getvalue(), err.getvalue()
 print("ok")
 
 # SCH6: page numbers belong to the project and parent instance, not the shared file.
@@ -10751,7 +10762,7 @@ def test_f1_sheetfile_containment_and_hierarchy():
                 issues = []
                 kr.project_objects('head/P', 'H', issues)
             assert [p['name'] for p in collide_pages] == ['H'], collide_pages
-            assert "sheet 'A_B' collides with another sheet using sanitized name 'A_B'; both skipped" in err.getvalue(), err.getvalue()
+            assert "sheet 'A_B' collides with another sheet using sanitized name 'A_B'; all colliding sibling sheets skipped" in err.getvalue(), err.getvalue()
             assert all(line.startswith('::warning::') for line in err.getvalue().splitlines()), err.getvalue()
             reasons = {(i['document'], i['channel']) for i in issues}
             assert {('schematic', 'components'), ('schematic', 'visual')} <= reasons, issues

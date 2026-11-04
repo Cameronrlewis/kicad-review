@@ -1273,7 +1273,7 @@ def sheet_pages(proj_dir, name):
             names[safe] = names.get(safe, 0) + 1
         for s, uid, child, safe, child_file in children:
             if names[safe] > 1:
-                message = f"{full}: sheet {child!r} collides with another sheet using sanitized name {safe!r}; both skipped"
+                message = f"{full}: sheet {child!r} collides with another sheet using sanitized name {safe!r}; all colliding sibling sheets skipped"
                 warn(message)
                 _sheet_collisions.setdefault(os.path.realpath(proj_dir), set()).add(message)
                 continue
