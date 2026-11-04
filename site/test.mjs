@@ -371,6 +371,26 @@ test('expired access tokens refresh once, while refresh errors clear the session
   } finally { restore(); }
 });
 
+test('concurrent near-expiry requests share one one-use refresh token rotation', async () => {
+  const expiring = await seal({ t: 'old-token', r: 'one-use-refresh', e: Date.now() + 60_000, re: Date.now() + 7_200_000, u: 'octocat' }, env);
+  let refreshes = 0;
+  const restore = mockFetch(async (url) => {
+    if (url !== 'https://github.com/login/oauth/access_token') return new Response('{}', { status: 500 });
+    refreshes += 1;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // GitHub rotates refresh tokens: only the first exchange of a refresh token succeeds.
+    return refreshes === 1 ? tokenResponse({ access_token: 'new-token', refresh_token: 'new-refresh' }) : tokenResponse({ error: 'bad_refresh_token' });
+  });
+  try {
+    const responses = await Promise.all([1, 2, 3].map(() => call('/', { headers: { Cookie: `s=${expiring}` } })));
+    assert.equal(refreshes, 1);
+    for (const response of responses) {
+      assert.match(await response.text(), /Signed in as octocat/);
+      assert.equal((await open(cookieValue(response, 's'), env)).r, 'new-refresh');
+    }
+  } finally { restore(); }
+});
+
 test('unsafe next is ignored and login text is HTML escaped', async () => {
   const login = await call('/login?next=//evil.com');
   const state = cookieValue(login, 'st');

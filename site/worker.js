@@ -109,6 +109,7 @@ async function tokenRequest(env, fields) {
   }
 }
 
+const refreshing = new Map();
 export async function session(request, env) {
   const stored = cookies(request).s;
   if (!stored) return null;
@@ -116,7 +117,15 @@ export async function session(request, env) {
   if (!value || !value.t || !value.r || !value.e || !value.re || !value.u) return null;
   if (value.e > Date.now() + 5 * 60_000) return { login: value.u, token: value.t };
   if (value.re <= Date.now()) return null;
-  const refreshed = await tokenRequest(env, { grant_type: 'refresh_token', refresh_token: value.r });
+  // GitHub refresh tokens are one-use: concurrent requests in this isolate share one rotation.
+  // ponytail: isolate-local only; cross-isolate coalescing needs shared storage (KV/Durable Object).
+  let pending = refreshing.get(value.r);
+  if (!pending) {
+    pending = tokenRequest(env, { grant_type: 'refresh_token', refresh_token: value.r })
+      .finally(() => refreshing.delete(value.r));
+    refreshing.set(value.r, pending);
+  }
+  const refreshed = await pending;
   if (!refreshed) return null;
   const renewed = {
     t: refreshed.access_token,
