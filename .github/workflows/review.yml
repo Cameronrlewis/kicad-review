@@ -69,6 +69,8 @@ jobs:
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
           IN_BASE: ${{ github.event.inputs.base }}
           IN_HEAD: ${{ github.event.inputs.head }}
+          SNAPSHOT_ONLY: ${{ github.event.inputs.snapshot_only }}
+          REF_NAME: ${{ github.ref_name }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: python3 ../tools/kicad_review.py detect
 
@@ -185,7 +187,7 @@ jobs:
 
       - name: Build comparison report and checks
         id: report
-        if: steps.detect.outputs.changed == 'true'
+        if: steps.detect.outputs.review == 'true'
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           # Read the live PR target tip; non-PR runs use the default branch, not the pushed branch.
@@ -217,14 +219,14 @@ jobs:
             || { rm -f review/issues.json; echo "::warning::Could not read issues. Add 'issues: read' to the caller's permissions."; }
 
       - name: Copy named report
-        if: steps.detect.outputs.changed == 'true'
+        if: steps.detect.outputs.review == 'true'
         env:
           REPORT_NAME: ${{ steps.report.outputs.name }}
         run: cp review/kicad-review.html "review/$REPORT_NAME"
 
       - name: Upload report
         id: upload
-        if: steps.detect.outputs.changed == 'true'
+        if: steps.detect.outputs.review == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           archive: false
@@ -242,6 +244,46 @@ jobs:
           path: review/downloads
           compression-level: 0
           retention-days: 90
+
+      # The design as it is at head, made from the renders above. Pushes to the default branch and version tags leave one; so does a snapshot-only manual run.
+      - name: Build design snapshot
+        id: snapshot
+        if: steps.detect.outputs.snapshot == 'true'
+        env:
+          WAIVERS_REF: origin/${{ github.event.repository.default_branch }}
+        run: python3 tools/kicad_review.py snapshot
+
+      # ponytail: 90-day default ceiling (owner decision 2026-10-26, decision 6); set the KICAD_REVIEW_SNAPSHOT_DAYS variable to the repository's configured maximum. No retention discovery.
+      - name: Upload design snapshot
+        if: steps.snapshot.outputs.built == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          archive: false
+          name: ${{ steps.snapshot.outputs.name }}   # the artifact name is the report name; 09's loadContext matches it
+          path: review/design/${{ steps.snapshot.outputs.name }}
+          retention-days: ${{ vars.KICAD_REVIEW_SNAPSHOT_DAYS || 90 }}
+
+      # Optional Ask hook: inert in 06 (ask=false, no context name). After 06 merges and its owner gate is met, 09 owns enabling the producer and emitting ask=true with the context name. Upload failure never fails the snapshot.
+      - name: Upload design snapshot context
+        if: steps.snapshot.outputs.ask == 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          archive: false
+          name: ${{ steps.snapshot.outputs.context_name }}   # loadContext looks up kicad-design-<sha7>.context.json by the HTML name with .context.json
+          path: review/design/${{ steps.snapshot.outputs.context_name }}
+          retention-days: ${{ vars.KICAD_REVIEW_SNAPSHOT_DAYS || 90 }}   # same retention as the HTML it belongs to
+
+      # The snapshot's own downloads bundle (<project index>/<file>, never the comparison's), kept as long as the snapshot.
+      - name: Upload design downloads
+        if: steps.snapshot.outputs.downloads == 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.snapshot.outputs.downloads_name }}
+          path: review/design-downloads
+          compression-level: 0
+          retention-days: ${{ vars.KICAD_REVIEW_SNAPSHOT_DAYS || 90 }}
 
       - name: Upload digest-keyed 3D assets
         if: steps.detect.outputs.changed == 'true' && hashFiles('review/3d/kicad-3d-*.gz') != ''
@@ -276,7 +318,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Screenshots of changed drawings
-        if: steps.detect.outputs.changed == 'true'
+        if: steps.detect.outputs.review == 'true'
         continue-on-error: true
         run: python3 tools/kicad_review.py shots
 
@@ -313,7 +355,7 @@ jobs:
       # which repository members' browsers can load. Project branches are never written to.
       - name: Publish screenshots
         id: images
-        if: steps.detect.outputs.changed == 'true'
+        if: steps.detect.outputs.review == 'true'
         continue-on-error: true
         env:
           TOKEN: ${{ github.token }}
@@ -365,7 +407,7 @@ jobs:
 
       - name: Job summary
         id: summary
-        if: steps.detect.outputs.changed == 'true'
+        if: steps.detect.outputs.review == 'true'
         env:
           IMAGES: ${{ steps.images.outputs.base }}
           ARTIFACT: ${{ steps.upload.outputs.artifact-url }}
@@ -447,6 +489,17 @@ jobs:
           gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1 ||
             gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
           gh release upload "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --clobber release/*
+
+      - name: Attach the design snapshot to the GitHub release
+        id: attach-snapshot
+        if: ${{ always() && !cancelled() && startsWith(github.ref, 'refs/tags/') && steps.snapshot.outcome == 'success' && steps.snapshot.outputs.built == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1 ||
+            gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
+          test -f review/design/design-snapshot.html &&
+            gh release upload "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --clobber review/design/design-snapshot.html
 
       - name: Write release notes
         if: ${{ always() && !cancelled() && startsWith(github.ref, 'refs/tags/') && steps.detect.outputs.changed == 'true' && steps.report.outcome == 'success' && steps.attach.outcome == 'success' }}

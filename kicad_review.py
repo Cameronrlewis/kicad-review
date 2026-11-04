@@ -6090,7 +6090,8 @@ def cmd_snapshot(args):
     print(f"{DESIGN_DIR}/{name}: {len(html) / 1e6:.2f} MB, {len(blobs)} embedded drawings")
     # ask stays false and context_name is never emitted: 09 owns producing kicad-design-<sha7>.context.json and switching it on.
     emit(built="true", name=name, thumbnails="true" if thumb_projects else "false", ask="false",
-         downloads="true" if any(project.get("downloads") for project in projects) else "false")
+         downloads="true" if any(project.get("downloads") for project in projects) else "false",
+         downloads_name=f"kicad-design-downloads-{det['head'][:7]}")  # the bundle the review site's download route looks up
 
 
 STATUS_ICON = {"pass": "✅", "fail": "❌", "warn": "⚠️", "not_run": "—"}

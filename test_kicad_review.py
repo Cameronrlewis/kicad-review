@@ -8064,7 +8064,7 @@ with _DpTmp() as t:
         out = f"{t}/gh-output"
         with patch.dict(os.environ, {"GITHUB_OUTPUT": out, "GITHUB_REPOSITORY": "o/r", "GITHUB_RUN_ID": "7", "GITHUB_SERVER_URL": "https://github.com"}, clear=True), patch("sys.stdout", new_callable=io.StringIO):
             kr.cmd_snapshot(None)
-        assert open(out).read() == "built=true\nname=kicad-design-ccccccc.html\nthumbnails=true\nask=false\ndownloads=false\n"
+        assert open(out).read() == "built=true\nname=kicad-design-ccccccc.html\nthumbnails=true\nask=false\ndownloads=false\ndownloads_name=kicad-design-downloads-ccccccc\n"
         assert json.load(open("review/design/thumbnail-plan.json")) == {"sha": head, "committedAt": "2026-10-24T10:00:00+00:00", "projects": [{"dir": "H", "poster": "review/design/thumb-src/H.png"}]}
         assert open("review/design/thumb-src/H.png", "rb").read() == _dp_png
         data = _dp_report_data("review/design/kicad-design-ccccccc.html")
@@ -8079,7 +8079,7 @@ with _DpTmp() as t:
         shutil.rmtree("review/design"); os.remove("review/H/head/poster.png")
         with patch.dict(os.environ, {"GITHUB_OUTPUT": out + "np", "GITHUB_REPOSITORY": "o/r", "GITHUB_RUN_ID": "7", "GITHUB_SERVER_URL": "https://github.com"}, clear=True), patch("sys.stdout", new_callable=io.StringIO):
             kr.cmd_snapshot(None)
-        assert open(out + "np").read() == "built=true\nname=kicad-design-ccccccc.html\nthumbnails=false\nask=false\ndownloads=false\n"
+        assert open(out + "np").read() == "built=true\nname=kicad-design-ccccccc.html\nthumbnails=false\nask=false\ndownloads=false\ndownloads_name=kicad-design-downloads-ccccccc\n"
         assert not os.path.exists("review/design/thumbnail-plan.json") and not os.path.exists("review/design/thumb-src")
         shutil.rmtree("review/design"); os.remove("head/kicad-review.toml")
         det["snapshot_settings"]["design"]["enabled"] = False
@@ -11013,7 +11013,8 @@ with _DpTmp() as t:
             shutil.rmtree("review/design", ignore_errors=True)
             finalize, outputs = _dp_snapshot(settings, f"{t}/out-ask-{n}")
             assert finalize.call_count == 1 and finalize.call_args.args[1] == "review/design/assets", finalize.call_args_list
-            assert outputs == {"built": "true", "name": "kicad-design-ccccccc.html", "thumbnails": "true", "ask": "false", "downloads": "true"}, outputs
+            assert outputs == {"built": "true", "name": "kicad-design-ccccccc.html", "thumbnails": "true", "ask": "false", "downloads": "true",
+                               "downloads_name": "kicad-design-downloads-ccccccc"}, outputs
             assert _dp_no_context(), "06 writes no context file"
             data = _dp_report_data("review/design/kicad-design-ccccccc.html")
             assert "assets" in data and "ask" not in data["settings"], (sorted(data), sorted(data["settings"]))
@@ -11057,3 +11058,68 @@ with _DpTmp() as t:
     finally:
         os.chdir(old_cwd)
 print("ok DP-S3I snapshot integrates assets and downloads without Ask")
+
+# DP-S7: the reusable workflow wires the snapshot in without touching what comparison runs do.
+_wf = pathlib.Path(".github/workflows/review.yml").read_text(encoding="utf-8")
+for line in ("          SNAPSHOT_ONLY: ${{ github.event.inputs.snapshot_only }}", "          REF_NAME: ${{ github.ref_name }}",
+             "        if: steps.detect.outputs.snapshot == 'true'", "        run: python3 tools/kicad_review.py snapshot",
+             "        if: steps.snapshot.outputs.built == 'true'", "          path: review/design/${{ steps.snapshot.outputs.name }}",
+             "          retention-days: ${{ vars.KICAD_REVIEW_SNAPSHOT_DAYS || 90 }}",
+             "            gh release upload \"$GITHUB_REF_NAME\" -R \"$GITHUB_REPOSITORY\" --clobber review/design/design-snapshot.html"):
+    assert line in _wf, line
+for step in ("Build comparison report and checks", "Copy named report", "Upload report", "Screenshots of changed drawings", "Publish screenshots", "Job summary"):
+    body = _wf[_wf.index("- name: " + step):].split("\n      - name:")[0]
+    assert "if: steps.detect.outputs.review == 'true'" in body, step
+for step in ("Render both revisions and run ERC/DRC", "Cache final rendered outputs"):  # snapshot-only runs still render and cache
+    assert "if: steps.detect.outputs.changed == 'true'" in _wf[_wf.index("- name: " + step):].split("\n      - name:")[0], step
+assert _wf.index("- name: Upload report") < _wf.index("- name: Build design snapshot") < _wf.index("- name: Screenshots of changed drawings")
+assert "snapshot_only" not in _wf.split("workflow_call:")[1].split("jobs:")[0], "the reusable workflow takes no input of its own: the caller's event inputs are read"
+_caller = pathlib.Path("examples/kicad-review.yml").read_text(encoding="utf-8")
+assert "snapshot_only:" in _caller and "type: boolean" in _caller and "required: false" in _caller.split("base:")[1].split("head:")[0]
+# Optional Ask hook: 06 emits ask=false with no context_name, even if settings request Ask; no 09 producer is required.
+# Keep the guard/name/path contract for 09 to enable after 06 merges and the owner records build hosted Ask.
+# The ask=true branch below is a static reserved-contract check, not a requirement to build 09 or upload real context in 06.
+assert "          name: ${{ steps.snapshot.outputs.name }}" in _wf, "the HTML artifact must carry its design name, which 09's loadContext reads"
+_ctx = _wf[_wf.index("- name: Upload design snapshot context"):].split("\n      - name:")[0]
+assert "        if: steps.snapshot.outputs.ask == 'true'" in _ctx and "        continue-on-error: true" in _ctx, _ctx   # ask on: uploads; ask off: the guard skips the step
+assert "          archive: false" in _ctx and "          name: ${{ steps.snapshot.outputs.context_name }}" in _ctx, _ctx
+assert "          path: review/design/${{ steps.snapshot.outputs.context_name }}" in _ctx and "          retention-days: ${{ vars.KICAD_REVIEW_SNAPSHOT_DAYS || 90 }}" in _ctx, _ctx
+assert _wf.index("- name: Upload design snapshot") < _wf.index("- name: Upload design snapshot context") < _wf.index("- name: Screenshots of changed drawings")
+# ask on: the context step's only condition is the ask guard, so it uploads kicad-design-<sha7>.context.json (named by context_name, which 09's loadContext computes from the HTML name)
+assert [line.strip() for line in _ctx.splitlines() if line.strip().startswith("if:")] == ["if: steps.snapshot.outputs.ask == 'true'"], _ctx
+# ask off: Task 4A's DP-S3I snapshot-only run with ask off emits ask=false and no context_name, so this guard is false and no context artifact is uploaded
+# the HTML upload must not carry the context, and context_name appears only in the guarded context upload
+assert "context_name" not in _wf[_wf.index("- name: Upload design snapshot"):_wf.index("- name: Upload design snapshot context")], "the HTML upload must not carry the context"
+assert _wf.count("steps.snapshot.outputs.context_name") == 2, "context_name appears only in the guarded context upload"
+# 4A's design downloads bundle (kicad-design-downloads-<sha7>, what the site's download route looks up) is uploaded beside the snapshot,
+# and the snapshot is built before the digest-keyed 3D upload, so a hosted design page can lazily load its 3D assets from the same run.
+_dl = _wf[_wf.index("- name: Upload design downloads"):].split("\n      - name:")[0]
+for line in ("        if: steps.snapshot.outputs.downloads == 'true'", "          name: ${{ steps.snapshot.outputs.downloads_name }}",
+             "          path: review/design-downloads", "          compression-level: 0", "          retention-days: ${{ vars.KICAD_REVIEW_SNAPSHOT_DAYS || 90 }}"):
+    assert line in _dl, line
+assert _wf.index("- name: Build design snapshot") < _wf.index("- name: Upload design downloads") < _wf.index("- name: Upload digest-keyed 3D assets")
+print("ok DP-S7 workflow wiring")
+
+# A tag whose fabrication outputs fail still attaches its design snapshot; the fabrication attachment keeps its own gate.
+def _dp_gh_if(expression, context):
+    """Evaluate the subset of GitHub expression syntax these step conditions use."""
+    text = expression.strip()
+    if text.startswith("${{"):
+        text = text[3:].rsplit("}}", 1)[0]
+    text = _dpre.sub(r"\b(?:steps|github|vars)\.[A-Za-z0-9_.-]+", lambda m: f"_ctx({m.group(0)!r})", text)
+    text = _dpre.sub(r"!(?!=)", " not ", text).replace("&&", " and ").replace("||", " or ")
+    text = _dpre.sub(r"\bstartsWith\(", "_starts(", text)
+    return eval(text, {"__builtins__": {}}, {"always": lambda: True, "cancelled": lambda: False,
+                                             "_starts": lambda a, b: str(a).startswith(b), "_ctx": lambda key: context.get(key, "")})
+_step_if = lambda name: next(line.strip()[len("if: "):] for line in _wf[_wf.index("- name: " + name + "\n"):].split("\n      - name:")[0].splitlines()
+                             if line.strip().startswith("if: "))
+_attach, _attach_snapshot = _step_if("Attach to the GitHub release"), _step_if("Attach the design snapshot to the GitHub release")
+_tag = {"github.ref": "refs/tags/v1.0", "steps.fabrication.outcome": "failure", "steps.snapshot.outcome": "success", "steps.snapshot.outputs.built": "true"}
+assert not _dp_gh_if(_attach, _tag) and _dp_gh_if(_attach_snapshot, _tag), (_attach, _attach_snapshot)
+assert _dp_gh_if(_attach, {**_tag, "steps.fabrication.outcome": "success"}) and _dp_gh_if(_attach_snapshot, {**_tag, "steps.fabrication.outcome": "success"})
+for other in ({"github.ref": "refs/heads/main"}, {"steps.snapshot.outcome": "skipped", "steps.snapshot.outputs.built": ""}, {"steps.snapshot.outputs.built": "false"}):
+    assert not _dp_gh_if(_attach_snapshot, {**_tag, **other}), other
+_attach_body = _wf[_wf.index("- name: Attach to the GitHub release\n"):].split("\n      - name:")[0]
+assert "design-snapshot.html" not in _attach_body and "release/*" in _attach_body, "fabrication attachment behaviour is unchanged"
+assert _wf.index("- name: Attach to the GitHub release\n") < _wf.index("- name: Attach the design snapshot to the GitHub release")
+print("ok tagged design snapshot attachment is independent of fabrication")
