@@ -100,12 +100,15 @@ jobs:
       # PcbDraw (owner decision 2026-10-26, decision 1): installed into the workspace, then imported only by the KiCad image's Python.
       # The KiCad 10.0.6 image ships Python 3.13.5 with no pip/venv (verified in evidence/kicad10-commands.md and results-pcbdraw-10.0.6.txt).
       # Installing in python:3.13-slim produces cp313 wheels (lxml, numpy, Pillow) matching the KiCad Python ABI.
+      # Optional: without it the render records "PcbDraw failed" (retried on the next run) and the design report shows that note.
       - name: Install PcbDraw
         if: steps.detect.outputs.changed == 'true' && steps.detect.outputs.design == 'true'
+        continue-on-error: true
         run: |
           rm -rf .pydeps
           docker run -q --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/w" -w /w "$PYTHON_IMAGE" \
-            pip install -q --target /w/.pydeps pcbdraw==1.3.0
+            pip install -q --target /w/.pydeps pcbdraw==1.3.0 ||
+            { rm -rf .pydeps; echo "::warning::PcbDraw could not be installed; design reports show a note in place of its plots."; exit 1; }
 
       - name: Render both revisions and run ERC/DRC
         if: steps.detect.outputs.changed == 'true'
