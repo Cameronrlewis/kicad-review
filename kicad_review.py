@@ -4247,14 +4247,12 @@ def net_members(text, objects, commit):
             if ref.startswith("#"):  # Power symbols and flags (ref starts with '#') are skipped; they are not fabricated as component pins
                 continue
             candidates = by_ref.get(ref, [])
-            units = [((o.get("where") or {}).get("sheet"), o["props"].get("unit", "1"))
-                     for _, o in candidates]
+            units = [o["props"].get("unit", "1") for _, o in candidates]
             invalid = not ref or "?" in ref
             # A missing or unannotated reference has no UUID in the netlist node, so only a single matching symbol candidate can be disambiguated.
             ambiguous = (not pin or not candidates
-                         or any(s is None for s, _ in units)
+                         or any((o.get("where") or {}).get("sheet") is None for _, o in candidates)
                          or len(units) != len(set(units))
-                         or len({s for s, _ in units}) != 1
                          or (invalid and len(candidates) != 1))
             if ambiguous:
                 unknown = True
@@ -4608,11 +4606,9 @@ def schematic_pin_ids(text, objects):
     for comp in components:
         ref = val(comp, "ref")
         candidates = refs.get(ref, [])
-        identities = [((o.get("where") or {}).get("sheet"), o["props"].get("unit", "1")) for o in candidates]
-        if not ref or "?" in ref or not candidates or len(identities) != len(set(identities)):
-            continue
-        sheets = {sheet for sheet, _ in identities}
-        if len(sheets) != 1 or None in sheets:
+        units = [o["props"].get("unit", "1") for o in candidates]
+        if (not ref or "?" in ref or not candidates or len(units) != len(set(units))
+                or any((o.get("where") or {}).get("sheet") is None for o in candidates)):
             continue
         if sum(val(c, "ref") == ref for c in components) != 1:
             continue

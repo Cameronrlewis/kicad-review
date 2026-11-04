@@ -9973,3 +9973,77 @@ assert "docs/superpowers" not in readme, "plan paths stay out of shipped assets"
 assert "02's" not in readme, "plan numbers stay out of shipped assets"
 print("ok downloads documented")
 
+# F2: Multi-unit symbols split across sheets preserve net membership, proven pins, and project net diff.
+def test_f2_cross_sheet_multi_unit():
+    from kicad_review import electrical_changes, net_members, schematic_pin_ids
+    base_net = (
+        "(export"
+        " (components (comp (ref U1) (libsource (lib Device) (part Dual)))"
+        "  (comp (ref R1) (libsource (lib Device) (part R))))"
+        " (libparts (libpart (lib Device) (part Dual) (pins (pin (num 1)) (pin (num 2)) (pin (num 3))))"
+        "  (libpart (lib Device) (part R) (pins (pin (num 1)) (pin (num 2)))))"
+        " (nets (net (name SIG) (node (ref U1) (pin 1)) (node (ref R1) (pin 1)))"
+        "  (net (name VCC) (node (ref U1) (pin 2)))))"
+    )
+    head_net = base_net.replace("(node (ref R1) (pin 1))", "(node (ref R1) (pin 2))")
+    root_sch = (
+        '(kicad_sch (uuid root-uuid)'
+        ' (symbol (lib_id "Device:Dual") (uuid ua) (unit 1) (at 10 20 0) (property "Reference" "U1"))'
+        ' (symbol (lib_id "Device:R") (uuid r1) (unit 1) (at 30 20 0) (property "Reference" "R1"))'
+        ' (sheet (at 50 50) (size 10 10) (uuid power-sheet)'
+        '  (property "Sheetname" "power") (property "Sheetfile" "power.kicad_sch")))'
+    )
+    power_sch = (
+        '(kicad_sch (uuid power-uuid)'
+        ' (symbol (lib_id "Device:Dual") (uuid ub) (unit 2) (at 15 25 0) (property "Reference" "U1")))'
+    )
+
+    with tempfile.TemporaryDirectory() as td:
+        old = os.getcwd()
+        os.chdir(td)
+        try:
+            p = {"dir": "p", "name": "p"}
+            out = pathlib.Path("review/p")
+            for side, net_text, pad_net in (("base", base_net, ""), ("head", head_net, "VCC")):
+                write(side, {
+                    "p/p.kicad_sch": root_sch,
+                    "p/power.kicad_sch": power_sch,
+                    "p/p.kicad_pcb": br03_pcb("fp", [("pad", "3", 0, pad_net)]).replace('"D1"', '"U1"'),
+                })
+                write(str(out / side), {"netlist.net": net_text})
+            write(str(out), {"copper-diff.json": json.dumps({"rows": [], "incomplete": []})})
+            sch_objs = kr.sch_objects("base/p", "p")
+            nets, anchors, issues = net_members(base_net, sch_objs, "a" * 40)
+            assert nets == {"SIG": {"U1.1", "R1.1"}, "VCC": {"U1.2"}} and not issues, (nets, issues)
+            assert [(a["unit"], a["sheet"], a["uuid"]) for a in anchors["U1.1"]] == [
+                ("1", "/", "ua"),
+                ("2", "/power-sheet/", "ub"),
+            ], anchors["U1.1"]
+            assert schematic_pin_ids(base_net, sch_objs) == {"U1.1", "U1.2", "U1.3", "R1.1", "R1.2"}
+
+            objs = {
+                side: {**kr.pcb_objects(pathlib.Path(side, "p/p.kicad_pcb")), **kr.sch_objects(f"{side}/p", "p")}
+                for side in ("base", "head")
+            }
+            rows, issues = electrical_changes(p, str(out), objs, {"base": "b" * 40, "head": "h" * 40})
+            assert not issues, issues
+            net_rows = [r for r in rows if r["kind"] == "net-members"]
+            assert len(net_rows) == 1 and net_rows[0]["ref"] == "SIG", net_rows
+            assert net_rows[0]["detail"]["added"] == ["R1.2"] and net_rows[0]["detail"]["removed"] == ["R1.1"]
+            pad_rows = [r for r in rows if r["kind"] == "board-pad-net"]
+            assert len(pad_rows) == 1 and pad_rows[0]["detail"]["boardOnly"] is True, pad_rows
+        finally:
+            os.chdir(old)
+
+    # Duplicate unit numbers across different sheets remain ambiguous.
+    dup_cross_sheet = {"/logic/ua": obj("U1", "1", "/logic/"), "/power/ub": obj("U1", "1", "/power/")}
+    dup_nets, dup_anchors, dup_issues = net_members(base_net, dup_cross_sheet, "a" * 40)
+    assert dup_nets == {"SIG": None, "VCC": None} and not dup_anchors, (dup_nets, dup_anchors)
+    assert all(i["unknown"] for i in dup_issues) and len(dup_issues) == 2, dup_issues
+    assert schematic_pin_ids(base_net, dup_cross_sheet) == set()
+
+
+test_f2_cross_sheet_multi_unit()
+print("ok F2 cross-sheet multi-unit net comparison")
+
+
