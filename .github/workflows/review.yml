@@ -121,9 +121,17 @@ jobs:
         run: |
           set -euo pipefail
           DEPS="$HOME/.cache/kicad-review-meshopt"
-          mkdir -p "$DEPS"
-          if [ ! -d "$DEPS/node_modules/meshoptimizer" ]; then
-            npm install --prefix "$DEPS" --no-save --package-lock=false @gltf-transform/core@4.2.1 @gltf-transform/extensions@4.2.1 @gltf-transform/functions@4.2.1 meshoptimizer@0.22.0 || { echo "::warning::3D compression dependencies unavailable; keeping raw GLBs."; exit 0; }
+          if [ ! -f "$DEPS/.complete" ]; then
+            rm -rf "$DEPS"
+            mkdir -p "$DEPS"
+            if npm install --prefix "$DEPS" --no-save --package-lock=false @gltf-transform/core@4.2.1 @gltf-transform/extensions@4.2.1 @gltf-transform/functions@4.2.1 meshoptimizer@0.22.0 \
+               && NODE_PATH="$DEPS/node_modules" node -e "require('@gltf-transform/core'); require('@gltf-transform/extensions'); require('@gltf-transform/functions'); require('meshoptimizer')"; then
+              touch "$DEPS/.complete"
+            else
+              rm -rf "$DEPS"
+              echo "::warning::3D compression dependencies unavailable; keeping raw GLBs."
+              exit 0
+            fi
           fi
 
       - name: Compress 3D board models
@@ -231,7 +239,6 @@ jobs:
 
       - name: Upload digest-keyed 3D assets
         if: steps.detect.outputs.changed == 'true' && hashFiles('review/3d/kicad-3d-*.gz') != ''
-        continue-on-error: true
         # A node action receives Actions runtime credentials; a plain run step does not.
         uses: ./tools/.github/actions/upload-3d-assets
         env:

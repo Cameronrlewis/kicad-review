@@ -5867,10 +5867,13 @@ assert 'PROCESS3D_INTEGRATION=1' in step and 'node --test ui/compress3d.test.mjs
 assert 'continue-on-error: true' not in step, 'self-test integration gate must block failures'
 assert 'INPUT_ARCHIVE=false' in wf and 'INPUT_RETENTION-DAYS=90' in wf
 assert '_actions/actions/upload-artifact/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/dist/upload/index.js' in wf
-for name in ('Install 3D compression dependencies', 'Compress 3D board models', 'Upload digest-keyed 3D assets'):
+for name in ('Install 3D compression dependencies', 'Compress 3D board models'):
     block = wf.split('name: ' + name, 1)[1].split('\n      - name:', 1)[0]
-    assert 'continue-on-error: true' in block, 'optional 3D must not fail consumer reviews'
-    assert 'hashFiles(' in block.split('run:', 1)[0], '3D steps need actual assets'
+    assert 'continue-on-error: true' in block, f'{name} must be best-effort'
+    assert 'hashFiles(' in block.split('run:', 1)[0], f'{name} needs actual assets'
+upload_3d_block = wf.split('name: Upload digest-keyed 3D assets', 1)[1].split('\n      - name:', 1)[0]
+assert 'continue-on-error: true' not in upload_3d_block, 'CI finding 1: digest-keyed asset upload must become fatal so failure-comment path replaces review'
+assert 'hashFiles(' in upload_3d_block.split('uses:', 1)[0], '3D asset upload needs actual assets'
 assert wf.count("'tools/ui/compress3d.cjs', 'base/kicad-review.toml'") == 2
 cache = wf.split('name: Cache 3D compression dependencies', 1)[1].split('\n      - name:', 1)[0]
 assert '.processed-3d-cache' in cache and 'hashFiles(' in cache
@@ -5881,6 +5884,71 @@ assert 'using: node24' in pathlib.Path('.github/actions/upload-3d-assets/action.
 assert wf.index('name: Upload report\n') < wf.index('name: Upload digest-keyed 3D assets') < wf.index('name: Screenshots of changed drawings')
 assert 'INPUT_OVERWRITE=true INPUT_INCLUDE-HIDDEN-FILES=false' in wf
 print('ok BR02 pair-specific processing workflow, required integration gate and immutable assets')
+
+
+def ci_finding_3_npm_cache_completion_marker_contract():
+    wf_text = pathlib.Path('.github/workflows/review.yml').read_text()
+    install_block = wf_text.split('name: Install 3D compression dependencies', 1)[1].split('\n      - name:', 1)[0]
+    assert '.complete' in install_block, 'CI finding 3: reuse must be gated on completion marker'
+    assert 'node_modules/meshoptimizer' not in install_block.split('if [')[1].split(']; then')[0], 'CI finding 3: do not gate on single meshoptimizer directory'
+    assert 'rm -rf "$DEPS"' in install_block, 'CI finding 3: partial dependency directory must be removed on failure'
+    assert 'node -e' in install_block, 'CI finding 3: dependencies must be verified via require'
+    for pkg in ('@gltf-transform/core', '@gltf-transform/extensions', '@gltf-transform/functions', 'meshoptimizer'):
+        assert pkg in install_block, f'CI finding 3: verification must require {pkg}'
+
+    raw_script = install_block.split('run: |\n', 1)[1]
+    with tempfile.TemporaryDirectory() as td:
+        deps_dir = pathlib.Path(td) / "deps"
+        bin_dir = pathlib.Path(td) / "bin"
+        bin_dir.mkdir()
+        adapted_script = re.sub(r'DEPS="\$HOME/\.cache/kicad-review-meshopt"', f'DEPS="{deps_dir}"', raw_script)
+
+        npm_mock = bin_dir / "npm"
+        npm_log = pathlib.Path(td) / "npm.log"
+        npm_mock.write_text(f"""#!/bin/bash
+echo "$@" >> "{npm_log}"
+if [ "${{FAIL_NPM:-0}}" = "1" ]; then
+  mkdir -p "{deps_dir}/node_modules/meshoptimizer"
+  exit 1
+fi
+mkdir -p "{deps_dir}/node_modules/meshoptimizer"
+mkdir -p "{deps_dir}/node_modules/@gltf-transform/core"
+mkdir -p "{deps_dir}/node_modules/@gltf-transform/extensions"
+mkdir -p "{deps_dir}/node_modules/@gltf-transform/functions"
+echo 'module.exports = {{}};' > "{deps_dir}/node_modules/meshoptimizer/index.js"
+echo '{{"main": "index.js"}}' > "{deps_dir}/node_modules/meshoptimizer/package.json"
+for p in core extensions functions; do
+  echo 'module.exports = {{}};' > "{deps_dir}/node_modules/@gltf-transform/$p/index.js"
+  echo '{{"main": "index.js"}}' > "{deps_dir}/node_modules/@gltf-transform/$p/package.json"
+done
+exit 0
+""")
+        npm_mock.chmod(0o755)
+        env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+
+        # Case 1: Failure scenario - installation fails mid-way
+        r_fail = subprocess.run(["bash", "-c", adapted_script], env={**env, "FAIL_NPM": "1"}, capture_output=True, text=True)
+        assert r_fail.returncode == 0, f"failure should be caught as warning: {r_fail.stderr}"
+        assert "::warning::3D compression dependencies unavailable" in r_fail.stdout or "::warning::3D compression dependencies unavailable" in r_fail.stderr
+        assert not deps_dir.exists() or not any(deps_dir.iterdir()), "partial dependency directory must be deleted on failure"
+        assert not (deps_dir / ".complete").exists(), "completion marker must not be written on failure"
+
+        # Case 2: Poisoned cache scenario
+        (deps_dir / "node_modules/meshoptimizer").mkdir(parents=True)
+        npm_log.unlink(missing_ok=True)
+        r_poison = subprocess.run(["bash", "-c", adapted_script], env=env, capture_output=True, text=True)
+        assert r_poison.returncode == 0, r_poison.stderr
+        assert npm_log.exists(), "npm install must run when .complete is missing, even if meshoptimizer exists"
+        assert (deps_dir / ".complete").exists(), "completion marker must be created after full install"
+
+        # Case 3: Reuse scenario
+        npm_log.unlink()
+        r_reuse = subprocess.run(["bash", "-c", adapted_script], env=env, capture_output=True, text=True)
+        assert r_reuse.returncode == 0, r_reuse.stderr
+        assert not npm_log.exists(), "reuse must skip npm install when .complete exists"
+
+
+ci_finding_3_npm_cache_completion_marker_contract()
 
 
 def br02_processed_sample_contract():
