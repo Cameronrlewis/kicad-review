@@ -6464,3 +6464,91 @@ with _DpTmp() as t:
     finally:
         os.chdir(old_cwd)
 print("ok DP-S4 snapshot events and snapshot-only runs")
+
+# DP-S4C: a revision cached as base restores trusted fabrication when it becomes head.
+with _DpTmp() as t:
+    old_cwd = os.getcwd()
+    saved = kr.load_settings, kr.release_project, kr.release_findings, kr.package_summary
+    try:
+        os.chdir(t)
+        project = {"dir":"P", "name":"P", "status":"added"}
+        historical = json.loads(json.dumps(kr.DEFAULT_SETTINGS))
+        historical["checks"]["release"] = "warn"
+        historical["fabrication"]["preset"] = "jlcpcb"
+        trusted = json.loads(json.dumps(historical)); trusted["fabrication"]["preset"] = "pcbway"
+        trusted["checks"] = {key:"off" for key in trusted["checks"]}; trusted["checks"]["release"] = "warn"
+        kr.load_settings = lambda: json.loads(json.dumps(historical))  # the comparison (base-wins) policy
+        policy = kr.render_settings({"snapshot_settings":trusted})
+        write(t, {"base/P/P.kicad_pro":"{}"})
+        made = []
+        def produce(pro, tag, settings, directory, label):
+            preset = settings["fabrication"]["preset"]
+            made.append((directory, preset))
+            write(t, {f"{directory}/policy.json":json.dumps({"preset":preset})})
+            return []
+        kr.release_project = produce
+        kr.render_fabrication(project, "base", "review/P/base", policy)
+        det = {"base":"a"*40, "head":"a"*40}
+        cache = kr.render_cache(project, "base", det, policy)
+        pathlib.Path(cache).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree("review/P/base", cache, dirs_exist_ok=True)
+        head_cache = kr.render_cache(project, "head", det, policy)
+        assert head_cache == cache
+        shutil.copytree(head_cache, "review/P/head", dirs_exist_ok=True)  # normal revision-cache hit
+        assert made == [("review/P/base/fab", "jlcpcb"), ("review/P/base/fab-snapshot", "pcbway")], made
+        pkg = json.loads(pathlib.Path("review/P/head/fab-snapshot/policy.json").read_text())
+        assert pkg["preset"] == "pcbway" and made.count(("review/P/base", "jlcpcb")) == 0, pkg
+        assert pathlib.Path("review/P/head/fab-snapshot").is_dir(), "snapshot package must survive base-to-head cache restore"
+        write(t, {"head/P/P.kicad_pcb":_dp_pcb(""), "review/P/head/drc.json":"{}"})  # DRC output of the head render
+        kr.release_findings = lambda directory, name, preset, pcb, objects: (assert_policy(directory, preset) or [])
+        kr.package_summary = lambda directory: json.loads(pathlib.Path(directory, "policy.json").read_text())
+        def assert_policy(directory, preset):
+            assert json.loads(pathlib.Path(directory, "policy.json").read_text())["preset"] == preset
+            return None
+        release = next(c for c in kr.project_checks(project, trusted, {"base":{}, "head":{}}, single=True) if c["name"] == "release")
+        assert release["package"]["preset"] == "pcbway" and release["status"] != "missing_package", release
+    finally:
+        kr.load_settings, kr.release_project, kr.release_findings, kr.package_summary = saved
+        os.chdir(old_cwd)
+print("ok DP-S4C base-cache-to-head snapshot policy survives")
+
+# DP-S4F: historical JLCPCB and trusted PCBWay exports/checks must not cross policies.
+with _DpTmp() as t:
+    old_cwd = os.getcwd()
+    saved = kr.load_settings, kr.release_project, kr.release_findings, kr.package_summary
+    try:
+        os.chdir(t)
+        project = {"dir":"P", "name":"P", "status":"added"}
+        historical = json.loads(json.dumps(kr.DEFAULT_SETTINGS))
+        historical["checks"] = {key:"off" for key in historical["checks"]}
+        historical["checks"]["release"] = "warn"
+        historical["fabrication"]["preset"] = "jlcpcb"
+        trusted = json.loads(json.dumps(historical)); trusted["design"]["enabled"] = True
+        trusted["fabrication"]["preset"] = "pcbway"
+        write(t, {"head/P/P.kicad_pro":"{}", "head/P/P.kicad_pcb":_dp_pcb(""), "review/P/head/drc.json":"{}"})
+        kr.load_settings = lambda: json.loads(json.dumps(historical))
+        made = []
+        def produce(pro, tag, settings, directory, label):
+            preset = settings["fabrication"]["preset"]; made.append((directory, preset))
+            write(t, {f"{directory}/policy.json":json.dumps({"preset":preset})})
+            return []
+        def findings(directory, name, preset, pcb, objects):
+            assert json.loads(pathlib.Path(directory, "policy.json").read_text())["preset"] == preset
+            return []
+        kr.release_project = produce; kr.release_findings = findings
+        kr.package_summary = lambda directory: json.loads(pathlib.Path(directory, "policy.json").read_text())
+        policy = kr.render_settings({"snapshot_settings":trusted})
+        kr.render_fabrication(project, "head", "review/P/head", policy)
+        assert made == [("review/P/head/fab", "jlcpcb"), ("review/P/head/fab-snapshot", "pcbway")], made
+        objs = {"base":{}, "head":{}}
+        for single, settings, preset in ((False,historical,"jlcpcb"),(True,trusted,"pcbway")):
+            checks = kr.project_checks(project, settings, objs, single=single)
+            release = next(c for c in checks if c["name"] == "release")
+            assert release["package"]["preset"] == preset, release
+        trusted["fabrication"] = historical["fabrication"].copy(); made.clear()
+        kr.render_fabrication(project, "head", "review/P/head", kr.render_settings({"snapshot_settings":trusted}))
+        assert made == [("review/P/head/fab", "jlcpcb")], "identical policy copies, not re-exports"
+    finally:
+        kr.load_settings, kr.release_project, kr.release_findings, kr.package_summary = saved
+        os.chdir(old_cwd)
+print("ok DP-S4F fabrication packages match each report policy")

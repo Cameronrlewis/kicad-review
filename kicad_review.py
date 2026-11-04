@@ -834,7 +834,31 @@ def render_settings(det):
                 settings[section]["enabled"] |= snapshot[section]["enabled"]
         if snapshot["checks"].get("interfaces", "off") != "off" and settings["checks"].get("interfaces", "off") == "off":
             settings["checks"]["interfaces"] = snapshot["checks"]["interfaces"]
+        # Release checks need the trusted fabrication policy; so will 07's snapshot downloads (its manifest is keyed by it).
+        if snapshot["checks"].get("release", "off") != "off" or snapshot.get("downloads", {}).get("enabled", False):
+            settings["_snapshot_fabrication"] = snapshot["fabrication"]
     return settings
+
+
+def render_fabrication(p, side, out, settings):
+    """fab/ under the comparison policy, fab-snapshot/ under the trusted snapshot policy; never one preset's files relabelled as another.
+
+    fab-snapshot/ is made for either side: the revision cache is shared by base and head."""
+    pro = posixpath.join(side, p["dir"], p["name"] + ".kicad_pro")
+    if not os.path.isfile(pro):
+        return
+    compared = settings["checks"].get("release", "off") != "off"
+    if compared:
+        os.makedirs(f"{out}/fab", exist_ok=True)
+        release_project(pro, "review", settings, f"{out}/fab", p["name"])
+    snapshot = settings.get("_snapshot_fabrication")
+    if snapshot is not None:
+        dest = f"{out}/fab-snapshot"
+        if compared and snapshot == settings["fabrication"]:
+            shutil.copytree(f"{out}/fab", dest, dirs_exist_ok=True)
+        else:
+            os.makedirs(dest, exist_ok=True)
+            release_project(pro, "review", {**settings, "fabrication": snapshot}, dest, p["name"])
 
 
 def restore_renders(args=None):
@@ -902,11 +926,7 @@ def cmd_render(args):
             if settings.get("design", {}).get("enabled", False) and os.path.isfile(board_path(p, side)):
                 _, note = pcbdraw_plot(board_path(p, side), out, pcbdraw_run)
                 pathlib.Path(out, "pcbdraw.json").write_text(json.dumps({"note": note}), encoding="utf-8")
-            if settings["checks"].get("release", "off") != "off":
-                pro = posixpath.join(side, p["dir"], f"{p['name']}.kicad_pro")
-                if os.path.exists(pro):
-                    os.makedirs(f"{out}/fab", exist_ok=True)
-                    release_project(pro, "review", settings, f"{out}/fab", p["name"])
+            render_fabrication(p, side, out, settings)
             print(f"{p['name']}: rendered {side}")
         if settings["libraries"]["enabled"]:
             roots = {side: posixpath.join(side, p["dir"]) for side in ("base", "head")}
@@ -3116,9 +3136,10 @@ def project_checks(p, settings, objs, waivers=None, *, single=False):
             out.append({"name": "release", "title": CHECK_NAMES["release"], "level": settings["checks"]["release"], "status": "not_run",
                         "reason": "no board", "errors": 0, "new_errors": 0, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []})
         else:
-            side = lambda s: release_findings(f"{out_dir}/{s}/fab", p["name"], preset, pcb(s), objs[s]) if os.path.exists(pcb(s)) and not (single and s == "base") else None
+            fab = "fab-snapshot" if single else "fab"  # a design report reads the trusted-policy package
+            side = lambda s: release_findings(f"{out_dir}/{s}/{fab}", p["name"], preset, pcb(s), objs[s]) if os.path.exists(pcb(s)) and not (single and s == "base") else None
             c = run_check("release", settings, side("head"), side("base"))
-            c["package"] = package_summary(f"{out_dir}/head/fab")
+            c["package"] = package_summary(f"{out_dir}/head/{fab}")
             out.append(c)
     ic = interface_check(p, settings, objs, f"review/{project_id(p['dir'])}", single=single)
     return out + ([ic] if ic else [])
