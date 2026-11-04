@@ -1984,20 +1984,25 @@ assert "google-chrome" in test_wf and "CHROME" in test_wf and 'python3 ui/build-
 assert "node --import ./site/css-loader.mjs --test ui/*.test.mjs" in test_wf, "CI must run sandbox downloads"
 with tempfile.TemporaryDirectory() as output:
     subprocess.run([sys.executable, "ui/build-fixtures.py", output], check=True)
-    assert {p.name for p in pathlib.Path(output).iterdir()} == {"3d.html", "two.html", "parts.html", "multiboard.html"}
+    assert {p.name for p in pathlib.Path(output).iterdir()} == {
+        "3d.html", "two.html", "parts.html", "images.html", "processed.html",
+        "single.html", "multiboard.html", "fab.html",
+    }
     text = pathlib.Path(output, "multiboard.html").read_text(encoding="utf-8")
     data = json.loads(text.split("window.REVIEW_DATA = ", 1)[1].split(";</script>", 1)[0])
     assert data["bom"]["summary"]["components"] == 7 and data["bom"]["boards"] == ["Alpha", "Beta"]
-assert "google-chrome" in test_wf and "CHROME" in test_wf and "inline_page" in test_wf, "TS-S1 CI browser setup"
+assert "google-chrome" in test_wf and "CHROME" in test_wf, "TS-S1 CI browser setup"
+build_fixtures_src = pathlib.Path("ui/build-fixtures.py").read_text(encoding="utf-8")
+assert "inline_page" in build_fixtures_src, "TS-S1 fixture generation uses inline_page"
 for command in ('node ui/check.mjs --no-skip "Download dialog"', 'node ui/check.mjs --no-skip "Multi-board BOM" --page "$PAGES/multiboard.html"', 'node ui/check.mjs --no-skip "Fab limits"', 'node ui/check.mjs --no-skip "Fab limits" --dark', 'node ui/check.mjs --no-skip "Fabrication producer contract" --page "$PAGES/fab.html"', 'node ui/check.mjs --no-skip "Fabrication producer contract" --dark --page "$PAGES/fab.html"', 'node ui/check.mjs --no-skip "Waivers"', 'node ui/check.mjs', 'node ui/check.mjs --dark', 'node ui/check.mjs --no-skip "selection-only address"', 'node ui/check.mjs --no-skip "pasted selection address preserves an explicit position"', 'node ui/check.mjs --no-skip "passing checks with baseline findings"', 'node ui/check.mjs --no-skip 3D --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip "unchanged sheet" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "unchanged project" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "Parts fixture" --page "$PAGES/parts.html"', 'node ui/check.mjs --no-skip "Parts fixture" --dark --page "$PAGES/parts.html"'):
     assert "      - run: " + command in test_wf.splitlines(), "TS-S1 CI missing " + command
 assert test_wf.count("    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n") == test_wf.count("timeout-minutes:") == test_wf.count("runs-on:") == 2, "TS-S1 each CI job (test, dark) has one timeout"
 assert "apt-get" not in test_wf and test_wf.count("npm install") == 1, "TS-S1 only pinned 3D integration dependencies"
 for suffix in ('', ' --dark'):
     assert '      - run: node ui/check.mjs --no-skip "BR02 single renderer head only"' + suffix + ' --page "$PAGES/single.html"' in test_wf
-assert "data['mode'] = 'single'" in test_wf and 'review-data-3d-processed.js' in test_wf
+assert "data['mode'] = 'single'" in build_fixtures_src and 'review-data-3d-processed.js' in build_fixtures_src
 # BR02 processed fixture: CI builds it with inline_page and runs every processed check light and dark.
-assert '("processed", "review-data-3d-processed.js")' in test_wf, 'TS-S1 processed fixture missing'
+assert '("processed", "review-data-3d-processed.js")' in build_fixtures_src, 'TS-S1 processed fixture missing'
 runner = pathlib.Path('ui/check.mjs').read_text()
 for command in (
     'node ui/check.mjs --no-skip "BR02 processed" --page "$PAGES/processed.html"',
@@ -2026,10 +2031,11 @@ for command in (
     'node ui/check.mjs --no-skip "images screen and legacy appearance" --dark --width 1440 --height 900 --dpr 2 --page "$PAGES/images.html"',
 ):
     assert "      - run: " + command in test_wf.splitlines(), "TS-S1 CI missing " + command
-assert '("images", "review-data-images.js")' in test_wf, "TS-S1 image fixture missing"
+assert '("images", "review-data-images.js")' in build_fixtures_src, "TS-S1 image fixture missing"
 fixture_block = test_wf.split("      - name: Build browser fixtures\n        run: |\n", 1)[1].split("\n      - ", 1)[0]
-assert '          FAB_REPORT_FIXTURE="$PAGES/fab.html" python3 test_kicad_review.py' in fixture_block.splitlines(), "TS-S1 fab producer must run inside fixture-generation block"
-assert fixture_block.index('export PAGES=') < fixture_block.index('FAB_REPORT_FIXTURE='), "TS-S1 fab producer needs PAGES"
+assert 'test_kicad_review.py' not in fixture_block, "CI finding 4: fixture generation must not rerun the Python suite"
+assert '          python3 ui/build-fixtures.py "$PAGES"' in fixture_block.splitlines(), "TS-S1 fixture generation uses build-fixtures.py"
+assert fixture_block.index('export PAGES=') < fixture_block.index('python3 ui/build-fixtures.py "$PAGES"'), "TS-S1 build-fixtures needs PAGES"
 print("ok TS-S1 CI browser matrix")
 print("ok")
 
@@ -8596,18 +8602,6 @@ wrong = {'active':{('drc',key):{'reason':'house only','by':'reviewer','until':'2
 assert kr.run_check('fab_limits',cfg,[copy.deepcopy(raw_v)],None,wrong)['waived']==0
 right = {'active':{('fab_limits',key):wrong['active'][('drc',key)]}}
 assert kr.run_check('fab_limits',cfg,[copy.deepcopy(raw_v)],None,right)['waived']==1
-
-# Optional integration fixture is built by CI after its PAGES directory exists.
-if os.environ.get('FAB_REPORT_FIXTURE'):
-    sample = pathlib.Path('ui/sample/review-data.js').read_text()
-    data = json.loads(sample.split('=',1)[1].strip().rstrip(';'))
-    project = next(p for p in data['projects'] if p.get('board',{}).get('layers'))
-    data['fabProducerFixture'] = True
-    project['checks'] = [*project['checks'],*(copy.deepcopy(c) for c in produced_fabs.values())]
-    data.setdefault('settings',{}).setdefault('checks',{})['fab_limits']='required'
-    kr.assign_ids(data['projects'])
-    payload = 'window.REVIEW_DATA = '+json.dumps(data).replace('<','\\u003c')+';'
-    pathlib.Path(os.environ['FAB_REPORT_FIXTURE']).write_text(kr.inline_page(payload),encoding='utf-8')
 
 with tempfile.TemporaryDirectory() as td:
     cwd=os.getcwd()
