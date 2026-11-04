@@ -10166,10 +10166,35 @@ def test_f3_malformed_sexpr():
             except ValueError as exc:
                 assert "malformed S-expression" in str(exc)
 
-            # Malformed PCB does not crash render_cache calculation
-            det = {"base": "a" * 40, "head": "b" * 40, "projects": [p]}
-            rc = kr.render_cache(p, "base", det, settings)
-            assert rc is not None and rc.name
+            # Malformed PCB records incomplete evidence and warning; refused as cacheable
+            p_bad = {"dir": "p_bad", "name": "bad"}
+            write("base", {"p_bad/bad.kicad_pcb": "(kicad_pcb\n  (layers\n"})
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                bad_ident = kr.image_export_identity(p_bad, "base")
+            assert bad_ident.get("incomplete") is not None
+            assert "Board layers unavailable: malformed S-expression" in bad_ident["incomplete"]
+            assert bad_ident["layers"] is None
+            assert "bad: malformed board file in base; layer evidence unavailable" in err.getvalue()
+
+            # Warning deduplication on subsequent calls
+            err2 = io.StringIO()
+            with contextlib.redirect_stderr(err2):
+                kr.image_export_identity(p_bad, "base")
+            assert err2.getvalue() == ""
+
+            det_bad = {"base": "a" * 40, "head": "b" * 40, "projects": [p_bad]}
+            assert kr.render_cache(p_bad, "base", det_bad, settings) is None
+            assert kr.image_cache_complete(cache, p_bad, "base") is False
+            assert kr.render_cache_complete(cache, p_bad, "base", settings) is False
+
+            # cache_renders does not persist incomplete identity for malformed PCB
+            write("review", {"detect.json": json.dumps(det_bad)})
+            out_bad = pathlib.Path("review/p_bad/base")
+            out_bad.mkdir(parents=True, exist_ok=True)
+            with patch.object(kr, "load_settings", return_value=settings):
+                kr.cache_renders()
+            assert not (cache / ".complete").exists() or kr.image_cache_complete(cache, p_bad, "base") is False
         finally:
             os.chdir(old)
 

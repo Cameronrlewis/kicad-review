@@ -914,15 +914,29 @@ def glb_input_digest(p, side):
     return digest.hexdigest()
 
 
+_board_warnings = set()
+
+
 def image_export_identity(p, side):
     """Explicit image inputs shared by host restore and the pinned renderer."""
     pcb = board_path(p, side)
-    try:
-        layers = board_layers(pcb) if os.path.isfile(pcb) else []
-    except (OSError, ValueError):
-        layers = []
-    return {'renderer': IMAGE_RENDERER, 'options': IMAGE_EXPORT_OPTIONS,
-            'layers': layers, 'palettes': IMAGE_PALETTES}
+    layers = []
+    incomplete = None
+    if os.path.isfile(pcb):
+        try:
+            layers = board_layers(pcb)
+        except (OSError, ValueError) as exc:
+            layers = None
+            incomplete = f"Board layers unavailable: {exc}"
+            key = (posixpath.join(side, p.get("dir", "")), p.get("name", ""))
+            if key not in _board_warnings:
+                _board_warnings.add(key)
+                print("::warning::" + workflow_command_escape(f"{p['name']}: malformed board file in {side}; layer evidence unavailable"), file=sys.stderr)
+    identity = {'renderer': IMAGE_RENDERER, 'options': IMAGE_EXPORT_OPTIONS,
+                'layers': layers, 'palettes': IMAGE_PALETTES}
+    if incomplete is not None:
+        identity['incomplete'] = incomplete
+    return identity
 
 
 def image_cache_complete(cache, p, side):
@@ -930,7 +944,10 @@ def image_cache_complete(cache, p, side):
     if IMAGE_RENDERER == 'local-unverified':
         return False
     try:
-        return json.loads((cache / '.complete').read_text(encoding='utf-8')) == image_export_identity(p, side)
+        ident = image_export_identity(p, side)
+        if ident.get('incomplete'):
+            return False
+        return json.loads((cache / '.complete').read_text(encoding='utf-8')) == ident
     except (OSError, ValueError):
         return False
 
@@ -945,7 +962,10 @@ def render_cache(p, side, det, settings):
               "glb": glb_argv("PCB", pathlib.Path(".")), "poster": poster_argv("PCB", pathlib.Path(".")),
               "board_models": glb_input_digest(p, side)}
     identity = pathlib.Path(__file__).read_bytes() + json.dumps(inputs, sort_keys=True).encode()
-    identity += json.dumps(image_export_identity(p, side), sort_keys=True, separators=(',', ':')).encode()
+    img_ident = image_export_identity(p, side)
+    if img_ident.get("incomplete"):
+        return None
+    identity += json.dumps(img_ident, sort_keys=True, separators=(',', ':')).encode()
     needs_downloads = side == "head" and (settings.get("downloads", {}).get("enabled") or settings["checks"].get("release", "off") != "off")
     if needs_downloads:
         identity += b"\0head-downloads-v1"
@@ -982,10 +1002,13 @@ def cache_renders(args=None):
             cache = render_cache(p, side, det, settings)
             out = pathlib.Path(f"review/{project_id(p['dir'])}/{side}")
             if cache and out.is_dir():
+                ident = image_export_identity(p, side)
+                if ident.get("incomplete"):
+                    continue
                 if cache.exists():
                     shutil.rmtree(cache)
                 shutil.copytree(out, cache, dirs_exist_ok=True)
-                (cache / '.complete').write_text(json.dumps(image_export_identity(p, side), sort_keys=True), encoding='utf-8')
+                (cache / '.complete').write_text(json.dumps(ident, sort_keys=True), encoding='utf-8')
 
 
 def cmd_copper(args):
@@ -1013,6 +1036,7 @@ def cmd_copper(args):
 
 def cmd_render(args):
     _sheet_warnings.clear()
+    _board_warnings.clear()
     with open("review/detect.json", encoding="utf-8") as fh:
         det = json.load(fh)
     settings = load_settings()
@@ -5577,6 +5601,7 @@ def merge_supplier(projects, lookup):
 
 def cmd_report(args):
     _sheet_warnings.clear()
+    _board_warnings.clear()
     with open("review/detect.json", encoding="utf-8") as fh:
         det = json.load(fh)
     blobs = {}
