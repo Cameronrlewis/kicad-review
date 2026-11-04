@@ -9973,7 +9973,7 @@ print("ok downloads documented")
 
 # F2: Multi-unit symbols split across sheets preserve net membership, proven pins, and project net diff.
 def test_f2_cross_sheet_multi_unit():
-    from kicad_review import electrical_changes, net_members, schematic_pin_ids
+    from kicad_review import candidate_identity_valid, electrical_changes, net_members, schematic_pin_ids
     base_net = (
         "(export"
         " (components (comp (ref U1) (libsource (lib Device) (part Dual)))"
@@ -10039,6 +10039,17 @@ def test_f2_cross_sheet_multi_unit():
     assert dup_nets == {"SIG": None, "VCC": None} and not dup_anchors, (dup_nets, dup_anchors)
     assert all(i["unknown"] for i in dup_issues) and len(dup_issues) == 2, dup_issues
     assert schematic_pin_ids(base_net, dup_cross_sheet) == set()
+
+    # Shared candidate_identity_valid predicate handles both symbol objects and (uid, obj) tuples.
+    assert candidate_identity_valid([]) is False
+    assert candidate_identity_valid([obj("U1", "1", "/")]) is True
+    assert candidate_identity_valid([("ua", obj("U1", "1", "/"))]) is True
+    assert candidate_identity_valid([obj("U1", "1", None)]) is False
+    assert candidate_identity_valid([("ua", obj("U1", "1", None))]) is False
+    assert candidate_identity_valid([obj("U1", "1", "/"), obj("U1", "2", "/power/")]) is True
+    assert candidate_identity_valid([("ua", obj("U1", "1", "/")), ("ub", obj("U1", "2", "/power/"))]) is True
+    assert candidate_identity_valid([obj("U1", "1", "/"), obj("U1", "1", "/power/")]) is False
+    assert candidate_identity_valid([("ua", obj("U1", "1", "/")), ("ub", obj("U1", "1", "/power/"))]) is False
 
 
 test_f2_cross_sheet_multi_unit()

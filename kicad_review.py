@@ -4224,6 +4224,17 @@ def parse_netlist(text):
     return comps, nets
 
 
+def candidate_identity_valid(candidates):
+    """True when symbol candidates have known sheets and distinct unit numbers."""
+    if not candidates:
+        return False
+    objs = [c[1] if isinstance(c, tuple) else c for c in candidates]
+    units = [o.get("props", {}).get("unit", "1") for o in objs]
+    if len(units) != len(set(units)):
+        return False
+    return not any((o.get("where") or {}).get("sheet") is None for o in objs)
+
+
 def net_members(text, objects, commit):
     """Return observed members, candidate anchors and net-scoped wiring issues.
 
@@ -4254,12 +4265,10 @@ def net_members(text, objects, commit):
             if ref.startswith("#"):  # Power symbols and flags (ref starts with '#') are skipped; they are not fabricated as component pins
                 continue
             candidates = by_ref.get(ref, [])
-            units = [o["props"].get("unit", "1") for _, o in candidates]
             invalid = not ref or "?" in ref
             # A missing or unannotated reference has no UUID in the netlist node, so only a single matching symbol candidate can be disambiguated.
-            ambiguous = (not pin or not candidates
-                         or any((o.get("where") or {}).get("sheet") is None for _, o in candidates)
-                         or len(units) != len(set(units))
+            ambiguous = (not pin
+                         or not candidate_identity_valid(candidates)
                          or (invalid and len(candidates) != 1))
             if ambiguous:
                 unknown = True
@@ -4594,9 +4603,7 @@ def schematic_pin_ids(text, objects):
     for comp in components:
         ref = val(comp, "ref")
         candidates = refs.get(ref, [])
-        units = [o["props"].get("unit", "1") for o in candidates]
-        if (not ref or "?" in ref or not candidates or len(units) != len(set(units))
-                or any((o.get("where") or {}).get("sheet") is None for o in candidates)):
+        if not ref or "?" in ref or not candidate_identity_valid(candidates):
             continue
         if sum(val(c, "ref") == ref for c in components) != 1:
             continue
