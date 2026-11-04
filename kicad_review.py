@@ -996,6 +996,16 @@ def downloads_valid(cache, purpose, policy):
     return envelope.get("purpose") == purpose and envelope.get("policy") == download_policy_key(policy)
 
 
+def pcbdraw_settled(cache):
+    """pcbdraw.json records plots or a deterministic skip (no closed outline). A failure is retried on the next cache hit.
+    ponytail: a board PcbDraw always fails on is retried every run (at most 2 x 300 s); add an attempt counter if that cost shows up."""
+    try:
+        note = json.loads(pathlib.Path(cache, "pcbdraw.json").read_text(encoding="utf-8")).get("note", "")
+    except (OSError, ValueError, AttributeError):
+        return False
+    return isinstance(note, str) and not note.startswith("PcbDraw failed")
+
+
 def raw_glb_valid(cache):
     """07's download source: 02's uncompressed board.raw.glb, non-empty."""
     raw = pathlib.Path(cache, "board.raw.glb")
@@ -1020,6 +1030,8 @@ def missing_products(cache, p, side, settings, purposes):
     # fab files but never produce raw GLB, so requiring raw GLB for release-only would cause permanent cache misses.
     elif side == "head" and settings.get("downloads", {}).get("enabled") and board and not raw_glb_valid(cache) and not attempted:
         missing.append("glb")
+    if settings["design"]["enabled"] and board and not pcbdraw_settled(cache):
+        missing.append("pcbdraw")
     if settings["checks"].get("release", "off") != "off" and not nonempty_dir(cache / "fab"):
         missing.append("fab")
     if settings.get("_snapshot_fabrication") is not None and not nonempty_dir(cache / "fab-snapshot"):
@@ -1285,7 +1297,7 @@ def cmd_render(args):
                     else:
                         export_glb(p, side, out, model=export_3d)
                         record_glb_revision(out, det.get(side))
-            if settings.get("design", {}).get("enabled", False) and board and (missing is None or not pathlib.Path(out, "pcbdraw.json").is_file()):
+            if settings.get("design", {}).get("enabled", False) and board and (missing is None or "pcbdraw" in missing):
                 _, note = pcbdraw_plot(board_path(p, side), out, pcbdraw_run)
                 pathlib.Path(out, "pcbdraw.json").write_text(json.dumps({"note": note}), encoding="utf-8")
             render_fabrication(p, side, out, settings, ("fab", "fab-snapshot") if missing is None else missing)

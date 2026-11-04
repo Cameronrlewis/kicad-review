@@ -11195,3 +11195,46 @@ assert kr._png_decode(_dp_grad_png)[3] == _dp_grad
 _dp_idat = zlib.decompress(_dp_grad_png[_dp_grad_png.index(b"IDAT") + 4:_dp_grad_png.index(b"IEND") - 8])
 assert any(_dp_idat[y * (1 + 300 * 3)] != 0 for y in range(120)), "every row was left unfiltered"
 print("ok Session E 5 thumbnails stay within the review site's limit")
+
+# Session E 16: a PcbDraw failure is not cached for good; a missing outline (deterministic) is.
+with _DpTmp() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        pr = {"dir": "P", "name": "P", "status": "added"}
+        det = {"base": None, "head": "b" * 40, "reason": "t", "projects": [pr]}
+        write(t, {"review/detect.json": json.dumps(det), "head/P/P.kicad_pcb": _dp_pcb("")})
+        settings = json.loads(json.dumps(kr.DEFAULT_SETTINGS)); settings["design"]["enabled"] = True
+        cache = pathlib.Path("probe"); cache.mkdir()
+        (cache / "poster.png.failed").write_text("x")
+        assert kr.missing_products(cache, pr, "head", settings, ("comparison",)) == ["pcbdraw"], "no PcbDraw record yet"
+        for note, expected in (("", []), ("PcbDraw skipped: no closed Edge.Cuts outline.", []),
+                               ("PcbDraw failed for both faces: see the job log.", ["pcbdraw"]), ("PcbDraw failed for back face: see the job log.", ["pcbdraw"])):
+            (cache / "pcbdraw.json").write_text(json.dumps({"note": note}))
+            assert kr.missing_products(cache, pr, "head", settings, ("comparison",)) == expected, (note, expected)
+        plotted = []
+        def plot(outcome):
+            def run(argv):
+                out = _dpre.search(r'"([^"]+\.svg)"\]; run', argv[2]).group(1)
+                plotted.append(pathlib.Path(out).name)
+                if outcome == "ok":
+                    pathlib.Path(out).write_text('<svg xmlns="http://www.w3.org/2000/svg"/>')
+                    return 0, ""
+                return 1, "boom"
+            return run
+        glb = lambda p, side, out, **kw: (pathlib.Path(out).mkdir(parents=True, exist_ok=True), pathlib.Path(out, "poster.png.failed").write_text("x"))
+        render = lambda src, name, out, **kw: (pathlib.Path(out).mkdir(parents=True, exist_ok=True), pathlib.Path(out, "drc.json").write_text("{}"))
+        with patch.object(kr, "load_settings", return_value=settings), patch.object(kr, "render_side", side_effect=render) as rs, \
+             patch.object(kr, "export_glb", side_effect=glb), patch.object(kr, "IMAGE_RENDERER", "verified-10.0.6"), \
+             patch.object(kr, "render_tool_identity", return_value="KiCad 10.0.0"), patch("sys.stdout", new_callable=io.StringIO), patch("sys.stderr", new_callable=io.StringIO):
+            with patch.object(kr, "pcbdraw_run", side_effect=plot("fail")):
+                kr.cmd_render(None)
+            assert json.loads(pathlib.Path("review/P/head/pcbdraw.json").read_text())["note"].startswith("PcbDraw failed")
+            shutil.rmtree("review/P"); plotted.clear(); rs.reset_mock()
+            with patch.object(kr, "pcbdraw_run", side_effect=plot("ok")):
+                kr.cmd_render(None)   # the revision cache hit retries the plots instead of keeping the failure
+            assert rs.call_count == 0 and plotted == ["pcbdraw-front.svg", "pcbdraw-back.svg"], (rs.call_count, plotted)
+            assert json.loads(pathlib.Path("review/P/head/pcbdraw.json").read_text()) == {"note": ""}
+    finally:
+        os.chdir(old_cwd)
+print("ok Session E 16 PcbDraw failures are retried on a revision-cache hit")
