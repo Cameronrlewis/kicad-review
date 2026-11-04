@@ -57,9 +57,27 @@ export function parseThreads(graphql) {
   });
 }
 
-// ponytail: first 100 threads and 50 comments each; readiness is unknown above 100 threads; paginate if needed.
-export const LIST_QUERY = 'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){headRefOid reviewThreads(first:100){totalCount nodes{id isResolved resolvedBy{login} comments(first:50){nodes{databaseId body author{login} createdAt url}}}}}}}';
+// ponytail: cursor-paginate threads and comments up to 10 pages each; fail closed if truncated.
+export const LIST_QUERY = 'query($owner:String!,$name:String!,$number:Int!,$after:String){repository(owner:$owner,name:$name){pullRequest(number:$number){headRefOid reviewThreads(first:100,after:$after){totalCount pageInfo{hasNextPage endCursor} nodes{id isResolved resolvedBy{login} comments(first:50){totalCount pageInfo{hasNextPage endCursor} nodes{databaseId body author{login} createdAt url}}}}}}}';
+export const COMMENTS_QUERY = 'query($threadId:ID!,$after:String){node(id:$threadId){... on PullRequestReviewThread{comments(first:50,after:$after){totalCount pageInfo{hasNextPage endCursor} nodes{databaseId body author{login} createdAt url}}}}}';
 export const threadMutation = (op) => `mutation($id:ID!){${op}ReviewThread(input:{threadId:$id}){thread{isResolved}}}`;
+
+// Shared bounded pagination helper for GitHub REST list endpoints (100 items/page, max 10 pages).
+// Bound hit: ok is false (callers that need a complete scan fail closed); items holds the pages read.
+export async function ghPages(ghFn, path, token, extract = x => x) {
+  const sep = path.includes('?') ? '&' : '?';
+  const items = [];
+  for (let page = 1; page <= 10; page += 1) {
+    const suffix = page === 1 ? 'per_page=100' : `per_page=100&page=${page}`;
+    const response = await ghFn(`${path}${sep}${suffix}`, token);
+    if (!response.ok) return { ok: false, response };
+    const rows = extract(await response.json());
+    if (!Array.isArray(rows)) return { ok: false, response };
+    items.push(...rows);
+    if (rows.length < 100) return { ok: true, items };
+  }
+  return { ok: false, overflow: true, items };
+}
 
 export const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json; charset=utf-8' } });
 const permissionHint = "Threads need the app's Pull requests and Contents permissions (read and write). Ask the repository owner to accept them.";
@@ -107,9 +125,41 @@ export async function threadsRoute(request, env, { owner, repo, number, rest }, 
     const text = typeof body.text === 'string' ? body.text.trim() : '';
     if (request.method === 'GET') {
       if (rest !== '') return json({ error: 'Not found' }, 404);
-      const data = await graphql(LIST_QUERY, { owner, name: repo, number });
-      if (data instanceof Response) return data;
-      return json({ threads: parseThreads(data), head: data?.data?.repository?.pullRequest?.headRefOid || null });
+      const nodes = [];
+      let head = null, after;
+      for (let page = 1; ; page++) {
+        const data = await graphql(LIST_QUERY, { owner, name: repo, number, ...(after ? { after } : {}) });
+        if (data instanceof Response) return data;
+        const pr = data?.data?.repository?.pullRequest;
+        const rt = pr?.reviewThreads;
+        if (!Array.isArray(rt?.nodes)) break;
+        if (page === 1) head = pr?.headRefOid || null;
+        nodes.push(...rt.nodes);
+        const more = rt.pageInfo?.hasNextPage || (rt.totalCount > nodes.length && Boolean(rt.pageInfo?.endCursor));
+        if (!more) {
+          if (rt.totalCount > nodes.length) return json({ error: 'GitHub did not answer. Try again.' }, 502);
+          break;
+        }
+        if (page >= 10 || !rt.pageInfo?.endCursor) return json({ error: 'GitHub did not answer. Try again.' }, 502);
+        after = rt.pageInfo.endCursor;
+      }
+      for (const node of nodes) {
+        const c = node?.comments;
+        if (!c || !Array.isArray(c.nodes) || !parseAnchor(c.nodes[0]?.body)) continue;
+        let cAfter = c.pageInfo?.endCursor;
+        let cMore = c.pageInfo?.hasNextPage || c.totalCount > c.nodes.length;
+        for (let page = 1; cMore; page++) {
+          if (page >= 10 || !cAfter) return json({ error: 'GitHub did not answer. Try again.' }, 502);
+          const extra = await graphql(COMMENTS_QUERY, { threadId: String(node.id), after: cAfter });
+          if (extra instanceof Response) return extra;
+          const next = extra?.data?.node?.comments;
+          if (!Array.isArray(next?.nodes)) return json({ error: 'GitHub did not answer. Try again.' }, 502);
+          c.nodes.push(...next.nodes);
+          cAfter = next.pageInfo?.endCursor;
+          cMore = next.pageInfo?.hasNextPage || next.totalCount > c.nodes.length;
+        }
+      }
+      return json({ threads: parseThreads({ data: { repository: { pullRequest: { reviewThreads: { nodes } } } } }), head });
     }
     if (rest === '') {
       const prefix = `/r/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/a/`;

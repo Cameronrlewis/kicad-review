@@ -1,5 +1,5 @@
 // Anchored GitHub issues share the review-thread marker; GitHub remains the store.
-import { parseAnchor, threadBody, validAnchor } from './threads.js';
+import { parseAnchor, threadBody, validAnchor, ghPages } from './threads.js';
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json; charset=utf-8' } });
 const positive = n => Number.isSafeInteger(n) && n > 0;
@@ -11,12 +11,12 @@ const issueURL = (url, number, owner, repo) => {
   } catch { return false; }
 };
 
-export function parseIssues(list, owner, repo) {
+export function parseIssues(list, owner, repo, max = 100) {
   return (Array.isArray(list) ? list : []).flatMap(i => {
     if (!i || 'pull_request' in Object(i) || i.state && i.state !== 'open' || !positive(i.number) || !issueURL(i.html_url, i.number, owner, repo)) return [];
     const anchor = parseAnchor(i.body);
     return anchor ? [{ number: i.number, title: String(i.title || ''), url: i.html_url, anchor, state: 'open' }] : [];
-  }).slice(0, 100);
+  }).slice(0, max);
 }
 
 const sameAnchor = (a, b) => ['project', 'file', 'ref', 'x', 'y'].every(key => a[key] === b[key]);
@@ -44,17 +44,16 @@ export async function issuesRoute(request, env, { owner, repo, rest }, { access,
   const result = await (async () => {
     if (rest !== '') return json({ error: 'Not found' }, 404);
     const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, token = allowed.s.token;
-    const loadIssues = async () => {
-      // ponytail: first 100 open issues; paginate if a repository ever anchors more.
-      const response = await gh(`${root}/issues?state=open&per_page=100`, token);
-      const denied = refused(response); if (denied) return denied;
-      if (!response.ok) return json({ error: 'GitHub did not load issues. Try again.' }, 502);
-      const list = await response.json();
-      if (!Array.isArray(list)) return json({ error: 'GitHub did not load issues. Try again.' }, 502);
-      return parseIssues(list, owner, repo);
+    const loadIssues = async (max = 100) => {
+      const paged = await ghPages(gh, `${root}/issues?state=open`, token);
+      if (!paged.ok) {
+        const denied = paged.response && refused(paged.response);
+        return denied || json({ error: 'GitHub did not load issues. Try again.' }, 502);
+      }
+      return parseIssues(paged.items, owner, repo, max);
     };
     if (request.method === 'GET') {
-      const issues = await loadIssues();
+      const issues = await loadIssues(100);
       return issues instanceof Response ? issues : json({ issues });
     }
     if (request.method !== 'POST') return json({ error: 'Method not allowed' }, 405);
@@ -70,7 +69,7 @@ export async function issuesRoute(request, env, { owner, repo, rest }, { access,
       || !link || link.origin !== url.origin || !link.pathname.startsWith(prefix) || !/^\d{1,20}(?:#[\w\-.:/%=&]*)?$/.test(body.link.slice(prefix.length))
       || body.pull != null && !positive(body.pull) || body.threadCommentId != null && (!positive(body.threadCommentId) || !positive(body.pull))) return json({ error: 'That issue is not valid.' }, 400);
     if (!allowed.repo?.permissions?.push) return json({ error: 'You need write access to create issues.' }, 403);
-    const issues = await loadIssues();
+    const issues = await loadIssues(Infinity);
     if (issues instanceof Response) return issues;
     const existing = issues.find(issue => sameAnchor(issue.anchor, body.anchor));
     if (existing) return json({ error: 'An open issue already tracks this location.', url: existing.url }, 409);

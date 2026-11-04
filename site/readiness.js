@@ -1,5 +1,5 @@
 // Merge readiness derives from GitHub reviews and anchored review threads.
-import { LIST_QUERY, parseThreads, refused, accessFailure, sessionResponse, json } from './threads.js';
+import { LIST_QUERY, parseThreads, refused, accessFailure, sessionResponse, json, ghPages } from './threads.js';
 
 export function latestDecisions(reviews, head) {
   const latest = new Map();
@@ -19,12 +19,12 @@ export async function readinessRoute(request, env, { owner, repo, number }, { ac
     const token = allowed.s.token, root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
     const [pull, reviews, threads] = await Promise.all([
       gh(`${root}/pulls/${number}`, token),
-      gh(`${root}/pulls/${number}/reviews?per_page=100`, token), // ponytail: first 100 reviews; paginate if reviews exceed this ceiling.
+      ghPages(gh, `${root}/pulls/${number}/reviews`, token),
       gh('/graphql', token, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query: LIST_QUERY, variables: { owner, name: repo, number } }) }).catch(() => null),
     ]);
-    const denied = (pull.status === 403 && refused(pull)) || (reviews.status === 403 && refused(reviews));
+    const denied = (pull.status === 403 && refused(pull)) || (!reviews.ok && reviews.response?.status === 403 && refused(reviews.response));
     if (denied) return denied;
-    if (pull.status === 404 || reviews.status === 404) return json({ error: 'Pull request not found.' }, 404);
+    if (pull.status === 404 || (!reviews.ok && reviews.response?.status === 404)) return json({ error: 'Pull request not found.' }, 404);
     if (!pull.ok || !reviews.ok) return json({ error: 'GitHub did not answer. Try again.' }, 502);
     const pr = await pull.json(), head = pr.head?.sha || null;
     if (!head) return json({ error: 'GitHub did not answer. Try again.' }, 502);
@@ -37,7 +37,7 @@ export async function readinessRoute(request, env, { owner, repo, number }, { ac
       try { list = parseThreads(body).filter((t) => !t.resolved); } catch { /* unreadable */ }
     }
     return json({
-      head, decisions: latestDecisions(await reviews.json(), head),
+      head, decisions: latestDecisions(reviews.items, head),
       requested: (pr.requested_reviewers || []).map((u) => u.login),
       blocking: list ? list.filter((t) => t.anchor.severity === 'blocking').length : null,
       open: list ? list.length : null,

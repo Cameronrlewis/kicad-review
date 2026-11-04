@@ -6,7 +6,7 @@ import { verifyReportFamily } from './report-kind.js';
 export { readStoredData } from './report-shell.js';
 import { deploymentPage, escapeHtml, sharedPage, sharedNotFoundPage, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, historyPage, stages, stageForStep } from './pages.js';
 
-import { threadsRoute } from './threads.js';
+import { threadsRoute, ghPages } from './threads.js';
 import { issuesRoute } from './issues.js';
 import { historyRoute } from './history.js';
 
@@ -227,10 +227,10 @@ async function pdfArtifact(owner, repo, id, token) {
     if (metadata.expired || !/^kicad-review-(?:[0-9a-f]{7}|none)-[0-9a-f]{7}-(?:pass|fail)\.html$/.test(metadata.name)) return null;
     const runId = metadata.workflow_run?.id;
     if (!/^\d{1,20}$/.test(String(runId))) return null;
-    const list = await gh(`${root}/runs/${runId}/artifacts?per_page=100`, token);
-    if (!list.ok) return null;
+    const paged = await ghPages(gh, `${root}/runs/${runId}/artifacts`, token, d => d?.artifacts);
+    if (!paged.ok) return null;
     const name = metadata.name.slice(0, -5) + '.pdf';
-    return ((await list.json()).artifacts || []).find((a) => !a.expired && a.name === name && /^\d{1,20}$/.test(String(a.id))) || null;
+    return paged.items.find((a) => !a.expired && a.name === name && /^\d{1,20}$/.test(String(a.id))) || null;
   } catch { return null; }
 }
 
@@ -270,17 +270,10 @@ async function downloadFile(owner, repo, id, index, kind, active) {
     if (report.expired || !family || !/^\d{1,20}$/.test(String(runId))) return downloadError(active);
     const bundleName = `kicad-${family}-downloads-${head7}`;
     // Every page of the run's artifacts is read: 02 adds digest assets, so the bundle can sit past the first 100.
-    const found = [];
-    let complete = false;
-    for (let page = 1; page <= 10 && !complete; page += 1) {
-      const list = await gh(`${root}/runs/${runId}/artifacts?per_page=100&page=${page}`, active.token);
-      if (!list.ok) return downloadError(active);
-      const rows = (await list.json()).artifacts;
-      if (!Array.isArray(rows)) return downloadError(active);
-      found.push(...rows.filter((a) => !a?.expired && a?.name === bundleName && a.workflow_run?.id === runId && /^\d{1,20}$/.test(String(a.id))));
-      complete = rows.length < 100;
-    }
-    if (!complete || found.length !== 1) return downloadError(active);  // zero, several or unpaged matches are refused
+    const paged = await ghPages(gh, `${root}/runs/${runId}/artifacts`, active.token, d => d?.artifacts);
+    if (!paged.ok) return downloadError(active);
+    const found = paged.items.filter((a) => !a?.expired && a?.name === bundleName && a.workflow_run?.id === runId && /^\d{1,20}$/.test(String(a.id)));
+    if (found.length !== 1) return downloadError(active);  // zero, several or unpaged matches are refused
     const bundle = found[0];
     const zip = await gh(`${root}/artifacts/${bundle.id}/zip`, active.token, { redirect: 'manual' });
     if (zip.status !== 302) return downloadError(active);
@@ -487,14 +480,10 @@ async function artifact3d(request, env, owner, repo, id, digest, kind) {
       const descriptor = (Array.isArray(data.projects) ? data.projects : []).flatMap((p) => ['base', 'head'].map((side) => p?.board?.assets3d?.[side]?.[key]))
         .find((a) => a?.digest === digest && a.artifactName === name && Number.isSafeInteger(a.bytes) && a.bytes > 0 && a.bytes <= maxBytes);
       if (!descriptor) return assetError();
-      const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions`, matches = [];
-      for (let page = 1; ; page++) {
-        const list = await gh(`${root}/runs/${run}/artifacts?per_page=100&page=${page}`, active.token);
-        const artifacts = list.ok ? (await list.json()).artifacts : null;
-        if (!Array.isArray(artifacts)) return assetError();
-        matches.push(...artifacts.filter((a) => a?.name === name));
-        if (artifacts.length < 100) break;
-      }
+      const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions`;
+      const paged = await ghPages(gh, `${root}/runs/${run}/artifacts`, active.token, d => d?.artifacts);
+      if (!paged.ok) return assetError();
+      const matches = paged.items.filter((a) => a?.name === name);
       const [match] = matches;
       if (matches.length !== 1 || match.expired || String(match.workflow_run?.id) !== run || !/^\d{1,20}$/.test(String(match.id))
         || (match.size_in_bytes != null && (!Number.isSafeInteger(match.size_in_bytes) || match.size_in_bytes <= 0 || match.size_in_bytes > maxBytes))) return assetError();
@@ -581,8 +570,10 @@ function repoPath(owner, repo) {
   return `/r/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
 }
 
+// Listing pages (here and branches, tags, pulls) show what the 10-page bound read; detection paths use ghPages directly and fail closed.
 async function artifactList(owner, repo, token) {
-  return gh(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/artifacts?per_page=100`, token);
+  const paged = await ghPages(gh, `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/artifacts`, token, d => d?.artifacts);
+  return paged.overflow ? { ok: true, items: paged.items } : paged;
 }
 
 async function home(request, env) {
@@ -677,8 +668,8 @@ async function reviewList(request, env, owner, repo, url) {
   const allowed = await access(request, env, owner, repo);
   if (allowed instanceof Response) return allowed;
   try {
-    const artifactResponse = await artifactList(owner, repo, allowed.s.token);
-    const artifacts = artifactResponse.ok ? (await artifactResponse.json()).artifacts || [] : [];
+    const pagedArtifacts = await artifactList(owner, repo, allowed.s.token);
+    const artifacts = pagedArtifacts.ok ? pagedArtifacts.items : [];
     const list = reviews(artifacts);
     const items = list.map((item) => {
       const event = item.workflow_run?.event;
@@ -707,9 +698,8 @@ async function reviewList(request, env, owner, repo, url) {
     let groups = null;
     if (view === 'milestones') {
       try {
-        // ponytail: latest 100 PRs, matching the artifact list's bounded history.
-        const pullsResponse = await gh(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls?state=all&sort=created&direction=desc&per_page=100`, allowed.s.token);
-        if (pullsResponse.ok) groups = milestoneGroups(filtered, await pullsResponse.json());
+        const pulls = await ghPages(gh, `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls?state=all&sort=created&direction=desc`, allowed.s.token);
+        if (pulls.ok || pulls.overflow) groups = milestoneGroups(filtered, pulls.items);
       } catch { /* Keep the page available with permission guidance. */ }
     }
     return sessionResponse(reviewsPage({
@@ -723,22 +713,28 @@ async function reviewList(request, env, owner, repo, url) {
 
 async function commitsData(owner, repo, token, branch, tag = '') {
   const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
-  const [branchesResponse, tagsResponse, artifactsResponse] = await Promise.all([
-    gh(`${root}/branches?per_page=100`, token),
-    gh(`${root}/tags?per_page=100`, token),
+  const [branchesPaged, tagsPaged, artifactsPaged] = await Promise.all([
+    ghPages(gh, `${root}/branches`, token),
+    ghPages(gh, `${root}/tags`, token),
     artifactList(owner, repo, token),
   ]);
-  const branches = branchesResponse.ok ? await branchesResponse.json() : [];
-  const tags = tagsResponse.ok ? await tagsResponse.json() : [];
+  const branches = (branchesPaged.ok || branchesPaged.overflow) ? branchesPaged.items : [];
+  const tags = (tagsPaged.ok || tagsPaged.overflow) ? tagsPaged.items : [];
   const selectedTag = tag ? tags.find((item) => item.name === tag) : null;
   const sha = selectedTag?.commit?.sha;
   if (tag && !sha) return null;
   const commitsResponse = await gh(`${root}/commits?sha=${encodeURIComponent(sha || branch)}&per_page=50`, token);
   if (!commitsResponse.ok) return null;
   const commitList = await commitsResponse.json();
-  const artifacts = artifactsResponse.ok ? (await artifactsResponse.json()).artifacts || [] : [];
+  const artifacts = artifactsPaged.ok ? artifactsPaged.items : [];
   const reviewList = reviews(artifacts);
-  const byHead = new Map(reviewList.filter((item) => item.head !== '?').map((item) => [String(item.head).slice(0, 7), item]));
+  const byHead = new Map();
+  for (const item of reviewList) {
+    if (item.head !== '?') {
+      const key = String(item.head).slice(0, 7);
+      if (!byHead.has(key)) byHead.set(key, item);
+    }
+  }
   return {
     branch, tags: tags.map((item) => ({ name: String(item.name || '') })).filter((item) => item.name),
     branches: branches.map((item) => item.name), tag,
@@ -857,10 +853,12 @@ async function run(request, env, owner, repo, id, url) {
     }), { headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
   }
   try {
-    const artifactsResponse = await gh(`${root}/actions/runs/${id}/artifacts`, allowed.s.token);
-    if (artifactsResponse.status !== 200) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
-    const artifacts = (await artifactsResponse.json()).artifacts || [];
-    const artifact = reviews(artifacts)[0];
+    const paged = await ghPages(gh, `${root}/actions/runs/${id}/artifacts`, allowed.s.token, d => d?.artifacts);
+    if (!paged.ok) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
+    const artifacts = paged.items;
+    const matched = reviews(artifacts);
+    if (new Set(matched.map(a => a.name)).size > 1) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
+    const artifact = matched[0];
     if (artifact) return sessionRedirect(`${repoPath(owner, repo)}/a/${encodeURIComponent(artifact.id)}${matchingPdf(artifacts, artifact) ? '?pdf=1' : ''}`, 302, allowed.s);
   } catch {
     return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);

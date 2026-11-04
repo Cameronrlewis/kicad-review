@@ -1025,7 +1025,7 @@ test('completed rerun redirects to newest non-expired review artifact even after
   const restore = mockFetch(async (url) => {
     if (url.endsWith('/repo')) return accessibleRepo();
     if (url.endsWith('/runs/12')) return new Response(JSON.stringify({ status: 'completed', conclusion: 'failure' }));
-    assert.equal(url, 'https://api.github.com/repos/Cameronrlewis/repo/actions/runs/12/artifacts');
+    assert.equal(url, 'https://api.github.com/repos/Cameronrlewis/repo/actions/runs/12/artifacts?per_page=100');
     return new Response(JSON.stringify({ artifacts: [{ id: 55, name: 'kicad-review-deadbee-cafebad-pass.html', created_at: '2026-10-11' }, { id: 57, name: 'kicad-review-deadbee-cafebad-pass.html', created_at: '2026-10-13', expired: true }, { id: 56, name: 'kicad-review-deadbee-cafebad-pass.html', created_at: '2026-10-12' }] }));
   });
   try {
@@ -1191,7 +1191,7 @@ test('PG-O1 failed runs name the same stage as progress', async () => {
       if (url.endsWith('/repo')) return accessibleRepo();
       if (url.endsWith('/runs/12')) return new Response(JSON.stringify({ status: 'completed', conclusion: 'failure' }));
       if (url.endsWith('/jobs')) return new Response(JSON.stringify({ jobs }));
-      if (url.endsWith('/artifacts')) return new Response(JSON.stringify({ artifacts: [] }));
+      if (url.includes('/artifacts')) return new Response(JSON.stringify({ artifacts: [] }));
       throw new Error(`unexpected ${url}`);
     });
     try {
@@ -1221,7 +1221,7 @@ test('run page distinguishes nothing to review, failed runs, and failures with r
     if (url.endsWith('/repo')) return accessibleRepo();
     if (url.endsWith('/runs/12')) return new Response(JSON.stringify({ status: 'completed', conclusion: 'failure' }));
     if (url.endsWith('/jobs')) return new Response(JSON.stringify(failedJobs));
-    if (url.endsWith('/artifacts')) return new Response(JSON.stringify({ artifacts: [] }));
+    if (url.includes('/artifacts')) return new Response(JSON.stringify({ artifacts: [] }));
     throw new Error(`unexpected ${url}`);
   });
   try {
@@ -1234,7 +1234,7 @@ test('run page distinguishes nothing to review, failed runs, and failures with r
   restore = mockFetch(async (url) => {
     if (url.endsWith('/repo')) return accessibleRepo();
     if (url.endsWith('/runs/12')) return new Response(JSON.stringify({ status: 'completed', conclusion: 'success' }));
-    if (url.endsWith('/artifacts')) return new Response(JSON.stringify({ artifacts: [] }));
+    if (url.includes('/artifacts')) return new Response(JSON.stringify({ artifacts: [] }));
     throw new Error(`unexpected ${url}`);
   });
   try {
@@ -1246,7 +1246,7 @@ test('run page distinguishes nothing to review, failed runs, and failures with r
     if (url.endsWith('/repo')) return accessibleRepo();
     if (url.endsWith('/runs/12')) return new Response(JSON.stringify({ status: 'completed', conclusion: 'failure' }));
     if (url.endsWith('/jobs')) return new Response(JSON.stringify(failedJobs));
-    if (url.endsWith('/artifacts')) return new Response(JSON.stringify({ artifacts: [{ id: 56, name: 'kicad-review-deadbee-cafebad-fail.html' }] }));
+    if (url.includes('/artifacts')) return new Response(JSON.stringify({ artifacts: [{ id: 56, name: 'kicad-review-deadbee-cafebad-fail.html' }] }));
     throw new Error(`unexpected ${url}`);
   });
   try {
@@ -1277,7 +1277,7 @@ test('run jobs are fetched as the user only for progress or a failed run without
     completedUrls.push(url);
     if (url.endsWith('/repo')) return accessibleRepo();
     if (url.endsWith('/runs/12')) return new Response(JSON.stringify({ status: 'completed', conclusion: 'success' }));
-    if (url.endsWith('/artifacts')) return new Response(JSON.stringify({ artifacts: [] }));
+    if (url.includes('/artifacts')) return new Response(JSON.stringify({ artifacts: [] }));
     throw new Error(`unexpected ${url}`);
   });
   try {
@@ -5220,8 +5220,8 @@ function downloadFetch({ zip, event = 'pull_request', rangeOk = true, badRange =
     if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return forbidden ? new Response(JSON.stringify({permissions:{pull:false},owner:{login:'Cameronrlewis'}})) : accessibleRepo();
     if (url === 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/123') return new Response(JSON.stringify(report));
     if (url === 'https://api.github.com/repos/Cameronrlewis/repo/actions/runs/9') return new Response(JSON.stringify({ id: 9, event }));
-    const pageMatch = /^https:\/\/api\.github\.com\/repos\/Cameronrlewis\/repo\/actions\/runs\/9\/artifacts\?per_page=100&page=(\d+)$/.exec(url);
-    if (pageMatch) { const rows = bundles || (bundle ? [bundle] : []), page = +pageMatch[1]; return new Response(JSON.stringify({ artifacts: rows.slice((page - 1) * 100, page * 100) })); }
+    const pageMatch = /^https:\/\/api\.github\.com\/repos\/Cameronrlewis\/repo\/actions\/runs\/9\/artifacts\?per_page=100(?:&page=(\d+))?$/.exec(url);
+    if (pageMatch) { const rows = bundles || (bundle ? [bundle] : []), page = +(pageMatch[1] || 1); return new Response(JSON.stringify({ artifacts: rows.slice((page - 1) * 100, page * 100) })); }
     if (url === 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/124/zip') {
       assert.equal(options.redirect, 'manual', 'GitHub redirect must not forward the token');
       assert.ok(new Headers(options.headers).has('Authorization'), 'GitHub API request stays authenticated');
@@ -5516,4 +5516,169 @@ test('conditional asset requests validate access, expiry, descriptor and sibling
     restore();
     (await import('./report-cache.js')).reportCache.clear();
   }
+});
+
+test('finding 6: completed run paginates artifacts past page 1 and rejects ambiguous reports', async () => {
+  const sealed = await signedIn();
+  const filler = Array.from({ length: 100 }, (_, i) => ({ id: 1000 + i, name: `kicad-3d-${String(i).padStart(64, '0')}-board.glb.gz`, expired: false, workflow_run: { id: 12 } }));
+  const report = { id: 56, name: 'kicad-review-deadbee-cafebad-pass.html', created_at: '2026-10-12T00:00:00Z', expired: false, workflow_run: { id: 12 } };
+  const pdf = { id: 57, name: 'kicad-review-deadbee-cafebad-pass.pdf', expired: false, workflow_run: { id: 12 } };
+  let rows = [...filler, report, pdf];
+  const restore = mockFetch(async url => {
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/runs/12')) return Response.json({ status: 'completed', conclusion: 'success' });
+    const m = /\/runs\/12\/artifacts(?:\?per_page=(\d+)(?:&page=(\d+))?)?$/.exec(url);
+    if (m) {
+      const perPage = Number(m[1] || 30), page = Number(m[2] || 1);
+      return Response.json({ artifacts: rows.slice((page - 1) * perPage, page * perPage) });
+    }
+    throw new Error(`unexpected ${url}`);
+  });
+  try {
+    const response = await call('/r/Cameronrlewis/repo/run/12', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.status, 302);
+    assert.equal(response.headers.get('Location'), '/r/Cameronrlewis/repo/a/56?pdf=1');
+    // Ambiguous matching reports (two distinct reports in the same run) fail closed.
+    rows = [report, { ...report, id: 58, name: 'kicad-review-deadbee-cafebad-fail.html' }];
+    const ambiguous = await call('/r/Cameronrlewis/repo/run/12', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(ambiguous.status, 404);
+  } finally { restore(); }
+});
+
+test('finding 7: readiness paginates reviews past 100 before computing latest decisions', async () => {
+  const sealed = await signedIn({ t: 'access-secret' });
+  const head = 'n'.repeat(40);
+  const page1 = Array.from({ length: 100 }, (_, i) => ({
+    user: { login: i === 49 ? 'ann' : `u${i}` },
+    state: 'APPROVED',
+    commit_id: head,
+    submitted_at: `2026-10-12T10:${String(i).padStart(2, '0')}:00Z`,
+  }));
+  const page2 = [{ user: { login: 'ann' }, state: 'CHANGES_REQUESTED', commit_id: head, submitted_at: '2026-10-12T12:00:00Z' }];
+  const restore = mockFetch(async url => {
+    if (url.endsWith('/repo')) return repoOk();
+    if (url.endsWith('/pulls/7')) return Response.json({ head: { sha: head }, requested_reviewers: [] });
+    const m = /\/pulls\/7\/reviews\?per_page=100(?:&page=(\d+))?$/.exec(url);
+    if (m) return Response.json(Number(m[1] || 1) === 1 ? page1 : page2);
+    if (url.endsWith('/graphql')) return Response.json({ data: { repository: { pullRequest: { reviewThreads: { totalCount: 0, nodes: [] } } } } });
+    throw new Error(`unexpected ${url}`);
+  });
+  try {
+    const response = await call('/r/Cameronrlewis/repo/pull/7/readiness', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    const ann = body.decisions.find(d => d.login === 'ann');
+    assert.deepEqual(ann, { login: 'ann', state: 'CHANGES_REQUESTED', stale: false });
+  } finally { restore(); }
+});
+
+test('finding 10: commit history links the newest review when a commit head was reviewed multiple times', async () => {
+  const sealed = await signedIn();
+  const restore = mockFetch(async url => {
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/branches?per_page=100')) return Response.json([{ name: 'main' }]);
+    if (url.endsWith('/tags?per_page=100')) return Response.json([]);
+    if (url.includes('/commits?')) return Response.json([{ sha: 'cafebad000000000000000000000000000000000', commit: { message: 'Fix board', author: { name: 'Ada', date: '2026-10-12T04:05:00Z' } } }]);
+    if (url.includes('/actions/artifacts?')) return Response.json({ artifacts: [
+      { id: 10, name: 'kicad-review-deadbee-cafebad-fail.html', created_at: '2026-10-12T10:00:00Z', expired: false, workflow_run: { id: 1 } },
+      { id: 20, name: 'kicad-review-deadbee-cafebad-pass.html', created_at: '2026-10-12T11:00:00Z', expired: false, workflow_run: { id: 2 } },
+    ] });
+    throw new Error(`unexpected ${url}`);
+  });
+  try {
+    const body = await (await call('/r/Cameronrlewis/repo/commits', { headers: { Cookie: `s=${sealed}` } })).text();
+    assert.match(body, /\/r\/Cameronrlewis\/repo\/a\/20"/);
+    assert.doesNotMatch(body, /\/r\/Cameronrlewis\/repo\/a\/10"/);
+  } finally { restore(); }
+});
+
+test('finding 11: thread listing cursor-paginates threads past 100 and comments past 50', async () => {
+  const sealed = await signedIn({ t: 'access-secret' });
+  const makeThread = (i, commentNodes, commentPageInfo = { hasNextPage: false, endCursor: null }) => ({
+    id: `PRRT_${i}`, isResolved: false, resolvedBy: null,
+    comments: { totalCount: commentNodes.length, pageInfo: commentPageInfo, nodes: commentNodes },
+  });
+  const firstComment = i => ({ databaseId: i * 100 + 1, body: threadBody({ anchor: { ...anchor, ref: `R${i}` }, text: `open ${i}`, link: 'https://s/r' }), author: { login: 'alice' }, createdAt: '2026-10-12T10:00:00Z', url: `https://github.com/x#${i}` });
+  const comments50 = Array.from({ length: 50 }, (_, j) => j === 0 ? firstComment(1) : ({ databaseId: 100 + j + 1, body: `reply ${j}`, author: { login: 'bob' }, createdAt: '2026-10-12T11:00:00Z', url: `https://github.com/x#1-${j}` }));
+  const comment51 = { databaseId: 151, body: 'reply 50', author: { login: 'carol' }, createdAt: '2026-10-12T12:00:00Z', url: 'https://github.com/x#1-50' };
+  const threadsPage1 = [
+    makeThread(1, comments50, { hasNextPage: true, endCursor: 'c50' }),
+    ...Array.from({ length: 99 }, (_, idx) => makeThread(idx + 2, [firstComment(idx + 2)])),
+  ];
+  const threadsPage2 = [makeThread(101, [firstComment(101)])];
+  let incomplete = false;
+  const restore = mockFetch(async (url, options = {}) => {
+    if (url.endsWith('/repo')) return repoOk();
+    assert.equal(url, 'https://api.github.com/graphql');
+    const { variables } = JSON.parse(options.body);
+    if (incomplete) {
+      return Response.json({ data: { repository: { pullRequest: { headRefOid: 'b'.repeat(40), reviewThreads: { totalCount: 101, pageInfo: { hasNextPage: true, endCursor: null }, nodes: threadsPage1 } } } } });
+    }
+    if (variables.threadId) {
+      assert.equal(variables.threadId, 'PRRT_1');
+      assert.equal(variables.after, 'c50');
+      return Response.json({ data: { node: { comments: { totalCount: 51, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [comment51] } } } });
+    }
+    if (!variables.after) {
+      return Response.json({ data: { repository: { pullRequest: { headRefOid: 'b'.repeat(40), reviewThreads: { totalCount: 101, pageInfo: { hasNextPage: true, endCursor: 't100' }, nodes: threadsPage1 } } } } });
+    }
+    assert.equal(variables.after, 't100');
+    return Response.json({ data: { repository: { pullRequest: { headRefOid: 'b'.repeat(40), reviewThreads: { totalCount: 101, pageInfo: { hasNextPage: false, endCursor: null }, nodes: threadsPage2 } } } } });
+  });
+  try {
+    const response = await call('/r/Cameronrlewis/repo/pull/7/threads', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.status, 200);
+    const data = await response.json();
+    assert.equal(data.threads.length, 101);
+    assert.equal(data.threads[100].id, 'PRRT_101');
+    assert.equal(data.threads[0].comments.length, 51);
+    assert.equal(data.threads[0].comments[50].body, 'reply 50');
+    incomplete = true;
+    const failed = await call('/r/Cameronrlewis/repo/pull/7/threads', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(failed.status, 502);
+  } finally { restore(); }
+});
+
+test('finding 12: issues route paginates open issues past 100 and fails closed when scan is incomplete', async () => {
+  const unanchored = Array.from({ length: 100 }, (_, i) => ({ number: i + 1, title: `Plain ${i + 1}`, html_url: `https://github.com/o/r/issues/${i + 1}`, state: 'open', body: 'no anchor' }));
+  const anchoredOnPage2 = { number: 101, title: 'Tracked on page 2', html_url: 'https://github.com/o/r/issues/101', state: 'open', body: threadBody({ anchor, text: 'existing', link: 'https://site.example/r/o/r/a/1' }) };
+  let posts = 0, overflow = false;
+  const gh = async (path, token, options) => {
+    if (options?.method === 'POST') { posts++; return new Response(JSON.stringify({ number: 102, html_url: 'https://github.com/o/r/issues/102' }), { status: 201 }); }
+    const m = /\/repos\/o\/r\/issues\?state=open&per_page=100(?:&page=(\d+))?$/.exec(path);
+    assert.ok(m, `unexpected path ${path}`);
+    if (overflow) return Response.json(unanchored);
+    return Response.json(Number(m[1] || 1) === 1 ? unanchored : [anchoredOnPage2]);
+  };
+  const response = await issuesRoute(issueRequest(issueInput), {}, { owner: 'o', repo: 'r', rest: '' }, { access: issueAccess, gh });
+  assert.equal(response.status, 409);
+  assert.equal(posts, 0);
+  const body = await response.json();
+  assert.equal(body.url, 'https://github.com/o/r/issues/101');
+  // Fail closed when open issues exceed the 10-page scan bound.
+  overflow = true;
+  const over = await issuesRoute(issueRequest(issueInput), {}, { owner: 'o', repo: 'r', rest: '' }, { access: issueAccess, gh });
+  assert.equal(over.status, 502);
+  assert.equal(posts, 0);
+});
+
+
+test('finding 6: reviews list still shows the newest reviews when artifacts exceed the 10-page bound', async () => {
+  const sealed = await signedIn();
+  const pages = [];
+  const restore = mockFetch(async url => {
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.includes('/actions/artifacts?')) {
+      const page = Number(new URL(url).searchParams.get('page') || 1);
+      pages.push(page);
+      return Response.json({ artifacts: Array.from({ length: 100 }, (_, i) => ({ id: 1000 + page * 100 + i, name: `kicad-review-deadbee-${(page * 100 + i).toString(16).padStart(7, '0')}-pass.html`, created_at: `2026-10-${String(20 - page).padStart(2, '0')}T10:00:00Z`, expired: false, workflow_run: { id: page * 100 + i } })) });
+    }
+    throw new Error(`unexpected ${url}`);
+  });
+  try {
+    const response = await call('/r/Cameronrlewis/repo', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.status, 200);
+    assert.deepEqual(pages, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    assert.match(await response.text(), /\/r\/Cameronrlewis\/repo\/a\/1\d{3}/);
+  } finally { restore(); }
 });
