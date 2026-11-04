@@ -695,7 +695,11 @@ def pcbdraw_plot(board, side_dir, run):
             if PCBDRAW_NO_OUTLINE in text:
                 return products, "PcbDraw skipped: no closed Edge.Cuts outline."
             if rc != 0 or not pcbdraw_svg_valid(out):
-                err_lines = [l.strip() for l in (text or "").strip().splitlines() if l.strip()][:5]
+                err_lines = [
+                    (line[:197] + "…") if len(line) > 200 else line
+                    for raw in (text or "").splitlines()
+                    if (line := raw.strip())
+                ][:5]
                 err_detail = ("\n" + "\n".join(err_lines)) if err_lines else ""
                 print("::warning::" + workflow_command_escape(f"PcbDraw {face} plot failed for {board} (rc {rc}){err_detail}"), file=sys.stderr)
                 continue

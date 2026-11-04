@@ -10,6 +10,7 @@ on:
 env:
   # Official KiCad image, pinned by digest so a new upload under the same tag cannot change results.
   KICAD_IMAGE: kicad/kicad:10.0.6-full@sha256:e36e29b5f4a638a1a7238eba3d2fcbc8e061ffed1e99a8f39cb722706c94a58e
+  # Python 3.13 image matching KiCad 10.0.6 image Python (3.13.5 per evidence/kicad10-commands.md) for cp313 wheel ABI compatibility.
   PYTHON_IMAGE: python:3.13-slim@sha256:ae14d4ce8771606477a81446e7ef429edd6762305fc50c84507c1041fa8285d1
 
 jobs:
@@ -93,6 +94,8 @@ jobs:
           key: renders-v1-${{ runner.os }}-${{ hashFiles('tools/kicad_review.py', 'tools/ui/compress3d.cjs', 'base/kicad-review.toml', 'head/kicad-review.toml') }}-${{ env.KICAD_IMAGE }}-${{ steps.detect.outputs.head }}
 
       # PcbDraw (owner decision 2026-10-26, decision 1): installed into the workspace, then imported only by the KiCad image's Python.
+      # The KiCad 10.0.6 image ships Python 3.13.5 with no pip/venv (verified in evidence/kicad10-commands.md and results-pcbdraw-10.0.6.txt).
+      # Installing in python:3.13-slim produces cp313 wheels (lxml, numpy, Pillow) matching the KiCad Python ABI.
       - name: Install PcbDraw
         if: steps.detect.outputs.changed == 'true' && steps.detect.outputs.design == 'true'
         run: |

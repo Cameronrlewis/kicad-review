@@ -6249,23 +6249,32 @@ with _DpTmp() as t:
     assert kr.pcbdraw_svg_valid(os.path.join(t, 'thermal', 'pcbdraw-front.svg')) is False
     calls.clear()
     stderr_buf = io.StringIO()
+    partial_dir = os.path.join(t, 'partial')
+    front_svg = os.path.join(partial_dir, 'pcbdraw-front.svg')
     def partial_run(argv):
-        if '"front"' in argv[2]:
-            out = re.search(r'"([^"]+\.svg)"\]; run', argv[2]).group(1)
-            pathlib.Path(out).parent.mkdir(parents=True, exist_ok=True)
-            pathlib.Path(out).write_bytes(_dp_svg)
+        calls.append(argv)
+        m = re.search(r'([^\s\'"]*pcbdraw-[^\s\'"]+\.svg)', ' '.join(argv))
+        target = m.group(1) if m else front_svg
+        if 'front' in os.path.basename(target):
+            pathlib.Path(target).parent.mkdir(parents=True, exist_ok=True)
+            pathlib.Path(target).write_bytes(_dp_svg)
             return 0, ''
-        return 1, 'Error: back layer failed\nsecond error line\n'
+        return 1, 'Error: back layer failed\n' + ('long_error_detail_' * 25) + '\n'
     with patch('sys.stderr', stderr_buf):
-        products, note = kr.pcbdraw_plot('P/P.kicad_pcb', os.path.join(t, 'partial'), partial_run)
+        products, note = kr.pcbdraw_plot('P/P.kicad_pcb', partial_dir, partial_run)
     assert products['front'] is not None and products['back'] is None
     assert note == 'PcbDraw failed for back face: see the job log.', note
-    assert 'Error: back layer failed' in stderr_buf.getvalue()
+    stderr_out = stderr_buf.getvalue()
+    assert 'Error: back layer failed' in stderr_out
+    assert 'long_error_detail_' in stderr_out
+    assert ('long_error_detail_' * 25) not in stderr_out
 print('ok DP-P1 PcbDraw command, front and back plots, skip note')
 
 # DP-P2: a comparison attaches front and back plots for both revisions; a design report attaches the head side only, with no base probes.
 assert not hasattr(kr, 'put_blob'), 'put_blob alias should be removed'
-assert 'is_property' in kr.workflow_command_escape.__code__.co_varnames
+assert kr.workflow_command_escape("foo:bar,baz\nqux") == "foo:bar,baz%0Aqux"
+assert kr.workflow_command_escape("foo:bar,baz\nqux", is_property=False) == "foo:bar,baz%0Aqux"
+assert kr.workflow_command_escape("foo:bar,baz\nqux", is_property=True) == "foo%3Abar%2Cbaz%0Aqux"
 with _DpTmp() as t:
     old_cwd = os.getcwd()
     try:
