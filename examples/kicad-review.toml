@@ -9,6 +9,7 @@ erc = "required"
 drc = "required"
 parity = "required"      # schematic and board agree (DRC --schematic-parity)
 bom = "informational"    # every part has the fields below
+fab_limits = "informational" # both vendors; needs fabrication.check_limits = true and DRC on
 interfaces = "off"     # netlist design-review rules (UART, I2C, CAN, USB-C CC, connector ESD, voltage domains)
 release = "off"        # fabrication package completeness; costs ~2-4 s per board
 
@@ -18,7 +19,8 @@ required_fields = ["Value", "Footprint"]
 # order_ready_fields = []   # empty: the fabrication preset's fields (Parts)
 
 [fabrication]
-preset = "jlcpcb"        # or "pcbway"
+preset = "jlcpcb"        # or "pcbway"; downloads and BOM only
+check_limits = false    # opt in to JLCPCB and PCBWay geometry checks on both revisions
 # part_field = "LCSC"    # symbol field holding the supplier part number; default LCSC (jlcpcb) or MPN (pcbway)
 
 [3d]

@@ -87,6 +87,9 @@ body { margin: 0; height: 100vh; display: grid; grid-template-rows: auto var(--b
 .marker.modified:not(.sel) { --marker-core:var(--mark-modified); --marker-halo:var(--halo-modified); border-color:var(--marker-core); border-style:dotted; }
 .marker.violation { border-color: var(--removed); border-style: dotted; }
 .marker.sel { border-color: var(--accent); border-style: solid; border-width: calc(3px / var(--k, 1)); }
+.electrical-pin { position: absolute; width: 10px; height: 10px; border: 2px solid var(--modified);
+  border-radius: 50%; transform: translate(-50%, -50%); pointer-events: none; }
+.electrical-targets { display: flex; flex-wrap: wrap; gap: var(--space-1); }
 .card { display: block; width: 100%; text-align: left; background: var(--card-bg); border: 1px solid var(--line); border-radius: var(--radius); padding: var(--space-2); margin-bottom: var(--space-2); }
 .card[aria-selected="true"] { border-color: var(--card-sel); box-shadow: 0 0 0 1px var(--card-sel); }
 .prop { display: grid; grid-template-columns: minmax(0, 14em) minmax(0, 1fr) auto minmax(0, 1fr); gap: 4px; font-family: var(--font-mono); font-size: 12px; }
@@ -341,6 +344,10 @@ body.shot #toolbar { display:none; }
 .board-mark-label.removed,.board-mark-key.removed {border-style:dashed;}
 .board-mark-label.modified,.board-mark-key.modified {border-style:dotted;}
 .board-mark-legend {position:absolute;bottom:8px;left:8px;display:flex;gap:6px;z-index:1;}
+.copper-selection, .copper-selection-fallback { position:absolute; inset:0; pointer-events:none; overflow:hidden; }
+.copper-selection path, .copper-selection-fallback path { fill:none; stroke-width:2; vector-effect:non-scaling-stroke; }
+.copper-selection [data-action=added], .copper-selection-fallback [data-action=added] { stroke:var(--tint-add); }
+.copper-selection [data-action=removed], .copper-selection-fallback [data-action=removed] { stroke:var(--tint-del); stroke-dasharray:5 3; }
 
 /* Native radio buttons stay mounted while GPU mark passes update. */
 .mark-styles { display:flex; align-items:center; gap:var(--space-1); white-space:nowrap; }
@@ -765,6 +772,54 @@ html[data-theme="dark"] #stage.mode-3d { background:var(--bg); }
 #image-results button:is(:hover,:focus-visible) { background:var(--surface-2); outline:2px solid var(--accent); outline-offset:-2px; }
 #image-results p { padding:var(--space-2); margin:0; }
 body.shot #image-search { display:none; }
+
+.member-chips { display:flex; flex-wrap:wrap; gap:var(--space-1); margin-top:var(--space-1); }
+.weight { font:11px var(--font-mono); margin-left:var(--space-1); color:var(--muted); }
+.electrical-incomplete { border-left:3px solid var(--modified); padding:var(--space-2); overflow-wrap:anywhere; }
+.electrical-headline { padding:var(--space-2); overflow-wrap:anywhere; }
+.electrical-status { padding:var(--space-2); overflow-wrap:anywhere; }
+.member-transition { font:11px var(--font-mono); overflow-wrap:anywhere; }
+
+/* BOM view (spec 08): Parts-tab view toggle, header, category chips, grouped table. Tokens only; no new colours. */
+/* ponytail: Desktop-only ceiling, controller ruling 2026-10-29. Task 8 deliberately omits
+   the <=899px 44px-target block, "BOM phone screen on the parts fixture" check,
+   both Pixel 7 CI lines and their TS-S1 tuple entries. If phone support returns,
+   restore those together from Task 8 and verify both themes at 412x915, DPR 2.625. */
+.bom-head { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:var(--sp-2); padding:var(--sp-2); border-bottom:1px solid var(--hair); }
+.bom-summary { margin:0; font:var(--fs-xs) var(--font-mono); font-variant-numeric:tabular-nums; color:var(--tx2); }
+.bom-downloads { display:flex; gap:var(--sp-2); }
+.bom-downloads button { height:var(--h-sm); padding:0 var(--sp-2); font:var(--fs-xs) var(--font-mono); color:var(--tx); background:transparent; border:1px solid var(--line); border-radius:var(--r-2); cursor:pointer; white-space:nowrap; }
+.bom-downloads button:hover { background:var(--inset); }
+.bom-downloads button:focus-visible, .bom-table thead th button:focus-visible { outline:2px solid var(--acc); outline-offset:1px; }
+.bom-table { width:100%; border-collapse:collapse; table-layout:fixed; font-size:var(--fs-xs); }
+.bom-table th, .bom-table td { padding:var(--sp-1) var(--sp-2); text-align:left; vertical-align:top; border-bottom:1px solid var(--hair); overflow-wrap:anywhere; }
+.bom-table thead th { font:var(--fw-semibold) var(--fs-2xs) var(--font-mono); color:var(--tx2); background:var(--module); white-space:nowrap; }
+.bom-table thead th button { font:inherit; color:inherit; background:none; border:0; padding:0; cursor:pointer; }
+.bom-table thead th[aria-sort=ascending], .bom-table thead th[aria-sort=descending] { color:var(--tx); }
+.bom-table thead th[aria-sort=ascending] button::after { content:" ↑"; }
+.bom-table thead th[aria-sort=descending] button::after { content:" ↓"; }
+.bom-table thead th:nth-child(1), .bom-table td:nth-child(1) { width:18px; padding-left:var(--sp-1); padding-right:0; }
+.bom-table thead th:nth-child(2), .bom-table td:nth-child(2) { width:52px; }
+.bom-table thead th:nth-child(3) { width:40%; }
+.bom-table thead th:nth-child(4) { width:25%; }
+.bom-table thead th:nth-child(n+5), .bom-table td:nth-child(n+5) { display:none; }
+.bom-cat th { padding:var(--sp-2); font:var(--fw-semibold) var(--fs-cap) var(--font-cap); letter-spacing:var(--cap-track); text-transform:uppercase; color:var(--tx2); background:var(--panel); }
+.bom-qty { font-variant-numeric:tabular-nums; }
+.bom-part b { display:block; font-weight:var(--fw-semibold); }
+.bom-part small { display:block; color:var(--tx2); }
+.bom-refs { font-family:var(--font-mono); }
+/* Text uses the contrast-safe accent; focus outlines use the accent fill (--acc). */
+.bom-table a { color:var(--acc-tx); }
+.bom-row.changed .bom-delta { color:var(--mod); box-shadow:inset 3px 0 var(--mod); }
+#panel:has(.bom-table) .parts-scroll { overflow-x:auto; max-width:100%; }
+#app.right-table .bom-table { min-width:800px; }
+#app.right-table .bom-table thead th:nth-child(n+5), #app.right-table .bom-table td:nth-child(n+5) { display:table-cell; }
+#app.right-table .bom-mpn-inline { display:none !important; }
+@container (min-width:600px) {
+  .bom-table thead th:nth-child(n+5), .bom-table td:nth-child(n+5) { display:table-cell; }
+  .bom-table thead th:nth-child(3) { width:26%; } .bom-table thead th:nth-child(4) { width:24%; }
+  .bom-mpn-inline { display:none !important; }
+}
 
 #downloads { color:var(--text); background:var(--surface); border:1px solid var(--line); border-radius:3px; padding:0; width:min(560px,calc(100vw - 32px)); font-size:12px; }
 #downloads::backdrop { background:rgb(0 0 0 / .55); }

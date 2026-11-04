@@ -1,0 +1,22 @@
+{
+  "blobs": {
+    "52842f61334c": "H4sIAAAAAAAC/81RwU7DMAz9lSrnqrSFHbYj/ABCwGVCU5q4q0XqVGnKhqr9O3FaOnZC4sIuSWy/Zz/njWIg9L3YJKJtRZqID3A9WgqJgiOEAxe3owADLVCEbt9CqUYDTHvM3lFJvetVw3wjKzALiOyDJQJ1pvUNgGfejZj739tjiGkwJiQO6GDCntLkcugoqipCt+tVlqfJ3ZrPIi/4WoWT2ytLNWogFbXBUSrPc7T0cpksonowmtuO4glqcN+Ml4Krr9IM03ISnTgx3lrfOaSlgcFqh5qjZ+j9JgJDukOaxZJsY4uivOUCDW0FLiY45D2mNcRneK7yLD+xfgf1WQZbszCGYRrXGalAx8+7VPnTlL6RDvRfnTFQ+yu1p7wOe8r/tMfhvvndH+YcpCOk/Zz5AkwHFuPsAwAA",
+    "5cdd4191a9bc": "H4sIAAAAAAAC/9VRwU6DQBD9FbLnBgGLSXvUHzBGvTSmWXaHMnGZbZbF1pD+u8xCwXox8aJeyM7Me2/m8TrREvpGrCNR12IRiTdwDVrqGylXCAcebjoBBmqgAN289KMSDTDtPn5FJfW2URXzjSzATCCyd5YI1ExrKgDPvCsx6t/aY19Ta0zfOKCDAXtaRJdLO1EUAbpZ5XGyiJYr/qZJKPI0TlheWSpRA6lwGxyl8rxHSy+nzSJcD0azbCceoAR3ZjylPH2Wph3MSXTixHhr/d4hTQIGiy1qrh6h8esA7Nt7pPFYknWQSLNrHlBbF+BCg0v2MdgQ7/0zT+IkGD6zlvnNF1Z2po2OZx77dlDO53Ok06a2Hc7cG6lAh59+6e5zmE0lHeifJmqg9H801ux/x5r9ZqwOd9X3uTLnIB0h7cbOBxXvYdJcBAAA"
+  },
+  "sheets": [
+    {
+      "hotspots": {
+        "base": "5cdd4191a9bc",
+        "head": "52842f61334c"
+      },
+      "path": "/left/"
+    },
+    {
+      "hotspots": {
+        "base": "5cdd4191a9bc",
+        "head": "52842f61334c"
+      },
+      "path": "/right/"
+    }
+  ]
+}
