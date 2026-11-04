@@ -1,0 +1,17 @@
+{
+  "boards": [
+    {"name": "Alpha", "objects": {
+      "a1": {"kind": "symbol", "ref": "R1", "props": {"Value": "10k", "Footprint": "R_0805", "LCSC": "C17414", "MPN": "RC0805", "Manufacturer": "Yageo", "Order Code": "CUST-A", "symbol": "Device:R_Small"}},
+      "a2": {"kind": "symbol", "ref": "R2", "props": {"Value": "10k", "Footprint": "R_0805", "LCSC": "C17414", "MPN": "RC0805", "Manufacturer": "Yageo", "Order Code": "CUST-A", "symbol": "Device:R_Small"}},
+      "a3": {"kind": "symbol", "ref": "C1", "props": {"Value": "100n", "Footprint": "C_0603", "LCSC": "C14663", "MPN": "CC0603", "Manufacturer": "Samsung", "symbol": "Device:C_Small"}},
+      "a4": {"kind": "symbol", "ref": "U1", "props": {"Value": "TL072", "Footprint": "SOIC-8", "MPN": "TL072", "Manufacturer": "TI", "symbol": "Amplifier_Operational:TL072"}},
+      "a5": {"kind": "symbol", "ref": "U1 unit 2", "props": {"Value": "TL072", "Footprint": "SOIC-8", "MPN": "TL072", "Manufacturer": "TI", "symbol": "Amplifier_Operational:TL072"}},
+      "a6": {"kind": "symbol", "ref": "R3", "props": {"Value": "10k", "Footprint": "R_0805", "LCSC": "C17414", "MPN": "RC0805", "Manufacturer": "Yageo", "dnp": "yes", "symbol": "Device:R_Small"}}
+    }},
+    {"name": "Beta", "objects": {
+      "b1": {"kind": "symbol", "ref": "R1", "props": {"Value": "10k", "Footprint": "R_0805", "LCSC": "C17414", "MPN": "RC0805", "Manufacturer": "Yageo", "Order Code": "CUST-B", "symbol": "Device:R_Small"}},
+      "b2": {"kind": "symbol", "ref": "R2", "props": {"Value": "10k", "Footprint": "R_0805", "LCSC": "C17414", "MPN": "RC0805FR", "Manufacturer": "Yageo", "symbol": "Device:R_Small"}},
+      "b3": {"kind": "symbol", "ref": "C1", "props": {"Value": "100n", "Footprint": "C_0603", "MPN": "CC0603", "Manufacturer": "Samsung", "symbol": "Device:C_Small"}}
+    }}
+  ]
+}

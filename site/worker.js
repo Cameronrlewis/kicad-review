@@ -1,7 +1,8 @@
-import { createShare, serveShare, revokeShares, shareEnabled } from './share.js';
+import { createShare, serveShare, revokeShares, shareEnabled, downloadUrl } from './share.js';
 import { reportCsp, frameCsp } from './csp.js';
-import { currentBody, currentReport, readStoredData } from './report-shell.js';
+import { currentReport, readStoredData } from './report-shell.js';
 import { reportCache } from './report-cache.js';
+import { verifyReportFamily } from './report-kind.js';
 export { readStoredData } from './report-shell.js';
 import { deploymentPage, escapeHtml, sharedPage, sharedNotFoundPage, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, historyPage, stages, stageForStep } from './pages.js';
 
@@ -11,6 +12,7 @@ import { issuesRoute } from './issues.js';
 import { historyRoute } from './history.js';
 
 import { readinessRoute, rerunRoute } from './readiness.js';
+import { zipEntries, zipEntryStream } from './zip.js';
 
 const text = new TextEncoder();
 const untext = new TextDecoder();
@@ -247,6 +249,69 @@ async function pdfDownload(owner, repo, id, active) {
   } catch { return pdfError(active); }
 }
 
+const downloadKinds = { fab: ['application/zip', /\.zip$/], pdf: ['application/pdf', /\.pdf$/], step: ['model/step', /\.step$/], glb: ['model/gltf-binary', /\.glb$/] };
+
+function downloadError(active) {
+  return sessionResponse(JSON.stringify({ error: 'Download unavailable' }), { status: 404, headers: { 'Content-Type': 'application/json; charset=utf-8' } }, active);
+}
+
+// The run's downloads artifact is one archived zip; read the one entry asked for by byte range, never the whole file.
+async function downloadFile(owner, repo, id, index, kind, active) {
+  try {
+    const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions`;
+    const meta = await gh(`${root}/artifacts/${id}`, active.token);
+    if (!meta.ok) return downloadError(active);
+    const report = await meta.json(), runId = report.workflow_run?.id, name = String(report.name || '');
+    // The report name carries the reviewed head's first 7 characters. The run's head_sha is the reviewed head except
+    // for a manual (workflow_dispatch) run, which reviews the head given by hand, not its dispatch ref's tip.
+    const runHead = String(report.workflow_run?.head_sha || '');
+    const head7 = verifyReportFamily('comparison', name) ? /-([0-9a-f]{7})-(?:pass|fail)\.html$/.exec(name)[1] : /^kicad-design-([0-9a-f]{7})\.html$/.exec(name)?.[1];
+    const family = !head7 || !/^[0-9a-f]{40}$/.test(runHead) ? null : verifyReportFamily('comparison', name) ? 'review' : 'design';
+    if (report.expired || !family || !/^\d{1,20}$/.test(String(runId))) return downloadError(active);
+    const bundleName = `kicad-${family}-downloads-${head7}`;
+    // Every page of the run's artifacts is read: 02 adds digest assets, so the bundle can sit past the first 100.
+    const found = [];
+    let complete = false;
+    for (let page = 1; page <= 10 && !complete; page += 1) {
+      const list = await gh(`${root}/runs/${runId}/artifacts?per_page=100&page=${page}`, active.token);
+      if (!list.ok) return downloadError(active);
+      const rows = (await list.json()).artifacts;
+      if (!Array.isArray(rows)) return downloadError(active);
+      found.push(...rows.filter((a) => !a?.expired && a?.name === bundleName && a.workflow_run?.id === runId && /^\d{1,20}$/.test(String(a.id))));
+      complete = rows.length < 100;
+    }
+    if (!complete || found.length !== 1) return downloadError(active);  // zero, several or unpaged matches are refused
+    const bundle = found[0];
+    const zip = await gh(`${root}/artifacts/${bundle.id}/zip`, active.token, { redirect: 'manual' });
+    if (zip.status !== 302) return downloadError(active);
+    const location = new URL(zip.headers.get('Location'));
+    if (location.protocol !== 'https:' || location.username || location.password) return downloadError(active);
+    // The signed blob URL gets no GitHub token; 'manual' (workerd rejects 'error') plus the 206 checks refuse further redirects.
+    const range = (start, end) => fetch(location.href, { redirect: 'manual', headers: { Range: `bytes=${start}-${end}` } });
+    const probe = await range(0, 0);
+    const total = Number(/^bytes 0-0\/(\d+)$/.exec(probe.headers.get('Content-Range') || '')?.[1]);
+    if (probe.status !== 206 || !Number.isSafeInteger(total) || total < 22) { await probe.body?.cancel(); return downloadError(active); }
+    if ((await probe.arrayBuffer()).byteLength !== 1) return downloadError(active);
+    const [type, suffix] = downloadKinds[kind];
+    const entries = await zipEntries(range, total);  // exactRange inside checks every 206 and Content-Range
+    // Full-head provenance: the staged envelope carries the run's reviewed full head (collect_downloads writes it).
+    const envelope = entries.find((e) => e.name === `${index}/downloads.json`);
+    const head = envelope ? (await new Response(await zipEntryStream(range, envelope)).json())?.head : null;
+    if (!/^[0-9a-f]{40}$/.test(head) || !head.startsWith(head7) || bundle.workflow_run?.head_sha !== runHead
+      || (family === 'design' && !verifyReportFamily('design', name, head))) return downloadError(active);
+    if (head !== runHead) {  // only a manual run may review a head other than its run's head_sha
+      const run = await gh(`${root}/runs/${runId}`, active.token);
+      if (!run.ok || (await run.json()).event !== 'workflow_dispatch') return downloadError(active);
+    }
+    const matches = entries.filter((e) => e.name.startsWith(`${index}/`) && !e.name.slice(`${index}/`.length).includes('/') && suffix.test(e.name));
+    const entry = matches.length === 1 ? matches[0] : null;
+    const filename = entry?.name.split('/').pop();
+    if (!entry || !/^[A-Za-z0-9_.-]{1,200}$/.test(filename)) return downloadError(active);
+    // Errors after this point (truncation, CRC, length) error the stream; they cannot become a 404.
+    return sessionResponse(await zipEntryStream(range, entry), { headers: { 'Content-Type': type, 'Content-Disposition': `attachment; filename="${filename}"` } }, active);
+  } catch { return downloadError(active); }
+}
+
 export function assetFromReport(html, id, kind) {
   return assetFromData(readStoredData(html), id, kind);
 }
@@ -284,6 +349,12 @@ async function storedReport(artifact, active) {
   return blob;
 }
 
+// Reports whose 3D assets artifact3d serves from their own run: comparison reports, and
+// design snapshots whose name binds to the stored (unstripped) data.report.head.
+const served3d = (metadata, data) => /^\d{1,20}$/.test(String(metadata.workflow_run?.id))
+  && (data?.report?.kind == null ? verifyReportFamily('comparison', metadata.name)
+    : data.report.kind === 'design' && verifyReportFamily('design', metadata.name, data.report.head));
+
 const reportBuilds = new Map();
 // ponytail: one cold build at a time per isolate (peak ~ one report's transient copies); raise only if queued cold loads time out.
 let buildTail = Promise.resolve();
@@ -303,7 +374,9 @@ async function cachedReport(artifact, active) {
   const build = buildTail.then(async () => {
     const stored = await (await storedReport(artifact, active)).text();
     const data = readStoredData(stored);
-    const raw = currentReport(stored, { lazyAssets: true, storedData: data }) ?? stored;
+    // Only the authenticated wrapper's raw report is built here; guest/share keep embedded blobs.
+    // Models are stripped only when artifact3d would serve them, so no report loses its 3D view.
+    const raw = currentReport(stored, { lazyAssets: true, lazy3d: served3d(metadata, data), storedData: data }) ?? stored;
     // UTF-16 strings plus a conservative parsed-envelope allowance (including object overhead).
     // Count shared/fallback strings twice rather than under-account retained report bytes.
     // Stored HTML is temporary: only parsed data (4x envelope allowance) and raw body remain.
@@ -350,7 +423,7 @@ async function readArtifactHtml(owner, repo, id, active, repository) {
     if (!artifact || artifact.expired) return assetError();
     // ponytail: read the existing HTML envelope per asset; add range/indexed companion delivery only if Worker CPU or GitHub download traces require it.
     // Measured Worker CPU now requires caching that envelope and its processed forms.
-    return await cachedReport(artifact, active);
+    return { ...await cachedReport(artifact, active), metadata: artifact.metadata };
   } catch { /* Legacy/temporarily unavailable report: fail asset requests closed. */ return assetError(); }
 }
 
@@ -363,6 +436,64 @@ async function digestAsset(request, env, owner, repo, id, digest, kind) {
     const stored = await readArtifactHtml(owner, repo, id, active, allowed.repo);
     if (stored instanceof Response) return stored;
     return assetFromData(stored.data, digest, kind) || assetError();
+  });
+  return sessionResponse(asset.body, { status: asset.status, headers: asset.headers,
+    encodeBody: asset.headers.get('Content-Encoding') === 'gzip' ? 'manual' : 'automatic' }, active);
+}
+
+// Exactly `size` bytes or null; a wrong declared length or a longer body is never buffered whole.
+async function readExactly(response, size) {
+  const declared = response.headers.get('Content-Length');
+  if (!response.body) return null;
+  // A real Content-Encoding (not identity) reply's length counts encoded bytes; the read bound below still caps it.
+  // ponytail: Task 12's deployed gate decides whether Workers decoding of such a reply needs handling; until then it fails closed on the gzip check.
+  if (declared != null && (response.headers.get('Content-Encoding') || 'identity').trim().toLowerCase() === 'identity' && Number(declared) !== size) { await response.body.cancel(); return null; }
+  // Chunks, not a size-length buffer: the descriptor's claimed size is never allocated up front.
+  const chunks = [], reader = response.body.getReader();
+  for (let n = 0; ;) {
+    const { done, value } = await reader.read();
+    if (done) return n === size ? new Uint8Array(await new Blob(chunks).arrayBuffer()) : null;
+    if ((n += value.length) > size) { await reader.cancel(); return null; }
+    chunks.push(value);
+  }
+}
+
+// 3D assets come only from the validated report's own run, named by a descriptor in its stored data.
+async function artifact3d(request, env, owner, repo, id, digest, kind) {
+  let active;
+  const asset = await privateAsset(request, digest, kind, async () => {
+    const allowed = await access(request, env, owner, repo);
+    if (allowed instanceof Response) return allowed;
+    active = allowed.s;
+    if (!/^[0-9a-f]{64}$/.test(digest) || !['board.glb', 'board-parts.json'].includes(kind)) return assetError();
+    try {
+      const stored = await readArtifactHtml(owner, repo, id, active, allowed.repo);
+      if (stored instanceof Response) return stored;
+      const { metadata, data } = stored, run = String(metadata.workflow_run?.id);
+      if (!served3d(metadata, data)) return assetError();
+      const key = kind === 'board.glb' ? 'model' : 'parts', name = `kicad-3d-${digest}-${kind}.gz`;
+      const descriptor = (Array.isArray(data.projects) ? data.projects : []).flatMap((p) => ['base', 'head'].map((side) => p?.board?.assets3d?.[side]?.[key]))
+        .find((a) => a?.digest === digest && a.artifactName === name && Number.isSafeInteger(a.bytes) && a.bytes > 0);
+      if (!descriptor) return assetError();
+      const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions`, matches = [];
+      for (let page = 1; ; page++) {
+        const list = await gh(`${root}/runs/${run}/artifacts?per_page=100&page=${page}`, active.token);
+        const artifacts = list.ok ? (await list.json()).artifacts : null;
+        if (!Array.isArray(artifacts)) return assetError();
+        matches.push(...artifacts.filter((a) => a?.name === name));
+        if (artifacts.length < 100) break;
+      }
+      const [match] = matches;
+      if (matches.length !== 1 || match.expired || String(match.workflow_run?.id) !== run || !/^\d{1,20}$/.test(String(match.id))) return assetError();
+      const archive = await gh(`${root}/artifacts/${match.id}/zip`, active.token, { redirect: 'manual' });
+      const location = archive.status === 302 ? downloadUrl(archive.headers.get('Location')) : null;
+      if (!location) return assetError();
+      // Share downloader's host policy; never forward GitHub authorization or follow further redirects.
+      const body = await fetch(location, { redirect: 'manual' });
+      if (!body.ok) return assetError();
+      const bytes = await readExactly(body, descriptor.bytes);
+      return bytes && bytes[0] === 31 && bytes[1] === 139 ? bytes : assetError();
+    } catch { return assetError(); }
   });
   return sessionResponse(asset.body, { status: asset.status, headers: asset.headers,
     encodeBody: asset.headers.get('Content-Encoding') === 'gzip' ? 'manual' : 'automatic' }, active);
@@ -811,6 +942,17 @@ const routes = {
       if (request.method === 'POST' && askMatch) {
         const result = await askRoute(request, env, { owner: askMatch[1], repo: askMatch[2], id: askMatch[3], rest: askMatch[4] || '' }, { access, gh });
         return response(result.body, { status: result.status, headers: result.headers });
+      }
+      const modelRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/(\d{1,20})\/3d\/([^/]+)\/([^/]+)$/);
+      if (request.method === 'GET' && modelRoute) {
+        const [, owner, repo, id, digest, kind] = modelRoute;
+        return artifact3d(request, env, owner, repo, id, digest, kind);
+      }
+      const downloadRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/(\d{1,20})\/download\/(\d{1,3})\/(fab|pdf|step|glb)$/);
+      if (request.method === 'GET' && downloadRoute) {
+        const [, owner, repo, id, index, kind] = downloadRoute;
+        const allowed = await access(request, env, owner, repo);
+        return allowed instanceof Response ? allowed : downloadFile(owner, repo, id, index, kind, allowed.s);
       }
       const artifactRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/([^/]+)(\/raw|\/pdf)?$/);
       if (request.method === 'GET' && artifactRoute) {

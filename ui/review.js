@@ -4,7 +4,8 @@ const D = window.REVIEW_DATA;
 // bench-t2: never repeat the site frame inside its sandboxed report.
 document.body.classList.toggle("report-framed", parent !== window);
 const $ = s => document.querySelector(s);
-const S = { p: 0, v: null, m: "side", x: null, y: null, z: null, s: null, t: "changes", layers: null, hidden3d: [], checks: { check: "", scope: null, error: true, warning: true, waived: false }, part: null, net: null, revision: null };
+const LIGHT_RIGS3D = ["bench", "lowsun", "photo"];
+const S = { p: 0, v: null, m: "side", x: null, y: null, z: null, s: null, part3d: null, t: "changes", layers: null, hidden3d: [], checks: { check: "", scope: null, error: true, warning: true, waived: false }, part: null, net: null, revision: null };
 S.threads = null; S.threadFilter = { status: "open", severity: "" }; S.placing = false;
 let THREADS_ON = parent !== window && !!D.settings?.threads?.enabled;
 let ISSUES_ON = parent !== window && !!D.settings?.issues?.enabled;
@@ -249,9 +250,12 @@ async function focusIdentity(st) {
   return true;
 }
 
-function openProject(i) { clearImageSelection(); S.p = i; S.s = null; S.io = null; S.ig = null; S.layers = null; S.part = null; S.net = null; S.revision = null; select(firstChangedView(proj())); renderPanel(); }
+// A #part/#net link carries its own revision; navigating away drops the link and that revision,
+// while a revision chosen in the 3D view (no link active) persists across navigation.
+function clearIdentityLink() { if (S.part || S.net) S.revision = null; S.part = null; S.net = null; }
+function openProject(i) { clearImageSelection(); S.part3d = null; S.p = i; S.s = null; S.io = null; S.ig = null; S.layers = null; clearIdentityLink(); select(firstChangedView(proj())); renderPanel(); }
 function stopPlacing() { S.placing = false; document.body.classList.remove("placing"); }
-function select(view) { clearImageSelection(); const library = String(S.v).startsWith("lib:") || String(view).startsWith("lib:") || tabsChange(view); stopPlacing(); S.v = view; if (String(view).startsWith("lib:")) S.t = "changes"; S.x = S.y = S.z = null; S.part = null; S.net = null; S.revision = null; renderModes(); renderNav(); if (library) renderPanel(); renderZoombar(); draw(); saveHash(); }
+function select(view) { clearImageSelection(); S.part3d = null; renderInspector(); const library = String(S.v).startsWith("lib:") || String(view).startsWith("lib:") || tabsChange(view); stopPlacing(); S.v = view; if (String(view).startsWith("lib:")) S.t = "changes"; S.x = S.y = S.z = null; clearIdentityLink(); renderModes(); renderNav(); if (library) renderPanel(); renderZoombar(); draw(); saveHash(); }
 
 function decodeState(hash) {
   const q = new URLSearchParams(hash.replace(/^#/, "").replace(/^.*?#/, "")), out = {};
@@ -261,12 +265,15 @@ function decodeState(hash) {
   if (q.has("l")) out.layers = q.get("l").split(",").filter(Boolean);
   if (q.has("c")) out.camera3d = q.get("c").split(",").map(Number);
   if (q.has("h")) out.hidden3d = q.get("h").split(",").filter(Boolean);
+  if (q.get("asm") === "0") out.assembled3d = false;
+  if (q.has("lt")) { const [rig, bearing, exposure] = q.get("lt").split(","); out.lighting3d = { rig, bearing: +bearing, exposure: +exposure }; }
   return out;
 }
 function valid(st) {   // drop anything that does not exist in this report
   const pi = Number.isInteger(st.p) && D.projects[st.p] ? st.p : 0, out = { p: pi }, p = D.projects[pi];
   if ((st.v === "board" && boardAvailable(p)) || (st.v === '3d' && modelAvailable(p)) || p.sheets.some(s => `sheet:${s.path}` === st.v) || (/^lib:\d+$/.test(st.v) && !!p.libraries?.[+st.v.slice(4)])) out.v = st.v;
   if (Object.hasOwn(MODES, st.m ?? "")) out.m = st.m;
+  out.revision = ["base", "head"].includes(st.revision) ? st.revision : "head";
   for (const k of ["x", "y", "z"]) if (Number.isFinite(st[k]) && (k !== "z" || st[k] > 0)) out[k] = st[k];
   if (p.changes.some(r => r.id === st.s) || p.checks.some(c => c.violations.some(v => v.id === st.s))) out.s = st.s;
   if (st.t === "checks" || st.t === "changes" || st.t === "threads" || st.t === "parts" && p.parts || st.t === "appearance" || st.t === "ask" && ASK.on) out.t = st.t;
@@ -278,22 +285,27 @@ function valid(st) {   // drop anything that does not exist in this report
   if (Array.isArray(st.hidden3d)) out.hidden3d = st.hidden3d.filter(x => GROUPS3D.some(([id]) => id === x));
   if (st.part === String(st.part) && st.part.length <= 100) out.part = st.part;
   if (st.net === String(st.net) && st.net.length <= 2000) out.net = st.net;
-  if (st.revision === 'base' || st.revision === 'head') out.revision = st.revision;
+  if (st.assembled3d === false) out.assembled3d = false;
+  if (st.lighting3d && LIGHT_RIGS3D.includes(st.lighting3d.rig)) {   // unknown rig = default light; shared studio policy clamps numbers
+    // Shared studio presets own persisted lighting defaults and clamping.
+    out.lighting3d = window.ThreeStudio.normalizeLighting(st.lighting3d);
+  }
   return out;
 }
 function applyState(st) {
   const v = valid(st);
   if(v.p!==S.p || (v.v ?? firstChangedView(D.projects[v.p]))!==S.v)clearImageSelection();
   if (v.t === "appearance") { leftTab = "appearance"; leftCollapsed = false; }
-  Object.assign(S, { p: v.p, v: v.v ?? firstChangedView(D.projects[v.p]), m: v.m ?? S.m, s: v.s ?? null, io: null, ig: null, t: v.t ?? S.t,
-                     layers: v.layers ?? null, hidden3d: v.hidden3d ?? [], camera3d: v.camera3d ?? null, x: v.x ?? null, y: v.y ?? null, z: v.z ?? null,
-                     part: v.part ?? null, net: v.net ?? null, revision: v.revision ?? null });
+  Object.assign(S, { p: v.p, v: v.v ?? firstChangedView(D.projects[v.p]), m: v.m ?? S.m, s: v.s ?? null, part3d: null, io: null, ig: null, t: v.t ?? S.t,
+                     revision: v.revision ?? "head", layers: v.layers ?? null, hidden3d: v.hidden3d ?? [], assembled3d: v.assembled3d ?? true, lighting3d: v.lighting3d ?? window.ThreeStudio.normalizeLighting(window.ThreeStudio.PRESETS.bench), camera3d: v.camera3d ?? null, x: v.x ?? null, y: v.y ?? null, z: v.z ?? null,
+                     part: v.part ?? null, net: v.net ?? null });
   if (S.layers && S.v === "board") Appearance.patch({layers: Object.fromEntries(proj().board.layers.map(l => [canon(l.name), {visible: S.layers.includes(l.name)}]))});   // the link's l= wins over stored eyes
   if (S.x == null || S.y == null || S.z == null) S.x = S.y = S.z = null;
   const hasPos = S.z != null;
   renderModes();
   renderNav();
   renderPanel();
+  renderInspector();
   renderZoombar();
   return draw().then(async () => {
     if (v.part || v.net) { await focusIdentity({ ...v, v: st.v }); return; }
@@ -913,11 +925,12 @@ async function draw() {
     appearanceSchematics.clear();
     releaseImageStage($("#stage"));
     $("#stage").replaceWith(stage); // WebGL needs connected canvas dimensions.
-    await window.Review3D.show(stage, proj(), S);
+    await window.Review3D.show(stage, proj(), S, {single:window.REVIEW_DATA.mode === "single"});
     if (my === gen && stage.isConnected) statusText('.status-message', 'Ready');
     return;
   }
   window.Review3D?.dispose();
+  if(S.part3d){S.part3d=null;renderInspector();}
   const manifestsReady = loadImageManifests(P);
   let scenes = null;
   const geo = S.v === "board" && view && proj().board.geometry;
@@ -1768,6 +1781,8 @@ function afterDraw(view) {
   drawImageSelection();
   drawPins();
   mountImageSearch();
+  void renderElectricalPins();
+  renderFallbackCopper();
 }
 function drawPins() {
   // Refresh pins in place: replacing the drawing can swallow an in-flight right-click.
@@ -1832,13 +1847,59 @@ function syncSelectedChangeCard() {
     if(selected)e.scrollIntoView({block:'nearest'});
   }
 }
-function markSelected() { clearImageSelection(); S.io = null; S.ig = null; syncSelectedChangeCard(); updateStatus(); renderInspector(); }
-if (window.Review3D) { window.Review3D.onPick = id => { S.s = id; markSelected(); saveHash(); document.querySelector(`#panel [data-id="${id}"]`)?.scrollIntoView({ block: "nearest" }); const r = proj().changes.find(c => c.id === id); if (r) window.Review3D.focus(r); }; window.Review3D.onCameraEnd = () => { S.camera3d = window.Review3D.cameraState(); saveHash(); }; }
+function renderFallbackCopper() {
+  document.querySelectorAll('.copper-selection-fallback').forEach(e=>e.remove());
+  const row=proj().changes.find(r=>r.id===S.s), view=currentView();
+  if(S.v!=='board' || boardView.useGL || row?.detail?.kind!=='area' || !view) return;
+  const seen=new Set();
+  for(const stack of document.querySelectorAll('#stage .world .stack')) {
+    const action=stack.classList.contains('base')?'removed':stack.classList.contains('head')?'added':null;
+    if(!action) continue;
+    const target=S.m==='semantic'?stack.parentElement:stack;
+    const key=S.m==='semantic'?action:stack;
+    if(seen.has(key)) continue;
+    seen.add(key);
+    const rings=row.detail[action+'Contours']||[]; if(!rings.length) continue;
+    const svg=document.createElementNS('http:'+'//www.w3.org/2000/svg','svg');
+    svg.classList.add('copper-selection','copper-selection-fallback');
+    svg.setAttribute('width',view.size[0]*PX);svg.setAttribute('height',view.size[1]*PX);
+    svg.setAttribute('viewBox','0 0 '+view.size.join(' '));
+    const path=document.createElementNS(svg.namespaceURI,'path');
+    path.dataset.action=action;
+    path.setAttribute('d',rings.map(ring=>ring.map(([x,y],i)=>(i?'L':'M')+x+' '+y).join(' ')+'Z').join(' '));
+    path.setAttribute('aria-label',action+' copper on '+row.detail.layer);
+    svg.dataset.side=action==='removed'?'base':'head';
+    svg.append(path);
+    // Semantic artwork hides base and dims head; selection must remain visible in both signs.
+    target.append(svg);
+  }
+}
+function markSelected() { S.part3d = null; clearImageSelection(); S.io = null; S.ig = null; syncSelectedChangeCard(); updateStatus(); renderInspector(); renderFallbackCopper(); }
+if (window.Review3D) { window.Review3D.onPick = id => { S.s = id; markSelected(); saveHash(); document.querySelector(`#panel [data-id="${id}"]`)?.scrollIntoView({ block: "nearest" }); const r = proj().changes.find(c => c.id === id); if (r) window.Review3D.focus(r); }; window.Review3D.onPartPick = part => {
+  S.s = null; markSelected(); S.part3d = {...part,box:part.box.slice()}; renderInspector(); saveHash();
+}; window.Review3D.onCameraEnd = () => { S.camera3d = window.Review3D.cameraState(); saveHash(); }; window.Review3D.onStateChange = ({revision, assembled3d, lighting3d, hiddenGroups, partSelection}) => {
+  const patch = {};
+  if (revision !== undefined) patch.revision = valid({...S, revision}).revision;
+  if (assembled3d !== undefined) patch.assembled3d = assembled3d !== false;
+  if (lighting3d) patch.lighting3d = window.Review3D.normalizeLighting(lighting3d);
+  Object.assign(S, patch);
+  const part=S.part3d&&window.Review3D.state?.parts[S.part3d.side]?.find(p=>p.uuid===S.part3d.uuid);
+  if(S.part3d&&(partSelection===null||revision!==undefined||assembled3d===false||hiddenGroups?.some(g=>g==='bodies'||g===part?.side))) {
+    S.part3d=null;renderInspector();
+  }
+  saveHash();
+}; }
 const viewOf = r => r.where?.board ? "board" : r.where?.sheet != null ? `sheet:${r.where.sheet}` : null;
 function goTo(id) {
-  S.part = null; S.net = null; S.revision = null;
+  clearIdentityLink();
   const r = proj().changes.find(c => c.id === id) || allViolations().find(v => v.id === id);
   if (!r) return Promise.resolve();
+  if (r.detail && ["members", "pad-net", "area"].includes(r.detail.kind)) {
+    const sheet = Object.values(r.anchors || {}).flat().find(a => a.sheet != null)?.sheet;
+    if (boardAvailable(proj())) return electricalTarget(r, {kind: "board"});
+    if (sheet != null) return electricalTarget(r, {kind: "sheet", sheet});
+    S.s = r.id; markSelected(); saveHash(); return Promise.resolve();
+  }
   S.s = id;
   if (S.v === "3d") { markSelected(); window.Review3D?.focus(r); saveHash(); document.querySelector(`#panel [data-id="${id}"]`)?.scrollIntoView({ block: "nearest" }); return Promise.resolve(); }
   const view = viewOf(r) ?? S.v;
@@ -1846,6 +1907,91 @@ function goTo(id) {
     const box = boardDiff?.bounds(id,r.action === "removed" ? "base" : "head") || rowBox(r, r.action === "removed" ? "base" : "head"); if (S.v === "3d") window.Review3D?.focus(r); else if (box) zoomTo(box); markSelected(); saveHash(); };
   if (view !== S.v) { const library = String(S.v).startsWith("lib:") || tabsChange(view); S.v = view; S.x = S.y = S.z = null; renderNav(); if (library) renderPanel(); }
   return draw().then(zoom);
+}
+// ---- Electrical rows: spec 01's revision-wide hotspot manifests locate anchored pins; copper rows reveal their layer.
+async function electricalManifest(sheetPath, side) {
+  const id = proj().sheets.find(s => s.path === sheetPath)?.hotspots?.[side];
+  if (!id) return null;
+  try {
+    const m = JSON.parse(await svgText(id));
+    return m?.version === 1 && m.units === "mm" ? m.views?.find(v => v.sheet === sheetPath) || null : null;
+  } catch { return null; }
+}
+function electricalPins(row, side, sheetPath, manifest) {
+  const anchors = (row.anchors?.[side] || []).filter(a => a.sheet === sheetPath), result = [];
+  for (const a of anchors) for (const e of manifest?.elements || []) {
+    if (a.uuid ? e.uuid !== a.uuid : e.ref !== a.ref) continue;
+    for (const p of e.pins || []) if (String(p.number) === String(a.pin))
+      result.push({uuid: e.uuid, ref: e.ref, number: String(p.number), x: p.x, y: p.y});
+  }
+  return result;
+}
+async function electricalTarget(row, target) {
+  S.s = row.id;
+  if (target.kind === "board") {
+    S.v = "board";
+    if (row.detail?.kind === "area") {
+      const layer = proj().board.layers.find(l => canon(l.name) === row.detail.layer);
+      if (layer) changeBoardAppearance({layers: {[canon(layer.name)]: {visible: true}}});
+    }
+  } else S.v = "sheet:" + target.sheet;
+  S.x = S.y = S.z = null; renderNav(); renderPanel(); await draw();
+  let box = row.box;
+  if (target.kind === "sheet") {
+    const pins = (await Promise.all(["base", "head"].map(async side => electricalPins(row, side, target.sheet,
+      await electricalManifest(target.sheet, side))))).flat();
+    if (pins.length) box = [Math.min(...pins.map(p => p.x)) - 1, Math.min(...pins.map(p => p.y)) - 1,
+      Math.max(...pins.map(p => p.x)) + 1, Math.max(...pins.map(p => p.y)) + 1];
+  }
+  if (box) zoomTo(box);
+  await renderElectricalPins(); markSelected(); saveHash();
+}
+let electricalPinGeneration = 0;
+async function renderElectricalPins() {
+  const generation = ++electricalPinGeneration, row = proj().changes.find(r => r.id === S.s), view = S.v;
+  document.querySelectorAll(".electrical-pin").forEach(e => e.remove());
+  if (!row?.anchors || !view?.startsWith("sheet:")) return;
+  const sheet = view.slice(6), manifests = await Promise.all(["base", "head"].map(s => electricalManifest(sheet, s)));
+  if (generation !== electricalPinGeneration || S.s !== row.id || S.v !== view) return;
+  for (const world of document.querySelectorAll("#stage .world")) {
+    const revisions = ["base", "head"].filter(side => world.querySelector(`.stack.${side}`));
+    for (const side of revisions) {
+      const manifest = manifests[side === "base" ? 0 : 1];
+      for (const pin of electricalPins(row, side, sheet, manifest)) {
+        const ring = document.createElement("span"); ring.className = "electrical-pin " + side;
+        ring.style.left = pin.x * PX + "px"; ring.style.top = pin.y * PX + "px";
+        ring.setAttribute("role", "img"); ring.setAttribute("aria-label", pin.ref + "." + pin.number + " " + side);
+        world.append(ring);
+      }
+    }
+  }
+}
+async function electricalControls(dock, row) {
+  dock.querySelector(".electrical-targets")?.remove();
+  if (!row?.anchors) return;
+  const hasBoard = boardAvailable(proj());
+  const sheets = [...new Set(Object.values(row.anchors).flat().map(a => a.sheet).filter(s => s != null))];
+  if (!hasBoard && !sheets.length) return;
+  const controls = document.createElement("div"); controls.className = "electrical-targets";
+  const add = (label, target) => { const b = document.createElement("button"); b.type = "button";
+    b.textContent = label; b.dataset.electricalTarget = target.kind;
+    b.onclick = () => electricalTarget(row, target); controls.append(b); };
+  if (hasBoard) add("Board net", {kind: "board"});
+  for (const sheet of sheets) add("Pins on " + sheet, {kind: "sheet", sheet});
+  (dock.querySelector("#insp-body") || dock).append(controls);
+  // Unit anchors are alternatives for one logical sheet/reference/pin; one resolved pin is sufficient.
+  const resolved = await Promise.all(sheets.flatMap(sheet => ["base", "head"].map(async side => {
+    const anchors = (row.anchors[side] || []).filter(a => a.sheet === sheet);
+    if (!anchors.length) return true;
+    const pins = electricalPins(row, side, sheet, await electricalManifest(sheet, side));
+    return anchors.some(a => pins.some(p => String(p.number) === String(a.pin) &&
+      (a.uuid ? p.uuid === a.uuid : p.ref === a.ref)));
+  })));
+  if (!controls.isConnected || dock.querySelector(".electrical-targets") !== controls) return;
+  if (resolved.some(ok => !ok)) {
+    const note = document.createElement("p"); note.className = "electrical-pin-unavailable";
+    note.textContent = "Pin locations unavailable in this report"; controls.append(note);
+  }
 }
 // ---- Threads: anchors pin a discussion to a KiCad object (UUID, reference fallback) or a point, in mm. ----
 const round3 = n => Math.round(n * 1000) / 1000;
@@ -1944,10 +2090,39 @@ function resolveAnchor(a) {
 }
 S.filter = { added: true, removed: true, modified: true, kind: "", q: "", all: false };
 const allViolations = () => proj().checks.flatMap(c => c.violations.map(v => ({ ...v, check: c.title })));
+const ELECTRICAL_CHANNELS={components:'Parts',wiring:'Wiring',routing:'Routing',rules:'Rules',board:'Board',visual:'Other'};
+function electricalDetail(r) {
+  const d=r.detail;
+  if(!d) return '';
+  if(d.kind==='members') return `<div class="member-chips">${[
+    ...(d.added||[]).map(s=>`<span class="chip added">+${esc(s)}</span>`),
+    ...(d.removed||[]).map(s=>`<span class="chip removed">−${esc(s)}</span>`)].join('')}</div>`+
+    `<div class="more">${esc((d.beforeNets||[]).join(' + '))} → ${esc((d.afterNets||[]).join(' + '))}</div>`+
+    (d.transitions||[]).map(t=>`<div class="member-transition">${esc(t.pin)}: ${esc((t.before||[]).join(' + ')||'(unconnected)')} → ${esc((t.after||[]).join(' + ')||'(unconnected)')}</div>`).join('');
+  if(d.kind==='area') return `<div class="more">${esc(d.layer)}: +${Number(d.addedMm2).toFixed(3)} / −${Number(d.removedMm2).toFixed(3)} mm²</div>`;
+  if(d.kind==='number') return `<div class="more">${esc(d.before??'—')} → ${esc(d.after??'—')} ${esc(d.unit)}</div>`;
+  if(d.kind==='pad-net') return `<div class="more">${esc(d.before||'(unconnected)')} → ${esc(d.after||'(unconnected)')}${d.boardOnly===true?' · board-only net change':d.boardOnly==null?' · '+esc(d.evidenceNote||'Schematic assignment unavailable'):''}</div>`;
+  if(d.kind==='wires') return `<div class="more">Wires drawn ${esc(d.drawn)} / erased ${esc(d.erased)}</div>`;
+  if(d.kind==='position') return `<div class="more">${Number(d.distanceMm).toFixed(3)} mm moved</div>`;
+  return `<div class="more">${esc(JSON.stringify(d.before??''))} → ${esc(JSON.stringify(d.after??''))}</div>`;
+}
 function card(r) {
   return `<button class="card" data-id="${esc(r.id)}" data-action="${esc(r.action)}" data-kind="${esc(r.kind)}" aria-selected="${S.s === r.id}">
     <span class="ref">${esc(r.ref || r.kind)}</span> <span class="kind">${esc(r.kind)}</span>
-    <span class="badge ${esc(r.action)}">${GLYPH[r.action] ?? ""} ${esc(r.action)}</span></button>`;
+    <span class="badge ${esc(r.action)}">${GLYPH[r.action] ?? ""} ${esc(r.action)}</span>${r.weight ? '<span class="weight">'+esc(r.weight)+'</span>' : ''}${electricalDetail(r)}</button>`;
+}
+function channelLabel(channel) {
+  return Object.hasOwn(ELECTRICAL_CHANNELS, channel) ? ELECTRICAL_CHANNELS[channel] : null;
+}
+function electricalSummaryHtml() {
+  const s=proj().summary;
+  if(!s) return {top:'',status:'',incomplete:''};
+  const channels=(s.channels||[]).filter(c=>c.status&&c.status!=='not_applicable')
+    .map(c=>`${esc(channelLabel(c.channel)??c.channel)}: ${esc(c.status)} (${esc(c.total??0)})`).join(' · ');
+  const issues=(s.incomplete||[]).map(i=>`<div>${esc(channelLabel(i.channel)??i.channel)}: ${esc(i.reason)}</div>`).join('');
+  return {top:s.headline?`<div class="electrical-headline">${esc(s.headline)}</div>`:'',
+    status:channels?`<div class="electrical-status muted">${channels}</div>`:'',
+    incomplete:issues?`<div class="electrical-incomplete" role="note">${issues}</div>`:''};
 }
 function inventoryHtml() {
   // Removed (base) rows match removed change rows, others match added/modified: a reused reference gets the right badge.
@@ -1957,7 +2132,7 @@ function inventoryHtml() {
   const place = o => o.sheet === undefined ? (o.layer || "board") : (proj().sheets.find(s => s.path === o.sheet)?.name || o.sheet);
   const q = S.filter.q.toLowerCase(), objs = (proj().objects || []).map((o, i) => ({ o, i }))
     .filter(({ o }) => !q || [o.ref, o.value, o.footprint, place(o)].some(v => String(v ?? "").toLowerCase().includes(q)));
-  const f = S.filter, groupFor = o => f.group === "action" ? changeFor(o)?.action || "unchanged" : o.kind;
+  const f = {...S.filter, group: ["kind","action"].includes(S.filter.group) ? S.filter.group : ""}, groupFor = o => f.group === "action" ? changeFor(o)?.action || "unchanged" : o.kind;
   if (f.sort) objs.sort((a, b) => String(f.sort === "kind" ? a.o.kind : a.o.ref).localeCompare(String(f.sort === "kind" ? b.o.kind : b.o.ref), undefined, {numeric:true}));
   if (f.group) objs.sort((a, b) => groupFor(a.o).localeCompare(groupFor(b.o)));
   let previous;
@@ -1987,18 +2162,25 @@ function goToObject(i) {
 }
 function bindInventory() {
   for (const b of document.querySelectorAll("#panel .inv-row[data-obj]")) b.onclick = () => {
-    S.part = null; S.net = null; S.revision = null;
+    clearIdentityLink();
     goToObject(+b.dataset.obj);
   };
 }
+// ponytail: pages of 50 visible cards; search narrows the full embedded list.
 const CHANGE_PAGE_SIZE = 50, changePage = {key:'',index:0,ids:[]};
+// Explicit user grouping wins; default is channel when the report carries channel data.
+function changeGroup() {
+  const g = S.filter.group;
+  return g === "none" ? "" : g || (proj().changes.some(r => r.channel) ? "channel" : "");
+}
 function filteredChangeRows() {
-  const f = S.filter, q = f.q.toLowerCase();
+  const f = S.filter, q = f.q.slice(0, 200).toLowerCase();
   let rows = proj().changes.filter(r => f[r.action] && (!f.kind || r.kind === f.kind)
-    && (!q || JSON.stringify([r.ref, r.kind, r.changes, r.props]).toLowerCase().includes(q)));
+    && (!q || JSON.stringify([r.ref, r.kind, r.changes, r.props, r.detail, r.anchors]).toLowerCase().includes(q)));
   if (f.sort === "reference") rows.sort((a, b) => String(a.ref).localeCompare(String(b.ref), undefined, {numeric:true}));
   if (f.sort === "kind") rows.sort((a, b) => a.kind.localeCompare(b.kind));
-  if (f.group) rows.sort((a, b) => String(a[f.group]).localeCompare(String(b[f.group])));
+  if (changeGroup() === "channel") { const o = r => { const i = Object.keys(ELECTRICAL_CHANNELS).indexOf(r.channel); return i < 0 ? 5 : i; }; rows.sort((a, b) => o(a) - o(b)); }
+  else if (f.group && f.group !== "none") rows.sort((a, b) => String(a[f.group]).localeCompare(String(b[f.group])));
   return rows;
 }
 function changeCardIds() {
@@ -2012,10 +2194,11 @@ function cardsHtml() {
   const pages=Math.max(1,Math.ceil(rows.length/CHANGE_PAGE_SIZE));
   changePage.index=Math.max(0,Math.min(pages-1,changePage.index));
   const start=changePage.index*CHANGE_PAGE_SIZE;
+  const g = changeGroup();
   let previous;
   return (rows.slice(start,start+CHANGE_PAGE_SIZE).map(r => {
-    const group = f.group ? r[f.group] : null;
-    const heading = f.group && group !== previous ? `<h3 class="dock-group">${esc(group)}</h3>` : "";
+    const group = g === "channel" ? channelLabel(r.channel) || "Other" : g ? r[g] : null;
+    const heading = g && group !== previous ? `<h3 class="dock-group">${esc(group)}</h3>` : "";
     previous = group;
     return heading + card(r);
   }).join("") || '<p class="muted">No changes match.</p>')
@@ -2044,36 +2227,65 @@ function waiverSnippet(v, check) {
   const quote = x => '"' + String(x).replace(/["\\\u0000-\u001f\u007f]/g, c => c === '"' || c === "\\" ? "\\" + c : "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0")) + '"';
   return `[[waiver]]\ncheck = ${quote(check)}\nmatch = ${quote(v.waiver_key)}\n# ${String(v.description).replace(/[\u0000-\u001f\u007f]/g, " ")}\nreason = ""          # why this is acceptable\nby = ""              # your GitHub login\ndate = ${today.toISOString().slice(0, 10)}\nuntil = ${until}    # or replace with: permanent = true`;
 }
+function fabLedger(c) {
+  const label = c.profile === 'jlcpcb-2l' ? 'JLCPCB 2-layer'
+    : c.profile === 'jlcpcb-multilayer' ? 'JLCPCB multilayer' : c.profile === 'pcbway-std' ? 'PCBWay standard' : c.profile;
+  return `<section class="check-coverage" aria-label="Fabrication limit coverage">
+    <strong>Fab limits (${esc(label || 'unavailable')})</strong>
+    <p>Profile checked on ${esc(c.checkedOn || 'unknown')} · assumes ${esc(c.assumedCopperOz ?? 1)} oz copper.</p>
+    <p>Checked: ${esc((c.checked || []).join(', ') || 'none')}.</p>
+    <p>Not checked: ${esc((c.unchecked || []).join(', ') || 'none listed')}.</p>
+    ${c.unsupported ? `<p>${esc(c.unsupported)}</p>` : ''}
+    ${(c.coverageWarnings || []).map(w => `<p>${esc(w)}</p>`).join('')}
+    ${c.status === 'not_run' ? '<p>Not run: no head board, so no fab comparison was made.</p>'
+      : D.mode === 'single' ? '<p>Current-design audit: no base fab comparison was run.</p>'
+      : c.baselineAvailable === false ? '<p>No base audit: findings are newly audited.</p>'
+      : `<p>Compared with base: ${esc(c.new_errors ?? 0)} new, ${esc(c.fixed ?? 0)} fixed.</p>`}
+  </section>`;
+}
+function checkKey(check) {
+  return check.vendor ? `${check.name}\u0000${check.vendor}` : check.name;
+}
+function checkTitle(check) {
+  const vendor = { jlcpcb: "JLCPCB", pcbway: "PCBWay" }[check.vendor] || check.vendor;
+  return vendor ? `${check.title} · ${vendor}` : check.title;
+}
 function renderChecks() {
   const p = proj(), state = S.checks;
   if (!p.checks.length) return '<p class="muted">No checks ran for this project.</p>';
   const order = ["erc", "drc", "parity", "bom"];  // release is listed only when it ran: older reports never had it
-  const titles = { erc: "ERC", drc: "DRC", parity: "Schematic/board parity", bom: "BOM fields", interfaces: "Interfaces", release: "Release package" };
-  const byName = new Map(p.checks.map(c => [c.name, c]));
-  const names = [...order, ...p.checks.map(c => c.name).filter(n => !order.includes(n))];
-  const configured = names.map(name => ({ name, check: byName.get(name), setting: D.settings?.checks?.[name] }));
+  const titles = { erc: "ERC", drc: "DRC", parity: "Schematic/board parity", bom: "BOM fields", interfaces: "Interfaces", release: "Release package", fab_limits: "Fab limits" };
+  const byKey = new Map(p.checks.map(c => [checkKey(c), c]));
+  const names = [...new Set([...order, ...p.checks.map(c => c.name)])];
+  // Both fab vendors share one check name; retain each section instead of Map's last value.
+  const configured = names.flatMap(name => {
+    const checks = p.checks.filter(c => c.name === name);
+    return (checks.length ? checks : [undefined]).map(check => ({ name, check, setting: D.settings?.checks?.[name] }));
+  });
   const ran = configured.filter(r => r.check && r.setting !== "off").map(r => r.check);
   const all = ran.flatMap(c => c.violations.map(v => ({ ...v, check: c })));
   const totalNew = all.filter(v => v.new && !v.waived).length;
   const scope = state.scope ?? (totalNew ? "new" : "all");
-  const checked = state.check && byName.has(state.check) ? state.check : "";
+  const checked = state.check && byKey.has(state.check) ? state.check : "";
   const summary = configured.map(({ name, check, setting }) => {
-    if (!check || setting === "off" || check.status === "not_run") return `<button class="check check-not-run" data-check-summary="${esc(name)}" aria-pressed="false">
-      <span class="check-heading"><span class="check-status">— not run</span><span class="check-title">${esc(titles[name] || name)}</span></span>
+    const key = check ? checkKey(check) : name;
+    if (!check || setting === "off" || check.status === "not_run") return `<button class="check check-not-run" data-check-summary="${esc(encodeURIComponent(key))}" aria-pressed="false">
+      <span class="check-heading"><span class="check-status">— not run</span><span class="check-title">${esc(check ? checkTitle(check) : titles[name] || name)}</span></span>
       <span class="check-reason">${esc(check?.reason || "turned off in kicad-review.toml")}</span></button>`;
     const baselineOnly = D.settings?.fail_on === "new" && check.errors > 0 && check.new_errors === 0;
     const status = check.status === "fail" ? "✕ failing" : check.status === "warn" ? "! warnings" : "✓ passing";
     const newer = check.new_errors + check.new_warnings;
-    return `<button class="check check-${esc(check.status)}" data-check-summary="${esc(name)}" aria-pressed="${checked === name}">
-      <span class="check-heading"><span class="check-status">${status}</span><span class="check-title">${esc(check.title)} <small>${esc(check.level === "informational" ? "info" : "required")}</small></span>${baselineOnly ? '<span class="check-status-detail">· no new errors</span>' : ""}</span>
+    return `<button class="check check-${esc(check.status)}" data-check-summary="${esc(encodeURIComponent(key))}" aria-pressed="${checked === key}">
+      <span class="check-heading"><span class="check-status">${status}</span><span class="check-title">${esc(checkTitle(check))} <small>${esc(check.level === "informational" ? "info" : "required")}</small></span>${baselineOnly ? '<span class="check-status-detail">· no new errors</span>' : ""}</span>
       <span class="check-counts">${check.errors} errors · ${check.warnings} warnings${check.waived ? ` · ${check.waived} waived` : ""}${newer ? ` <b class="check-new">+${newer} new</b>` : ""}${check.fixed ? ` <b class="check-fixed">${check.fixed} fixed</b>` : ""}</span></button>`;
   }).join("");
-  let shown = all.filter(v => (!checked || v.check.name === checked) && (scope === "all" || v.new) && state[v.severity] && (!v.waived || state.waived) && (!state.q || JSON.stringify([v.type, v.description, v.items]).toLowerCase().includes(state.q.toLowerCase())));
+  let shown = all.filter(v => (!checked || checkKey(v.check) === checked) && (scope === "all" || v.new) && state[v.severity] && (!v.waived || state.waived) && (!state.q || JSON.stringify([v.type, v.description, v.items]).toLowerCase().includes(state.q.toLowerCase())));
   const totalShown = shown.length;
   const groups = new Map();
   for (const v of shown) {
-    const key = state.group === "severity" ? v.severity : state.group === "check" ? v.check.name : `${v.check.name}\u0000${v.type}`;
-    if (!groups.has(key)) groups.set(key, { check: v.check, type: state.group === "severity" ? v.severity : state.group === "check" ? v.check.title : v.type, violations: [] });
+    const identity = checkKey(v.check);
+    const key = state.group === "severity" ? v.severity : state.group === "check" ? identity : `${identity}\u0000${v.type}`;
+    if (!groups.has(key)) groups.set(key, { check: v.check, type: state.group === "severity" ? v.severity : state.group === "check" ? checkTitle(v.check) : v.type, violations: [] });
     groups.get(key).violations.push(v);
   }
   const groupHtml = [...groups.values()].sort((a, b) => {
@@ -2086,10 +2298,10 @@ function renderChecks() {
     return `<details class="check-group" ${newCount || vs.some(v => v.id === S.waiveOpen) ? "open" : ""}><summary><span class="rule">${esc(g.type)}</span><span class="group-description">${esc(vs[0].description)}</span><span class="group-count">${vs.length}</span>${newCount ? `<b class="new-tag">NEW ${newCount}</b>` : ""}<span class="sev">${errors ? "✕ error" : "! warning"}</span></summary>${vs.slice(0, 200).map(v => {
       const at = v.pos && currentView(viewOf(v)), issueAnchor = ISSUES_ON && findingAnchor(v);
       return `<button class="viol ${esc(v.severity)}" data-id="${esc(v.id)}" data-new="${!!v.new}" ${at ? "" : 'aria-disabled="true"'} aria-selected="${S.s === v.id}">
-        ${v.new ? '<span class="new-tag">NEW</span>' : ""}${v.waived ? '<span class="waived-tag">WAIVED</span><span class="waived-reason"></span>' : ""}<span class="viol-location">${esc(v.items.join(" · ") || v.description)}</span><span class="show-hint">${at ? "Show ›" : "no location"}</span></button>${v.waiver_key && !v.waived && ["erc", "drc", "parity"].includes(v.check.name) ? `<button class="waive" data-waive="${esc(v.id)}" aria-label="Waive ${esc(v.items.join(" · ") || v.description)}" aria-controls="waiver-${esc(v.id)}" aria-expanded="${S.waiveOpen === v.id}">Waive…</button>${S.waiveOpen === v.id ? `<pre class="waiver-snippet" id="waiver-${esc(v.id)}" data-waiver-snippet="${esc(v.id)}"></pre><p class="muted waiver-help">Add this to kicad-review-waivers.toml on the pull request's target branch through a pull request, fill in reason and by, then re-run this review.</p>` : ""}` : ""}${issueAnchor && !issueForAnchor(issueAnchor) ? `<button class="track-issue" data-issue-for="${esc(v.id)}">Track as issue</button>` : ""}`;
+        ${v.new ? '<span class="new-tag">NEW</span>' : ""}${v.waived ? '<span class="waived-tag">WAIVED</span><span class="waived-reason"></span>' : ""}<span class="viol-location">${esc(v.items.join(" · ") || v.description)}</span><span class="show-hint">${at ? "Show ›" : "no location"}</span></button>${v.waiver_key && !v.waived && ["erc", "drc", "parity", "fab_limits"].includes(v.check.name) ? `<button class="waive" data-waive="${esc(v.id)}" aria-label="Waive ${esc(v.items.join(" · ") || v.description)}" aria-controls="waiver-${esc(v.id)}" aria-expanded="${S.waiveOpen === v.id}">Waive…</button>${S.waiveOpen === v.id ? `<pre class="waiver-snippet" id="waiver-${esc(v.id)}" data-waiver-snippet="${esc(v.id)}"></pre><p class="muted waiver-help">Add this to kicad-review-waivers.toml on the pull request's target branch through a pull request, fill in reason and by, then re-run this review.</p>` : ""}` : ""}${issueAnchor && !issueForAnchor(issueAnchor) ? `<button class="track-issue" data-issue-for="${esc(v.id)}">Track as issue</button>` : ""}`;
     }).join("")}${vs.length > 200 ? `<p class="muted check-more">+${vs.length - 200} more</p>` : ""}</details>`;
   }).join("");
-  return `${dockListTools("checks", state)}<div class="checks-summary">${summary}</div><div class="filters checks-filters">
+  return `${dockListTools("checks", state)}<div class="checks-summary">${summary}</div>${ran.filter(c => c.name === 'fab_limits').map(fabLedger).join('')}<div class="filters checks-filters">
     <button class="check-chip" data-check-scope="new" aria-pressed="${scope === "new"}">New in this change ${totalNew}</button>
     <button class="check-chip" data-check-scope="all" aria-pressed="${scope === "all"}">All ${all.length}</button>
     <button class="check-chip" data-check-severity="error" aria-pressed="${state.error}">Errors ${all.filter(v => v.severity === "error").length}</button>
@@ -2099,11 +2311,11 @@ function renderChecks() {
   return `<p class="check-coverage">${esc(c.title)}: ${det.length ? `detected ${esc(det.map(([k, n]) => `${k} ${n}`).join(", "))}` : "nothing detected"}${cv.protected[1] ? ` · ${cv.protected[0]} of ${cv.protected[1]} connector signal pins protected` : ""}</p>`; }).join("")}${ran.filter(c => c.package).map(c => `<details class="package"><summary>Package (${c.package.files.length} files) · SHA-256 ${esc((c.package.sha256 || "").slice(0, 12))}…</summary><ul>${c.package.files.map(f => `<li>${esc(f.path)} · ${(f.bytes / 1024).toFixed(1)} kB</li>`).join("")}</ul><p class="muted mono">${esc(c.package.sha256 || "")}</p></details>`).join("")}<div class="checks-list">${totalShown ? groupHtml : '<p class="muted">No violations match these filters. <button class="show-all">Show all</button></p>'}</div>`;
 }
 S.partsFilter = { problems: false, changed: false };
-const PARTS_BLOCKING = new Set(["missing_lcsc", "bad_lcsc", "lcsc_conflict", "placeholder", "mpn_footprint_conflict", "out_of_stock", "not_found", "discontinued"]);
+const PARTS_BLOCKING = new Set(["missing_lcsc", "bad_lcsc", "lcsc_conflict", "placeholder", "mpn_footprint_conflict", "unit_identity_conflict", "out_of_stock", "not_found", "discontinued"]);
 // One rule for every count, filter, sort and ⚠: a problem blocks ordering the part.
 const blocking = l => l.problems.some(p => PARTS_BLOCKING.has(p));
 const partsProblemCount = parts => parts.lines.filter(blocking).length;
-const PARTS_PROBLEMS = { missing_lcsc: "missing LCSC number", bad_lcsc: "LCSC number malformed", lcsc_conflict: "one LCSC number on several values", placeholder: "placeholder value", mpn_footprint_conflict: "one MPN on several footprints", missing_mpn: "MPN missing", out_of_stock: "out of stock", not_found: "not found at DigiKey", ambiguous: "several DigiKey matches", discontinued: "discontinued", unavailable: "lookup unavailable" };
+const PARTS_PROBLEMS = { missing_lcsc: "missing LCSC number", bad_lcsc: "LCSC number malformed", lcsc_conflict: "one LCSC number on several values", placeholder: "placeholder value", mpn_footprint_conflict: "one MPN on several footprints", unit_identity_conflict: "conflicting identities across symbol units", missing_mpn: "MPN missing", out_of_stock: "out of stock", not_found: "not found at DigiKey", ambiguous: "several DigiKey matches", discontinued: "discontinued", unavailable: "lookup unavailable" };
 function partsAge(s) {
   if (s?.skipped) return {text: `DigiKey lookup skipped: ${esc(s.skipped)}`, stale:true};
   if (!s || !s.fetched_at) return { text: `Supplier lookup not run${s && s.error ? `: ${esc(s.error)}` : ""}`, stale: true };
@@ -2132,13 +2344,82 @@ function fieldChangesHtml(parts) {
     `<tr><td>${esc(r.refs.join(", "))}</td><td>${esc(r.field)}</td><td>${esc(r.before ?? "—")}</td><td>${esc(r.after ?? "—")}</td></tr>`).join("")}</tbody></table>` : "")
     + (parts.dnp_mismatch?.length ? `<p class="dnp-mismatch">⚠ DNP differs between schematic and board: ${esc(parts.dnp_mismatch.join(", "))}</p>` : "");
 }
+S.partsView = "problems";   // ponytail: not in the link hash; add a key when deep links to the BOM view are needed
+S.bomFilter = { category: "", sort: "refs", dir: 1 };
+S.bomBoard = "all";   // "all": the repository BOM (REVIEW_DATA.bom) when present; "project": the project at S.p
+const BOM_SORTS = { qty: l => l.refs.length, part: l => l.value, refs: l => l.refs[0], mpn: l => l.mpn || "", lcsc: l => l.lcsc || "", datasheet: l => l.datasheet || "" };
+const bomCategory = l => l.category || "Other";
+const BOM_FAB_LABEL = { jlcpcb: "JLCPCB", pcbway: "PCBWay" };
+function partsSearchText(line) {
+  return [line.value, line.footprint, ...(line.refs || []), line.mpn, line.lcsc, bomCategory(line)].filter(Boolean).join(" ").toLowerCase();
+}
+function bomDownloadsHtml(parts) {
+  const x = parts.exports; if (!x) return "";
+  return `<span class="bom-downloads">${typeof x.fab === "string" ? `<button type="button" data-bom-download="fab">${esc(BOM_FAB_LABEL[x.preset] || x.preset)}${parts.combined ? " review file" : ""} ↓</button>` : ""}<button type="button" data-bom-download="csv">CSV ↓</button></span>${x.fabError ? `<p class="bom-export-error" role="status">${esc(x.fabError)}</p>` : ""}`;
+}
+function downloadBom(kind) {
+  const src = bomSource(), x = src.exports; if (!x || typeof x[kind] !== "string") return;
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([kind === "csv" ? "\uFEFF" + x.csv : x.fab], { type: "text/csv;charset=utf-8" }));
+  const name = src.name.replace(/[^\w.-]+/g, "_");
+  const stem = /[a-z0-9]/i.test(name) ? name : "bom";
+  a.download = `${stem}-${kind === "csv" ? "bom.csv" : `bom-${x.preset}.csv`}`;
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+}
+function bomRows(parts) {
+  const f = S.bomFilter, q = (S.partsFilter.q || "").toLowerCase(), key = BOM_SORTS[f.sort] || BOM_SORTS.refs;
+  return parts.lines.filter(l => (!f.category || bomCategory(l) === f.category) && (!q || partsSearchText(l).includes(q)))
+    .sort((a, b) => f.dir * (f.sort === "qty" ? key(a) - key(b) : String(key(a)).localeCompare(String(key(b)), undefined, { numeric: true })));
+}
+function bomRow(l, cs) {
+  const sheet = /^https?:\/\//i.test(l.datasheet || "") ? `<a href="${esc(l.datasheet)}" rel="noopener noreferrer" target="_blank">datasheet</a>` : "—";
+  const marks = cs.map(r => ({ added: ["+", "added"], swapped: ["~", "changed"], value: ["~", "changed"], footprint: ["~", "changed"], mpn: ["~", "changed"] })[r.action]).filter(Boolean);
+  const mark = marks.map(([glyph]) => glyph).join(""), label = [...new Set(marks.map(([, text]) => text))].join(", ");
+  return `<tr class="bom-row${cs.length ? " changed" : ""}"><td class="bom-delta" title="${esc(cs.map(r => r.action).join(", "))}">${mark}${label ? `<span class="sr-only">${esc(label)}</span>` : ""}</td><td class="bom-qty">${l.refs.length}</td><td class="bom-part"><b>${esc(l.value || "—")}</b><small>${esc(l.footprint)}</small>${l.mpn ? `<small class="bom-mpn-inline">${esc(l.mpn)}</small>` : ""}</td><td class="bom-refs" title="${esc(l.refs.join(", "))}">${esc(l.refsCompressed ?? l.refs.join(", "))}</td><td>${esc(l.mpn || "—")}</td><td>${esc(l.lcsc || "—")}</td><td>${sheet}</td></tr>`;
+}
+function renderBom(parts) {
+  const s = parts.summary, byCategory = s.byCategory || {}, f = S.bomFilter, n = (count, word) => `${count} ${word}${count === 1 ? "" : "s"}`;
+  const counts = Object.create(null);   // from the lines, so a category the summary does not know still gets a chip and a group
+  for (const l of parts.lines) counts[bomCategory(l)] = (counts[bomCategory(l)] || 0) + l.refs.length;
+  const cats = [...Object.keys(byCategory).filter(c => counts[c]), ...Object.keys(counts).filter(c => !Object.hasOwn(byCategory, c))];
+  if (f.category && !counts[f.category]) f.category = "";
+  const rows = bomRows(parts), changes = l => parts.changes.filter(r => r.action !== "removed" && r.refs.some(ref => l.refs.includes(ref)));
+  const th = (k, label) => `<th scope="col" aria-sort="${f.sort === k ? (f.dir > 0 ? "ascending" : "descending") : "none"}"><button type="button" data-bom-sort="${k}">${label}</button></th>`;
+  const groups = cats.map(c => ({ c, rs: rows.filter(l => bomCategory(l) === c) })).filter(g => g.rs.length);
+  return `<div class="bom-head"><p class="bom-summary">${n(s.components, "component")} · ${n(s.unique, "unique part")} · ${s.withMpn} with MPN</p>${bomDownloadsHtml(parts)}</div>
+    <div class="filters bom-chips" role="group" aria-label="Category">${[["", "All", s.components], ...cats.map(c => [c, c, counts[c]])].map(([c, label, count]) => `<button type="button" class="check-chip" data-bom-cat="${esc(c)}" aria-pressed="${f.category === c}">${esc(label)} ${count}</button>`).join("")}</div>
+    <div class="dock-list-tools"><input type="search" data-list-search="parts" aria-label="Search parts" placeholder="Search parts…" value="${esc(S.partsFilter.q || "")}"></div>
+    <div class="parts-scroll"><table class="bom-table"><thead><tr><th scope="col"><span class="sr-only">Change</span></th>${th("qty", "QTY")}${th("part", "PART")}${th("refs", "REFS")}${th("mpn", "MPN")}${th("lcsc", "LCSC")}${th("datasheet", "DATASHEET")}</tr></thead>${groups.map(({ c, rs }) => `<tbody><tr class="bom-cat"><th scope="rowgroup" colspan="7">${esc(c)} <span class="muted">${rs.reduce((total, l) => total + l.refs.length, 0)}</span></th></tr>${rs.map(l => bomRow(l, changes(l))).join("")}</tbody>`).join("")}</table>${groups.length ? "" : '<p class="muted">No parts match these filters.</p>'}</div>`;
+}
+function bomSource() {
+  const repo = D.bom;
+  if (repo && !repo.error && S.bomBoard === "all") {   // changes carry board-qualified refs, so badges match combined lines
+    const changes = D.projects.flatMap(p => (p.parts?.changes || []).map(c => ({ ...c, refs: c.refs.map(r => `${p.name}:${r}`) })));
+    return { name: "all-boards", combined: true, summary: repo.summary, lines: repo.lines, exports: repo.exports, changes };
+  }
+  const project = proj(), parts = project.parts;
+  return { name: project.name, summary: parts.summary, lines: parts.lines, exports: parts.exports, changes: parts.changes };
+}
+function renderBomWithBoards() {
+  const repo = D.bom;
+  const chips = repo ? [["all", repo.error ? "All boards (unavailable)" : "All boards"], ...D.projects.map((p, i) => [String(i), p.name])] : [];
+  const pressed = k => k === "all" ? !!(repo && !repo.error && S.bomBoard === "all") : (S.bomBoard === "project" || !!(repo && repo.error && S.bomBoard === "all")) && k === String(S.p);
+  const picker = repo ? `<div class="filters bom-boards" role="group" aria-label="Board">${chips.map(([k, label]) => `<button type="button" class="check-chip" data-bom-board="${esc(k)}" aria-pressed="${pressed(k)}">${esc(label)}</button>`).join("")}</div>` : "";
+  const note = repo && repo.error && S.bomBoard === "all" ? `<p class="bom-export-error">${esc(repo.error)}</p>` : "";
+  return picker + note + renderBom(bomSource());
+}
 function renderParts() {
-  const parts = proj().parts, age = partsAge(parts.supplier), f = S.partsFilter;
+  const parts = proj().parts, bom = parts.summary && S.partsView === "bom";   // reports from before the BOM view have no summary
+  return (parts.summary ? `<div class="filters parts-view" role="group" aria-label="Parts view">${[["problems", "Problems"], ["bom", "BOM"]].map(([k, label]) => `<button type="button" class="check-chip" data-parts-view="${k}" aria-pressed="${(k === "bom") === !!bom}">${label}</button>`).join("")}</div>` : "") + (bom ? renderBomWithBoards() : renderPartsProblems(parts));
+}
+function renderPartsProblems(parts) {
+  const age = partsAge(parts.supplier), f = S.partsFilter;
   const changes = l => parts.changes.filter(r => r.action !== "removed" && r.refs.some(ref => l.refs.includes(ref)));
   const rows = parts.lines.map(l => ({ line: l, changes: changes(l) }));
   // Removed lines are not in the head BOM; keep them visible for change review.
   for (const r of parts.changes.filter(r => r.action === "removed")) rows.push({ line: { ...r.before, refs: r.refs }, changes: [r] });
-  const shown = rows.filter(r => (!f.q || JSON.stringify(r.line).toLowerCase().includes(f.q.toLowerCase())) && (!f.problems || blocking(r.line)) && (!f.changed || r.changes.length))
+  const shown = rows.filter(r => (!f.q || partsSearchText(r.line).includes(f.q.toLowerCase())) && (!f.problems || blocking(r.line)) && (!f.changed || r.changes.length))
     .sort((a, b) => f.sort === "reference" ? a.line.refs[0].localeCompare(b.line.refs[0], undefined, {numeric:true}) : Number(blocking(b.line)) - Number(blocking(a.line)));
   const counts = parts.supplier?.not_looked_up || {};
   const notLookedUp = [["no_mpn", "no MPN"], ["invalid_mpn", "invalid MPN"], ["run_limit", "run limit"]]
@@ -2172,7 +2453,7 @@ function renderParts() {
       const stockText = product ? `<a href="${esc(product)}" rel="noopener noreferrer" target="_blank">${esc(stock)}</a>` : esc(stock);
       const stockHtml = stockText + (!parts.supplier?.skipped && supplier?.product_status ? `<small class="parts-footprint">${esc(supplier.product_status)}</small>` : "");
       const url = l.datasheet, sheet = /^https?:\/\//i.test(url || "") ? `<a href="${esc(url)}" rel="noopener noreferrer" target="_blank">pdf</a>` : "—";
-      return `<tr class="parts-row${blocking(l) ? " problem" : ""}${cs.length ? " changed" : ""}${supplier?.status === "unavailable" ? " unavailable" : ""}"><td title="${esc(cs.map(r => r.action).join(", "))}">${blocking(l) ? "⚠" : ""}${cs.map(r => ({added: "+", removed: "−", swapped: "~", value: "~", footprint: "~"})[r.action] || "").join("")}</td><td class="parts-refs" title="${esc(refs.join(", "))}">${referenceRanges(refs) === refs.join(", ") ? refs.map(r => moved.includes(r) ? `<strong>${esc(r)}</strong>` : esc(r)).join(", ") : esc(referenceRanges(refs))}</td><td>${changeText("value")}${l.mpn ? `<span class="parts-mpn"> ${esc(l.mpn)}</span>` : ""}${cs.some(r => r.before && r.after && r.before.footprint !== r.after.footprint) ? `<small class="parts-footprint">footprint ${changeText("footprint")}</small>` : ""}${problems.length ? `<small class="parts-problems">${l.problems.map((p, i) => `<span class="problem-tag" tabindex="0" title="${esc(problems[i])}">${p.includes("lcsc") ? "LCSC" : p.includes("mpn") ? "MPN" : p === "placeholder" ? "VALUE" : "STOCK"}</span>`).join(" ")}</small>` : ""}</td><td>${changeText("lcsc")}</td><td class="parts-stock${age.stale ? " stale" : ""}">${stockHtml}</td><td title="${l.mpn ? "MPN supplied for PCBWay" : "MPN missing"}">${l.mpn ? "✔" : "—"}</td><td>${sheet}</td></tr>`;
+      return `<tr class="parts-row${blocking(l) ? " problem" : ""}${cs.length ? " changed" : ""}${supplier?.status === "unavailable" ? " unavailable" : ""}"><td title="${esc(cs.map(r => r.action).join(", "))}">${blocking(l) ? "⚠" : ""}${cs.map(r => ({added: "+", removed: "−", swapped: "~", value: "~", footprint: "~", mpn: "~"})[r.action] || "").join("")}</td><td class="parts-refs" title="${esc(refs.join(", "))}">${referenceRanges(refs) === refs.join(", ") ? refs.map(r => moved.includes(r) ? `<strong>${esc(r)}</strong>` : esc(r)).join(", ") : esc(referenceRanges(refs))}</td><td>${changeText("value")}${l.mpn || cs.some(r => r.before && r.after && r.before.mpn !== r.after.mpn) ? `<span class="parts-mpn"> ${changeText("mpn")}</span>` : ""}${cs.some(r => r.before && r.after && r.before.footprint !== r.after.footprint) ? `<small class="parts-footprint">footprint ${changeText("footprint")}</small>` : ""}${problems.length ? `<small class="parts-problems">${l.problems.map((p, i) => `<span class="problem-tag" tabindex="0" title="${esc(problems[i])}">${p.includes("lcsc") ? "LCSC" : p.includes("mpn") ? "MPN" : p === "placeholder" ? "VALUE" : p === "unit_identity_conflict" ? "UNITS" : "STOCK"}</span>`).join(" ")}</small>` : ""}</td><td>${changeText("lcsc")}</td><td class="parts-stock${age.stale ? " stale" : ""}">${stockHtml}</td><td title="${l.mpn ? "MPN supplied for PCBWay" : "MPN missing"}">${l.mpn ? "✔" : "—"}</td><td>${sheet}</td></tr>`;
     }).join("")}</tbody></table>${shown.length ? "" : '<p class="muted">No parts match these filters.</p>'}</div>${fieldChangesHtml(parts)}`;
 }
 function renderThreads() {
@@ -2346,11 +2627,11 @@ function referenceRanges(refs) {
 }
 function dockListTools(name, state) {
   const options = (values, current) => values.map(([v, label]) => `<option value="${v}" ${v === (current || "") ? "selected" : ""}>${label}</option>`).join("");
-  return `<div class="dock-list-tools"><input class="${name === "changes" ? "q" : ""}" type="search" data-list-search="${name}" aria-label="Search ${name}" placeholder="Search ${name}…" value="${esc(state.q || "")}"><select data-list-sort="${name}" aria-label="Sort ${name}">${options(name === "checks" ? [["", "New / severity"], ["rule", "Rule name"]] : [["", "Review order"], ["reference", "Reference"], ...(name === "changes" ? [["kind", "Kind"]] : [])], state.sort)}</select>${name === "parts" ? "" : `<select data-list-group="${name}" aria-label="Group ${name}">${options(name === "checks" ? [["", "Group: rule"], ["check", "Group: check"], ["severity", "Group: severity"]] : [["", "No groups"], ["kind", "Group: kind"], ["action", "Group: action"]], state.group)}</select>`}</div>`;
+  return `<div class="dock-list-tools"><input class="${name === "changes" ? "q" : ""}" type="search" ${name === "changes" ? 'maxlength="200" ' : ""}data-list-search="${name}" aria-label="Search ${name}" placeholder="Search ${name}…" value="${esc(state.q || "")}"><select data-list-sort="${name}" aria-label="Sort ${name}">${options(name === "checks" ? [["", "New / severity"], ["rule", "Rule name"]] : [["", "Review order"], ["reference", "Reference"], ...(name === "changes" ? [["kind", "Kind"]] : [])], state.sort)}</select>${name === "parts" ? "" : `<select data-list-group="${name}" aria-label="Group ${name}">${options(name === "checks" ? [["", "Group: rule"], ["check", "Group: check"], ["severity", "Group: severity"]] : [...(S.filter.all ? [["", "No groups"]] : [["", "Auto (channel if reported)"], ["none", "No groups"]]), ["kind", "Group: kind"], ["action", "Group: action"]], state.group)}</select>`}</div>`;
 }
 function renderPanel() {
   appearanceUI?.cancelPendingImports(); // preserve late-import invalidation without tearing down left controls
-  const active = document.activeElement, key = ["data-tab", "data-inv", "data-action", "data-check-summary", "data-check-scope", "data-check-severity", "data-check-waived", "data-waive", "data-parts-filter", "data-thread-status", "data-thread", "data-issue-for", "data-issue"].find(k => active?.closest("#panel") && !active.matches(".card") && active.hasAttribute(k)), focus = key ? `[${key}="${CSS.escape(active.getAttribute(key))}"]` : active?.matches("#panel select.kind") ? "select.kind" : active?.matches("#panel select.thread-severity") ? "select.thread-severity" : active?.matches("#panel .show-all") ? ".show-all" : null;
+  const active = document.activeElement, key = ["data-tab", "data-inv", "data-action", "data-check-summary", "data-check-scope", "data-check-severity", "data-check-waived", "data-waive", "data-parts-filter", "data-parts-view", "data-bom-cat", "data-bom-sort", "data-bom-board", "data-bom-download", "data-thread-status", "data-thread", "data-issue-for", "data-issue"].find(k => active?.closest("#panel") && !active.matches(".card") && active.hasAttribute(k)), focus = key ? `[${key}="${CSS.escape(active.getAttribute(key))}"]` : active?.matches("#panel select.kind") ? "select.kind" : active?.matches("#panel select.thread-severity") ? "select.thread-severity" : active?.matches("#panel .show-all") ? ".show-all" : null;
   const p = proj(), f = S.filter;
   if (S.t === "parts" && !p.parts) S.t = "changes";
   if (S.t === "appearance" && leftTab !== "appearance") renderNav();
@@ -2365,6 +2646,7 @@ function renderPanel() {
   const tab = (name, label, enabled, extra = "") => `<button type="button" role="tab" id="tab-${name}" data-tab="${name}" aria-controls="panel-body" aria-selected="${panelTab === name}" ${enabled ? "" : `disabled title="${name === "ask" ? "Ask needs the connected review site and [ask] enabled in kicad-review.toml" : name === "parts" ? "Parts data was not included in this report" : "Threads require the connected review site"}"`}>${label}${extra}</button>`;
   const partsExtra = p.parts ? ` ${p.parts.lines.length}${partsProblemCount(p.parts) ? ` · ${partsProblemCount(p.parts)} ⚠` : ""}` : "";
   const threadsExtra = S.threads || S.issues ? ` ${(S.threads || []).filter(t => !t.resolved && t.anchor.project === p.dir).length}` : "";
+  const summary = electricalSummaryHtml();
   $("#panel").innerHTML = `<div class="dock-actions"><span>REVIEW</span><button type="button" data-panel-wide title="${S.panelWide ? "Narrow the dock to 360 px" : "Widen the dock to 700 px"}" aria-pressed="${!!S.panelWide}">${tbIcon("expand")}<span>${S.panelWide ? "Narrow" : "Widen"}</span></button>${["parts", "checks"].includes(panelTab) ? `<button type="button" data-panel-table aria-pressed="${!!S.panelTable}" title="Full-width table view">${S.panelTable ? "Close table" : "Table view"}</button>` : ""}<button type="button" data-panel-close aria-label="Collapse right dock" title="Collapse right dock">×</button></div><div id="panel-tabs" role="tablist" aria-label="Inspector">${tab("changes", "Changes", true, ` ${p.changes.length}`)}${tab("checks", "Checks", true)}${tab("parts", "Parts", !!p.parts, partsExtra)}${tab("threads", "Threads", !!(S.threads || S.issues), threadsExtra)}${ASK.on ? tab("ask", "Ask", ASK.ready) : ""}</div><div id="panel-body" role="tabpanel" aria-labelledby="tab-${panelTab}">` +
     (panelTab === "ask" ? renderAsk() : panelTab === "threads" ? renderThreads() : panelTab === "parts" ? renderParts() : panelTab === "checks" ? renderChecks() : `
     ${String(S.v).startsWith("lib:") && p.libraries?.[+S.v.slice(4)] ? libInfoHtml(p.libraries[+S.v.slice(4)]) : ""}
@@ -2373,7 +2655,7 @@ function renderPanel() {
     ${f.all ? "" : `<div class="filters">${["added", "removed", "modified"].map(a =>
       `<button class="chip-filter ${a}" data-action="${a}" aria-pressed="${f[a]}">${GLYPH[a]} ${a} ${c[a]}</button>`).join("")}
       <select class="kind"><option value="">All kinds</option>${kinds.map(k => `<option ${k === f.kind ? "selected" : ""}>${esc(k)}</option>`).join("")}</select></div>`}
-    <div class="cards">${f.all ? inventoryHtml() : cardsHtml()}</div>${S.v === "3d" && p.board.no_model?.length ? `<details class="no-models" open><summary>Parts without a 3D model (${p.board.no_model.length})</summary>${p.board.no_model.map(x => `<button data-no-model="${esc(x.ref)}"><b>${esc(x.ref)}</b> <span class="muted">${esc(x.reason)}</span></button>`).join("")}</details>` : ""}</div>`);
+    ${f.all ? "" : summary.top}<div class="cards">${f.all ? inventoryHtml() : cardsHtml()}</div>${f.all ? "" : summary.status}${summary.incomplete}${S.v === "3d" && p.board.no_model?.length ? `<details class="no-models" open><summary>Parts without a 3D model (${p.board.no_model.length})</summary>${p.board.no_model.map(x => `<button data-no-model="${esc(x.ref)}" data-no-model-side="${esc(x.side)}"><b>${esc(x.ref)}</b> <span class="muted">${{base: "Base · ", head: "Head · "}[x.side] || ""}${esc(x.reason)}</span></button>`).join("")}</details>` : ""}</div>`);
   bindRightDock();
   if (panelTab === "ask") askBind();
   for (const input of document.querySelectorAll("#panel [data-list-search], #panel [data-list-sort], #panel [data-list-group]")) {
@@ -2402,8 +2684,16 @@ function renderPanel() {
     });
   }
   for (const b of document.querySelectorAll("#panel [data-parts-filter]")) b.onclick = () => { const k = b.dataset.partsFilter; S.partsFilter[k] = !S.partsFilter[k]; renderPanel(); };
+  for (const b of document.querySelectorAll("#panel [data-parts-view]")) b.onclick = () => { S.partsView = b.dataset.partsView; renderPanel(); };
+  for (const b of document.querySelectorAll("#panel [data-bom-cat]")) b.onclick = () => { S.bomFilter.category = b.dataset.bomCat; renderPanel(); };
+  for (const b of document.querySelectorAll("#panel [data-bom-sort]")) b.onclick = () => { const f = S.bomFilter, k = b.dataset.bomSort; f.dir = f.sort === k ? -f.dir : 1; f.sort = k; renderPanel(); };
+  for (const b of document.querySelectorAll("#panel [data-bom-board]")) b.onclick = () => {
+    if (b.dataset.bomBoard === "all") { S.bomBoard = "all"; renderPanel(); }
+    else { S.bomBoard = "project"; openProject(Number(b.dataset.bomBoard)); }
+  };
+  for (const b of document.querySelectorAll("#panel [data-bom-download]")) b.onclick = () => downloadBom(b.dataset.bomDownload);
   for (const b of document.querySelectorAll("#panel .chip-filter[data-action]")) b.onclick = () => { f[b.dataset.action] = !f[b.dataset.action]; renderPanel(); };
-  for (const b of document.querySelectorAll("#panel [data-check-summary]")) b.onclick = () => { const n = b.dataset.checkSummary; if (!proj().checks.some(c => c.name === n)) return; S.checks.check = S.checks.check === n ? "" : n; renderPanel(); };
+  for (const b of document.querySelectorAll("#panel [data-check-summary]")) b.onclick = () => { const n = decodeURIComponent(b.dataset.checkSummary); if (!proj().checks.some(c => checkKey(c) === n)) return; S.checks.check = S.checks.check === n ? "" : n; renderPanel(); };
   for (const b of document.querySelectorAll("#panel [data-check-scope]")) b.onclick = () => { S.checks.scope = b.dataset.checkScope; renderPanel(); };
   for (const b of document.querySelectorAll("#panel [data-check-severity]")) b.onclick = () => { S.checks[b.dataset.checkSeverity] = !S.checks[b.dataset.checkSeverity]; renderPanel(); };
   $("#panel .show-all")?.addEventListener("click", () => { Object.assign(S.checks, { check: "", scope: "all", error: true, warning: true, waived: true }); renderPanel(); });
@@ -2423,7 +2713,16 @@ function renderPanel() {
   bindInventory();
   bindCards();
   revealChangeCard();
-  for (const b of document.querySelectorAll("#panel [data-no-model]")) b.onclick = () => { const row = p.board.no_model.find(x => x.ref === b.dataset.noModel); if (row) window.Review3D?.focus({ ...row, action: row.side === "base" ? "removed" : "added" }); };
+  for (const b of document.querySelectorAll("#panel [data-no-model]")) b.onclick = () => {
+    const row = p.board.no_model.find(x => x.ref === b.dataset.noModel && x.side === b.dataset.noModelSide); if(!row)return;
+    const side=row.side==='both'?(S.revision||'head'):row.side;
+    const part=window.Review3D?.state?.parts[side]?.find(x=>x.ref===row.ref);
+    if(part) {
+      const change=window.Review3D.changeForPart(part.ref,side);
+      if(change)window.Review3D.onPick(change.id);
+      else {window.Review3D.onPartPick({...part,side});window.Review3D.focusPart(part.ref,side);}
+    } else window.Review3D?.focus({ ...row, action: row.side === "base" ? "removed" : "added" });
+  };
   for (const b of document.querySelectorAll("#panel [data-issue-for]")) b.onclick = () => {
     const v = allViolations().find(x => x.id === b.dataset.issueFor), a = v && findingAnchor(v);
     if (ISSUES_ON && a && !issueForAnchor(a)) parent.postMessage({ kicadReviewIssueFor: { ...a, title: `${v.check}: ${v.description}`.slice(0, 200) } }, "*");
@@ -2438,6 +2737,7 @@ function renderPanel() {
 function encodeState(s = S) {
   const q = new URLSearchParams();
   q.set("p", s.p); q.set("v", s.v); q.set("m", s.m);
+  if (s.revision === "base") q.set("revision", s.revision);
   for (const k of ["x", "y", "z"]) if (Number.isFinite(s[k])) q.set(k, +s[k].toFixed(3));
   if (s.s) q.set("s", s.s);
   if (s.t && s.t !== "changes") q.set("t", s.t);
@@ -2446,7 +2746,8 @@ function encodeState(s = S) {
   if (s.hidden3d?.length) q.set("h", s.hidden3d.join(","));
   if (s.part) q.set('part', s.part);
   if (s.net) q.set('net', s.net);
-  if (s.revision === 'base') q.set('revision', 'base');
+  if (s.assembled3d === false) q.set("asm", "0");
+  if (s.lighting3d) { const l = window.Review3D?.normalizeLighting(s.lighting3d) ?? s.lighting3d; if (["rig", "bearing", "exposure"].some(key => l[key] !== window.ThreeStudio.PRESETS.bench[key])) q.set("lt", [l.rig, l.bearing, l.exposure].join(",")); }
   return q.toString().replace(/%2F/g, "/").replace(/%3A/g, ":").replace(/%2C/g, ",");
 }
 let hashTimer;
@@ -2579,6 +2880,44 @@ function showShortcuts() { const dialog=$("#shortcuts"); if(!dialog.open) dialog
 new MutationObserver(updateStatus).observe($("#panel"), {childList:true, subtree:true});   // change n/N follows any list rebuild or filter
 $("#shortcuts-open").onclick=showShortcuts;
 $("#shortcuts [data-close]").onclick=()=>$("#shortcuts").close();
+
+// ---- Download dialog: GitHub zips of both revisions, plus the head files the run exported when downloads.enabled is on. ----
+function hostedBase(href = location.href, framed = parent !== window) {   // the review site's /r/<owner>/<repo>/a/<id> when this page is its framed report, else ""
+  try {
+    const u = new URL(href), m = /^(\/r\/[^/]+\/[^/]+\/a\/\d{1,20})\/raw$/.exec(u.pathname);
+    return framed && m ? u.origin + m[1] : "";
+  } catch { return ""; }
+}
+const fileSize = n => !Number.isFinite(n) ? "" : n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
+function downloadItems() {
+  const L = D.links || {}, items = [], hosted = hostedBase();
+  // ponytail: GitHub's zip is the whole repository at the commit; a project-folder zip needs the Worker to rewrite a zipball.
+  const zipOf = url => /^https:\/\/github\.com\/[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*\/commit\/[0-9a-f]{40}$/.test(url || "") ? url.replace(/\/commit\/([0-9a-f]{40})$/, "/archive/$1.zip") : "";
+  [["head", "KiCad project, head revision"], ["base", "KiCad project, base revision"]].forEach(([side, label]) => {
+    const href = zipOf(L[side]);
+    if (href) items.push({ label, note: "whole repository, zip from GitHub", href });
+  });
+  D.projects.forEach((p, i) => (p.downloads || []).forEach(d => {
+    const label = D.projects.length > 1 ? `${d.label} · ${p.name}` : d.label, note = fileSize(d.bytes);
+    if (d.error || !/^(fab|pdf|step|glb)$/.test(d.kind)) { items.push({ label, note: d.error || "unavailable" }); return; }
+    if (hosted) { items.push({ label, note, href: `${hosted}/download/${i}/${d.kind}` }); return; }
+    const safe = /^\d{1,20}$/.test(D.run_id) && /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(D.repo) && /^kicad-(?:review|design)-downloads-[0-9a-f]{7}$/.test(d.artifact) && new RegExp(`^${i}/[A-Za-z0-9_][A-Za-z0-9_.-]{0,199}$`).test(d.path);
+    items.push({ label, note: safe ? `${note} · kicad-review-downloads/${d.path}`.replace(/^ · /, "") : note,
+      cmd: safe ? `gh run download ${D.run_id} -R ${D.repo} -n ${d.artifact} -D kicad-review-downloads` : "" });
+  }));
+  return items;
+}
+function renderDownloads() {
+  const body = $("#downloads-body"), any = D.projects.some(p => (p.downloads || []).length);
+  body.innerHTML = `<ul>${downloadItems().map(i => i.href
+    ? `<li><a href="${esc(i.href)}" target="_blank" rel="noopener">${esc(i.label)}</a><span class="muted">${esc(i.note)}</span></li>`
+    : i.cmd ? `<li><button type="button" data-copy="${esc(i.cmd)}">Copy download command: ${esc(i.label)}</button><span class="muted">${esc(i.note)}</span></li>`
+    : `<li><span>${esc(i.label)}</span><span class="muted">${esc(i.note)}</span></li>`).join("")}</ul>`
+    + (any ? "" : `<p class="muted">Fabrication files, the schematic PDF and 3D models are exported when <code>downloads.enabled = true</code> is set in kicad-review.toml.</p>`);
+  body.querySelectorAll("[data-copy]").forEach(b => { b.onclick = () => benchCopy(b.dataset.copy); });
+}
+$("#downloads-open").onclick = () => { renderDownloads(); const dialog = $("#downloads"); if (!dialog.open) dialog.showModal(); };
+$("#downloads [data-close]").onclick = () => $("#downloads").close();
 document.addEventListener("keydown", e => {
   if (e.key === "Escape" && $("#shortcuts").open) { e.preventDefault(); $("#shortcuts").close(); return; }
   if (e.target.closest?.('input,select,textarea,[contenteditable]:not([contenteditable="false"]),dialog[open]')) return;
@@ -2736,10 +3075,13 @@ function inspectorProperties() {
     objects.forEach((o, i) => flatten(target, o, objects.length > 1 ? `geometry ${i+1}.` : "geometry."));
   }
   const ref = selected.ref || inventory?.ref;
-  const part = p.parts?.lines?.find(l => l.refs?.includes(ref));
+  // Compact reports omit a BOM line's key and null fields; restore both (same formula as kicad_review.bom_identity) so the inspector reads the same.
+  const full = l => l && { value: l.value, footprint: l.footprint, lcsc: l.lcsc ?? null, mpn: l.mpn ?? null, manufacturer: l.manufacturer ?? null, category: l.category, datasheet: l.datasheet ?? null,
+    key: l.key ?? JSON.stringify([l.value, l.footprint, l.lcsc || "", l.mpn || "", l.category, l.manufacturer ?? null, l.datasheet ?? null]), ...l };
+  const part = full(p.parts?.lines?.find(l => l.refs?.includes(ref)));
   if (part) { flatten(base, part, "part."); flatten(head, part, "part."); }
   for (const change of p.parts?.changes || []) if (change.refs?.includes(ref)) {
-    flatten(base, change.before, "part."); flatten(head, change.after, "part.");
+    flatten(base, full(change.before), "part."); flatten(head, full(change.after), "part.");
   }
   flatten(base, selected.before); flatten(head, selected.after);
   for (const [key, a, b] of selected.changes || []) { base[key] = a; head[key] = b; }
@@ -2755,7 +3097,7 @@ function inspectorProperties() {
 }
 function renderInspector() {
   const dock = $("#inspector"); if (!dock) return;
-  const data = inspectorProperties(), title = data?.selected.ref || data?.selected.type || data?.selected.kind || "";
+  const data = S.part3d ? null : inspectorProperties(), title = S.part3d?.ref || data?.selected.ref || data?.selected.type || data?.selected.kind || "";
   const flat = v => Array.isArray(v) && v.every(x => x == null || x !== Object(x));
   const value = v => v == null ? "—" : flat(v) ? v.join(", ") : v === Object(v) ? JSON.stringify(v) : String(v);
   // Arrays of plain values (Nets, layers) read as a list, not raw JSON.
@@ -2774,7 +3116,23 @@ function renderInspector() {
     groups[group][key.startsWith("geometry") ? "geometry" : "main"].push(`<dt>${esc(label).replace(/\./g, ".<wbr>")}</dt><dd>${changed ? `<del>${html(data.base[key], a)}</del> <span class="insp-arrow" aria-label="to">→</span> <ins>${html(data.head[key], b)}</ins>` : html(data.head[key], b)}</dd>`);
   }
   dock.innerHTML = `<header class="insp-head"><span class="insp-label">Inspector</span><strong>${esc(title)}</strong>${data?.selected.action ? `<span class="badge ${esc(data.selected.action)}">${esc(data.selected.action)}</span>` : ""}<span class="insp-ticks"></span><button type="button" id="insp-toggle" aria-label="${inspectorClosed ? "Expand" : "Collapse"} inspector" aria-controls="insp-body" aria-expanded="${!inspectorClosed}" title="${inspectorClosed ? "Expand" : "Collapse"} inspector">${inspectorClosed ? "▴" : "▾"}</button></header><div id="insp-body" ${inspectorClosed ? "hidden" : ""}>${data ? groups.map((rows, i) => `<section class="insp-module"><h4>${["Identity", "Placement · base → head", "Electrical", "Fields & flags"][i]}</h4><dl>${rows.main.join("") || `<dt class="muted">${rows.geometry.length ? "See geometry" : "Not in report"}</dt>`}</dl>${rows.geometry.length ? `<details class="insp-geometry"><summary>Geometry · ${rows.geometry.length} properties</summary><dl>${rows.geometry.join("")}</dl></details>` : ""}</section>`).join("") : '<p class="insp-empty">Select an object, change or check finding to inspect its properties.<br><span class="muted">Base → head · only data present in this report is shown.</span></p>'}</div>`;
+  if(S.part3d) {
+    const p=S.part3d,body=$("#insp-body"),box=p.box.map(n=>round3(n*1000));
+    body.dataset.part3dInspector='';body.replaceChildren();
+    dock.querySelector('header strong').textContent=p.ref;
+    // Unchanged parts are identities, not fabricated changes. All index strings remain text.
+    for(const [title,rows] of [
+      ['Identity',[['Reference',p.ref],['UUID',p.uuid],['Revision',p.side],['Commit',D[p.side]],['3D model',p.hasModel?'Present':'Missing']]],
+      ['Placement · board mm',[['X bounds (mm)',`${box[0]} … ${box[3]}`],['Y bounds (mm)',`${box[2]} … ${box[5]}`],['Height bounds (mm)',`${box[1]} … ${box[4]}`]]]
+    ]) {
+      const section=document.createElement('section'),heading=document.createElement('h4'),list=document.createElement('dl');
+      section.className='insp-module';heading.textContent=title;
+      for(const [label,value] of rows){const dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent=label;dd.textContent=value??'Not in report';list.append(dt,dd);}
+      section.append(heading,list);body.append(section);
+    }
+  }
   $("#insp-toggle").onclick = () => { inspectorClosed = !inspectorClosed; inspectorLayout(); persistInspector(); renderInspector(); };
+  void electricalControls(dock, proj().changes.find(r => r.id === S.s));
 }
 let inspectorHeight = 176, inspectorClosed = false;
 try { const saved = JSON.parse(localStorage.getItem("kr.inspector") || "null"); if (saved) { inspectorHeight = Number(saved.height) || 176; inspectorClosed = saved.closed === true; } } catch {}
