@@ -101,8 +101,10 @@ jobs:
           docker run -q --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -e KICAD_IMAGE -v "$PWD:/w" -w /w "$KICAD_IMAGE" \
             python3 tools/kicad_review.py copper
 
+      # Only the 3D viewer writes board.glb (export_glb viewer=True); downloads alone leave just board.raw.glb, which
+      # is shipped unprocessed, so with [3d] enabled = false these three steps are skipped.
       - name: Cache 3D compression dependencies and processed models
-        if: steps.detect.outputs.changed == 'true' && hashFiles('review/**/board.raw.glb') != ''
+        if: steps.detect.outputs.changed == 'true' && hashFiles('review/**/board.raw.glb') != '' && hashFiles('review/**/board.glb') != ''
         uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: |
@@ -113,7 +115,7 @@ jobs:
           restore-keys: meshopt-4.2.1-0.22.0-${{ runner.os }}-
 
       - name: Install 3D compression dependencies
-        if: steps.detect.outputs.changed == 'true' && hashFiles('review/**/board.raw.glb') != ''
+        if: steps.detect.outputs.changed == 'true' && hashFiles('review/**/board.raw.glb') != '' && hashFiles('review/**/board.glb') != ''
         continue-on-error: true
         shell: bash
         run: |
@@ -125,7 +127,7 @@ jobs:
           fi
 
       - name: Compress 3D board models
-        if: steps.detect.outputs.changed == 'true' && hashFiles('review/**/board.raw.glb') != ''
+        if: steps.detect.outputs.changed == 'true' && hashFiles('review/**/board.raw.glb') != '' && hashFiles('review/**/board.glb') != ''
         continue-on-error: true
         shell: bash
         run: |

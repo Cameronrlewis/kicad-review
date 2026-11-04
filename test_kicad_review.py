@@ -9688,6 +9688,10 @@ with tempfile.TemporaryDirectory() as d:
     assert (folder / "board.raw.glb").is_file(), "board.raw.glb missing"
     assert not (folder / "board.glb").exists(), "board.glb should not exist when viewer is off"
     assert not (folder / "poster.png").exists(), "poster.png should not exist when poster is off"
+# The workflow's 3D compression steps key on the viewer's board.glb, so downloads with [3d] enabled = false skip them (07 Open question 9).
+for name in ('Cache 3D compression dependencies and processed models', 'Install 3D compression dependencies', 'Compress 3D board models'):
+    gate = pathlib.Path('.github/workflows/review.yml').read_text().split('name: ' + name + '\n', 1)[1].split('\n', 1)[0]
+    assert gate == "        if: steps.detect.outputs.changed == 'true' && hashFiles('review/**/board.raw.glb') != '' && hashFiles('review/**/board.glb') != ''", (name, gate)
 # render_cache_complete: raw GLB required on head only for downloads.enabled, not release-only (spec lines 27-28)
 with tempfile.TemporaryDirectory() as d, patch.object(kr, "IMAGE_RENDERER", "verified-10.0.6"):
     c = pathlib.Path(d) / "cache"
