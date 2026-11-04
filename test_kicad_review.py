@@ -6335,5 +6335,47 @@ with tempfile.TemporaryDirectory() as t:
         os.chdir(old_cwd)
 print("ok cmd_detect warns on broken settings and defaults design to false")
 
-
-
+# DP-S3: snapshot writes one head-only report, a stable release copy and its outputs; off means nothing is written.
+def _dp_report_data(path):
+    text = open(path, encoding="utf-8").read()
+    return json.loads(_dpre.search(r"window\.REVIEW_DATA = (.*?);</script>", text, _dpre.S).group(1))
+with _DpTmp() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        head = "c" * 40
+        for side, line in (("base", "M0 0H5"), ("head", "M0 0H9")):
+            write(t, {f"{side}/H/H.kicad_sch": '(kicad_sch (sheet_instances (path "/" (page "1"))))', f"{side}/H/H.kicad_pcb": _dp_pcb(""),
+                      f"{side}/H/H.kicad_pro": "{}", f"review/H/{side}/sch/H.svg": f'<svg viewBox="0 0 100 50"><path d="{line}"/></svg>',
+                      f"review/H/{side}/pcb/H-F_Cu.svg": f'<svg viewBox="0 0 10 10"><path d="{line}"/></svg>',
+                      f"review/H/{side}/erc.json": _dp_erc("u-" + side, "pin_not_connected"), f"review/H/{side}/drc.json": "{}"})
+        with open("review/H/head/poster.png", "wb") as fh:
+            fh.write(_dp_png)
+        det = {"base": "b" * 40, "head": head, "reason": "push: new commit vs previous branch tip",
+               "snapshot": {"ref": "main", "sha": head, "committedAt": "2026-10-24T10:00:00+00:00", "message": "Move R16 </script>"},
+               "projects": [{"dir": "H", "name": "H", "status": "modified"}, {"dir": "Gone", "name": "Gone", "status": "removed"}]}
+        det["snapshot_settings"] = json.loads(json.dumps(kr.DEFAULT_SETTINGS))
+        det["snapshot_settings"]["design"]["enabled"] = True
+        write(t, {"review/detect.json": json.dumps(det), "head/kicad-review.toml": "[design]\nenabled = true\n"})
+        out = f"{t}/gh-output"
+        with patch.dict(os.environ, {"GITHUB_OUTPUT": out, "GITHUB_REPOSITORY": "o/r", "GITHUB_RUN_ID": "7", "GITHUB_SERVER_URL": "https://github.com"}, clear=True), patch("sys.stdout", new_callable=io.StringIO):
+            kr.cmd_snapshot(None)
+        assert open(out).read() == "built=true\nname=kicad-design-ccccccc.html\n"
+        data = _dp_report_data("review/design/kicad-design-ccccccc.html")
+        assert data["mode"] == "single" and data["base"] is None and data["head"] == head and data["snapshot"]["ref"] == "main", data["snapshot"]
+        assert [p["name"] for p in data["projects"]] == ["H"] and data["projects"][0]["changes"] == [], data["projects"][0]["changes"]
+        assert data["links"]["review"] == "" and data["links"]["base"] == "" and data["links"]["head"].endswith("/commit/" + head)
+        assert data["snapshot"]["message"] == "Move R16 </script>" and "</script>Move" not in open("review/design/kicad-design-ccccccc.html", encoding="utf-8").read()
+        texts = [_dpgz.decompress(_dpb64.b64decode(b)) for b in data["blobs"].values()]
+        assert texts and not any(b"M0 0H5" in x for x in texts), "base drawings must not be embedded"
+        assert _dpgz.decompress(_dpb64.b64decode(data["blobs"][data["projects"][0]["board"]["poster3d"]["head"]])) == _dp_png
+        assert open("review/design/design-snapshot.html", "rb").read() == open("review/design/kicad-design-ccccccc.html", "rb").read()
+        shutil.rmtree("review/design"); os.remove("head/kicad-review.toml")
+        det["snapshot_settings"]["design"]["enabled"] = False
+        write(t, {"review/detect.json":json.dumps(det)})
+        with patch.dict(os.environ, {"GITHUB_OUTPUT": out + "2"}, clear=True), patch("sys.stdout", new_callable=io.StringIO):
+            kr.cmd_snapshot(None)
+        assert open(out + "2").read() == "built=false\n" and not os.path.exists("review/design")
+    finally:
+        os.chdir(old_cwd)
+print("ok DP-S3 snapshot report, release copy and opt-out")

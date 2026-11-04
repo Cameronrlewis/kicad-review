@@ -3807,6 +3807,19 @@ def filtered_settings(settings):
     return report_settings
 
 
+def load_supplier(settings, projects, path="review/supplier.json"):
+    """Merge the DigiKey lookup step's file into the parts lists; a missing or unreadable file is recorded, not fatal."""
+    if settings.get("digikey", {}).get("enabled"):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                lookup = json.load(fh)
+            if not isinstance(lookup.get("supplier"), dict) or not isinstance(lookup.get("results"), dict):
+                raise ValueError("invalid supplier file")
+        except (OSError, ValueError, AttributeError):
+            lookup = {"supplier": supplier_info(settings["digikey"]["currency"], error="lookup unavailable (lookup step did not finish)"), "results": {}}
+        merge_supplier(projects, lookup)
+
+
 def cmd_report(args):
     with open("review/detect.json", encoding="utf-8") as fh:
         det = json.load(fh)
@@ -3829,15 +3842,7 @@ def cmd_report(args):
         project = build_project(p, blobs, settings, waivers, change_offset)
         data["projects"].append(project)
         change_offset += len(project["changes"])
-    if settings.get("digikey", {}).get("enabled"):
-        try:
-            with open("review/supplier.json", encoding="utf-8") as fh:
-                lookup = json.load(fh)
-            if not isinstance(lookup.get("supplier"), dict) or not isinstance(lookup.get("results"), dict):
-                raise ValueError("invalid supplier file")
-        except (OSError, ValueError, AttributeError):
-            lookup = {"supplier": supplier_info(settings["digikey"]["currency"], error="lookup unavailable (lookup step did not finish)"), "results": {}}
-        merge_supplier(data["projects"], lookup)
+    load_supplier(settings, data["projects"])
     assign_ids(data["projects"])
     if waivers is not None:
         used = {(c["name"], v["waiver_key"]) for p in data["projects"] for c in p["checks"]
@@ -3862,6 +3867,43 @@ def cmd_report(args):
         fh.write(f"pdf={'true' if settings.get('pdf', {}).get('enabled') else 'false'}\npdf_name={name[:-5]}.pdf\n")
 
         fh.write(f"threads={'true' if settings['threads']['enabled'] else 'false'}\n")
+
+
+DESIGN_DIR = "review/design"
+
+
+def cmd_snapshot(args):
+    """The design as it is at head: one revision, absolute check counts, built from the renders this run already made."""
+    env = os.environ
+    with open("review/detect.json", encoding="utf-8") as fh:
+        det = json.load(fh)
+    settings = det.get("snapshot_settings")
+
+    def emit(**values):
+        with open(env.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as fh:
+            fh.write("".join(f"{k}={v}\n" for k, v in values.items()))
+    if not settings or not settings["design"]["enabled"]:
+        print("Design snapshots are off ([design] enabled = false).")
+        emit(built="false")
+        return
+    blobs = {}
+    waivers = load_waivers(env.get("WAIVERS_REF")) if settings["waivers"]["enabled"] else None
+    selected = [p for p in det["projects"] if p["status"] != "removed"]  # every index (downloads, context links) follows this order
+    projects = [build_project(p, blobs, settings, waivers, change_offset=0, single=True) for p in selected]
+    load_supplier(settings, projects, "review/supplier-snapshot.json")
+    assign_ids(projects)
+    data = {"version": 1, "repo": env.get("GITHUB_REPOSITORY", ""), "links": review_links(env, {**det, "base": None}),
+            "base": None, "head": det["head"], "reason": "design snapshot", "mode": "single",
+            "snapshot": det.get("snapshot") or {"ref": "", "sha": det["head"], "committedAt": "", "message": ""},
+            "settings": filtered_settings(settings), "run_id": env.get("GITHUB_RUN_ID", ""), "projects": projects, "blobs": blobs}
+    html = finalize_report(data, f"{DESIGN_DIR}/assets")  # 01's shared finalizer: asset map, sidecars, offline HTML; no local JSON or inline_page here
+    name = f"kicad-design-{det['head'][:7]}.html"
+    os.makedirs(DESIGN_DIR, exist_ok=True)
+    for file in (name, "design-snapshot.html"):  # the second is the stable name a release carries
+        with open(f"{DESIGN_DIR}/{file}", "w", encoding="utf-8") as fh:
+            fh.write(html)
+    print(f"{DESIGN_DIR}/{name}: {len(html) / 1e6:.2f} MB, {len(blobs)} embedded drawings")
+    emit(built="true", name=name)
 
 
 STATUS_ICON = {"pass": "✅", "fail": "❌", "warn": "⚠️", "not_run": "—"}
@@ -4492,6 +4534,8 @@ def main():
     p.set_defaults(func=cmd_lookup)
     p = sub.add_parser("report", help="self-contained HTML comparison report")
     p.set_defaults(func=cmd_report)
+    p = sub.add_parser("snapshot", help="self-contained HTML report of the head design alone (needs [design] enabled)")
+    p.set_defaults(func=cmd_snapshot)
     args = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")  # comment text has → and —, whatever the locale
     args.func(args)
