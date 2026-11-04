@@ -5971,23 +5971,29 @@ def ci_review_1_workflow_commands_escaped_contract():
     # The per-model 3D warning carries a pull-request-controlled directory name.
     wf_text = pathlib.Path('.github/workflows/review.yml').read_text()
     # The workflow imports the checked-out tool from ./tools.
-    tools_root = tempfile.mkdtemp()
-    os.symlink(os.path.abspath('.'), os.path.join(tools_root, 'tools'))
-    line = next(l.strip() for l in wf_text.splitlines() if '3D processing failed for' in l)
-    evil = 'review/a%0Ab\n::stop-commands::x'
-    r = subprocess.run(['bash', '-c', f'dir="$1"; {line}', 'sh', evil], capture_output=True, text=True, cwd=tools_root)
-    assert r.returncode == 0, r.stderr
-    assert r.stdout.count('\n') == 1 and r.stdout.startswith('::warning::3D processing failed for review/a%250Ab%0A::stop-commands::x'), r.stdout
-    # Required-check errors carry project names.
-    for var in ('FAILED', 'THREADS'):
-        line = next(l.strip() for l in wf_text.splitlines() if '::error::' in l and f'${var}' in l)
-        r = subprocess.run(['bash', '-c', line], capture_output=True, text=True, env={**os.environ, var: 'p\n::error::forged'},
-                           cwd=tools_root)
+    with tempfile.TemporaryDirectory() as tools_root:
+        os.symlink(os.path.abspath('.'), os.path.join(tools_root, 'tools'))
+        line = next(l.strip() for l in wf_text.splitlines() if '3D processing failed for' in l)
+        evil = 'review/a%0Ab\n::stop-commands::x'
+        r = subprocess.run(['bash', '-c', f'dir="$1"; {line}', 'sh', evil], capture_output=True, text=True, cwd=tools_root)
         assert r.returncode == 0, r.stderr
-        assert r.stdout.count('\n') == 1 and r.stdout.startswith('::error::') and 'p%0A::error::forged' in r.stdout, r.stdout
+        assert r.stdout.count('\n') == 1 and r.stdout.startswith('::warning::3D processing failed for review/a%250Ab%0A::stop-commands::x'), r.stdout
+        # Required-check errors carry project names.
+        for var in ('FAILED', 'THREADS'):
+            line = next(l.strip() for l in wf_text.splitlines() if '::error::' in l and f'${var}' in l)
+            r = subprocess.run(['bash', '-c', line], capture_output=True, text=True, env={**os.environ, var: 'p\n::error::forged'},
+                               cwd=tools_root)
+            assert r.returncode == 0, r.stderr
+            assert r.stdout.count('\n') == 1 and r.stdout.startswith('::error::') and 'p%0A::error::forged' in r.stdout, r.stdout
 
 
-ci_review_1_workflow_commands_escaped_contract()
+with tempfile.TemporaryDirectory() as _ci_scratch:
+    _ci_prev_tempdir, tempfile.tempdir = tempfile.tempdir, _ci_scratch
+    try:
+        ci_review_1_workflow_commands_escaped_contract()
+    finally:
+        tempfile.tempdir = _ci_prev_tempdir
+    assert os.listdir(_ci_scratch) == [], f'workflow command contract leaves temp dirs behind: {os.listdir(_ci_scratch)}'
 
 
 def br02_processed_sample_contract():
