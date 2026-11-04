@@ -18,6 +18,8 @@ import csv
 import datetime
 import gzip
 import hashlib
+import importlib.util
+import io
 import json
 import math
 import os
@@ -40,12 +42,13 @@ KICAD_SUFFIXES = (".kicad_sch", ".kicad_pcb", ".kicad_pro", ".kicad_sym", ".kica
 KICAD_NAMES = ("sym-lib-table", "fp-lib-table")
 SETTINGS_FILE = "kicad-review.toml"
 SNAPSHOT_REASON = "design snapshot (no comparison)"  # detect.json reason of a run that leaves only a design snapshot
+FAB_TABLE = pathlib.Path(__file__).with_name("fab_limits.json")
 
 
-def workflow_command_escape(value, *, is_property=False):
-    """Escape GitHub workflow-command data, with extra separators for properties."""
+def workflow_command_escape(value, *, is_property=False, property=False):
+    """Escape GitHub workflow-command data, with extra separators for properties (either keyword spelling)."""
     value = str(value).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-    return value.replace(":", "%3A").replace(",", "%2C") if is_property else value
+    return value.replace(":", "%3A").replace(",", "%2C") if (is_property or property) else value
 
 
 def git(*args, check=True):
@@ -345,6 +348,42 @@ def export_board_stats(pcb, out):
         return error
 
 
+def export_netlist(sch, out):
+    """Soft schematic connectivity evidence: validated netlist.net, or a one-line netlist.net.error."""
+    out = pathlib.Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    target, pending, marker = (out / n for n in ('netlist.net', 'netlist.pending.net', 'netlist.net.error'))
+    for path in (target, pending, marker):
+        path.unlink(missing_ok=True)
+    try:
+        run = subprocess.run(['kicad-cli', 'sch', 'export', 'netlist', '--format', 'kicadsexpr',
+                              '-o', str(pending), sch], capture_output=True, text=True, timeout=60)
+        if run.returncode:
+            raise ValueError(f'netlist export failed ({run.returncode}): {run.stderr or run.stdout}')
+        if not pending.is_file():
+            raise ValueError('netlist export produced no output')
+        validate_netlist(pending.read_text(encoding='utf-8'))
+        os.replace(pending, target)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        target.unlink(missing_ok=True)
+        reason = ' '.join(f'{sch}: connectivity unavailable: {exc}'.split())[:500]
+        marker.write_text(reason, encoding='utf-8')
+        print(reason, file=sys.stderr)
+    finally:
+        pending.unlink(missing_ok=True)
+
+
+def read_netlist(out):
+    """The one consumer path: a failure marker wins over any coincident netlist.net."""
+    out = pathlib.Path(out)
+    marker = out / 'netlist.net.error'
+    if marker.exists():
+        raise ValueError(marker.read_text(encoding='utf-8')[:500] or 'netlist export unavailable')
+    text = (out / 'netlist.net').read_text(encoding='utf-8')
+    validate_netlist(text)
+    return text
+
+
 def render_side(src_dir, name, out, netlist=False):
     """SVG renders, ERC and DRC reports of one revision of one project."""
     sch, pcb = f"{src_dir}/{name}.kicad_sch", f"{src_dir}/{name}.kicad_pcb"
@@ -388,7 +427,7 @@ def render_side(src_dir, name, out, netlist=False):
     if os.path.exists(sch):
         kicad_cli("sch", "erc", "--format", "json", "--severity-all", "-o", f"{out}/erc.json", sch)
         if netlist:
-            kicad_cli("sch", "export", "netlist", "--format", "kicadsexpr", "-o", f"{out}/netlist.net", sch)
+            export_netlist(sch, out)
     if os.path.exists(pcb):
         parity = ["--schematic-parity"] if os.path.exists(sch) else []
         kicad_cli("pcb", "drc", "--format", "json", "--severity-all", *parity, "-o", f"{out}/drc.json", pcb)
@@ -396,6 +435,158 @@ def render_side(src_dir, name, out, netlist=False):
 
 def board_path(p, side):
     return posixpath.join(side, p["dir"], f"{p['name']}.kicad_pcb")
+
+
+def fab_enabled(settings):
+    enabled = settings["fabrication"].get("check_limits", False) and settings["checks"].get("fab_limits") != "off"
+    if enabled and settings["checks"].get("drc", "off") == "off":
+        raise ValueError("fabrication.check_limits requires checks.drc != \"off\": board findings are the subtraction baseline")
+    return enabled
+
+
+def fab_drc(pcb, out):
+    out.unlink(missing_ok=True)
+    r = subprocess.run(["kicad-cli","pcb","drc","--format","json","--severity-error",
+                        "--exit-code-violations","-o",str(out),str(pcb)],
+                       capture_output=True, text=True)
+    if r.returncode not in (0, 5):
+        raise RuntimeError(f"fab DRC failed ({r.returncode}): {r.stdout}\n{r.stderr}")
+    data = json.loads(out.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or data.get("coordinate_units") != "mm" or not isinstance(data.get("violations"), list):
+        raise RuntimeError("fab DRC wrote invalid JSON or non-mm coordinates")
+    for row in data["violations"]:
+        if (not isinstance(row, dict) or not isinstance(row.get("type"), str) or not row["type"]
+                or row.get("severity") != "error" or not isinstance(row.get("description"), str)
+                or not isinstance(row.get("items"), list)):
+            raise RuntimeError("fab DRC wrote malformed violation")
+        for item in row["items"]:
+            if (not isinstance(item, dict) or not isinstance(item.get("description"), str)
+                    or ("uuid" in item and not isinstance(item["uuid"], str))):
+                raise RuntimeError("fab DRC wrote malformed item")
+            if "pos" in item:
+                pos = item["pos"]
+                if (not isinstance(pos, dict) or any(type(pos.get(k)) not in (int, float)
+                        or not math.isfinite(pos[k]) for k in ("x", "y"))):
+                    raise RuntimeError("fab DRC wrote invalid position")
+    return data
+
+
+def fab_regular_input(path):
+    # ponytail: checkout is immutable during render; this is not a concurrent-write sandbox.
+    # All ancestors are deliberate; resolving here would hide checkout symlinks.
+    absolute = path.absolute()
+    for part in reversed((absolute, *absolute.parents)):
+        if part.is_symlink():
+            raise RuntimeError(f"fab input must not be a symlink: {part}; "
+                               "use a physical checkout path with no symlink ancestors "
+                               "(on macOS, /private/tmp rather than /tmp and /private/var rather than /var)")
+    if path.exists() and not path.is_file():
+        raise RuntimeError(f"fab input must be a regular file: {path}")
+
+
+def fab_lint_rules(text):
+    """Reject lexical errors KiCad can silently ignore along with appended rules.
+
+    This is a conservative syntax guard, not a replacement for KiCad's rule engine.
+    Units, constraint names and condition semantics are not validated here. KiCad
+    may silently discard appended rules for those errors; render_fab exposes this
+    residual risk in coverageWarnings whenever an authored rule file is present.
+    Never rewrite authored rules to guess what the author intended.
+    """
+    depth = 0
+    for match in re.finditer(r"#[^\n]*|\"(?:\\.|[^\"\\])*\"|\s+|[()]|[^()\s\"#]+|.", text):
+        token = match.group()
+        if token.startswith(("#", "\"")) and token != "\"":
+            continue
+        if token == "(":
+            depth += 1
+        elif token == ")":
+            depth -= 1
+        elif token == "\"" or re.match(r"[+-]?\.\d", token):
+            raise RuntimeError("fab rules contain an unterminated string or leading-dot numeric literal; use 0.3mm, not .3mm")
+        if depth < 0:
+            raise RuntimeError("fab rules contain unbalanced parentheses")
+    if depth:
+        raise RuntimeError("fab rules contain unbalanced parentheses")
+
+
+def fab_run_drc(source, target, board_bytes, project_bytes, rules_bytes, vendor=None):
+    """One isolated DRC pass. vendor is None for the board-only pass, or (owned_rules_text, covered_types)."""
+    target.mkdir(parents=True)
+    pcb = target / source.name
+    pcb.write_bytes(board_bytes)
+    original = rules_bytes.decode("utf-8") if rules_bytes else "(version 1)\n"
+    if vendor is None:
+        if project_bytes:
+            pcb.with_suffix(".kicad_pro").write_bytes(project_bytes)
+        pcb.with_suffix(".kicad_dru").write_text(original, encoding="utf-8")
+    else:
+        owned_rules, covered = vendor
+        combined = fab_owned_rules(original, owned_rules)
+        fab_lint_rules(combined)
+        pcb.with_suffix(".kicad_dru").write_text(combined, encoding="utf-8")
+        project = json.loads(project_bytes.decode("utf-8")) if project_bytes else {}
+        if not isinstance(project, dict):
+            raise RuntimeError("fab project must be a JSON object")
+        board = project.setdefault("board", {})
+        if not isinstance(board, dict):
+            raise RuntimeError("fab project board must be a JSON object")
+        design = board.setdefault("design_settings", {})
+        if not isinstance(design, dict):
+            raise RuntimeError("fab project board.design_settings must be a JSON object")
+        severities = design.setdefault("rule_severities", {})
+        if not isinstance(severities, dict):
+            raise RuntimeError("fab project board.design_settings.rule_severities must be a JSON object")
+        design["drc_exclusions"] = []
+        for name in covered | {"invalid_outline"}:
+            severities[name] = "error"
+        pcb.with_suffix(".kicad_pro").write_text(json.dumps(project), encoding="utf-8")
+    return fab_drc(pcb, target / "drc.json")["violations"]
+
+
+def render_fab(p, side, out, settings):
+    source = pathlib.Path(board_path(p, side))
+    for path in (source, source.with_suffix(".kicad_pro"), source.with_suffix(".kicad_dru")):
+        fab_regular_input(path)
+    pathlib.Path(out).mkdir(parents=True, exist_ok=True)
+    if not source.is_file():
+        pathlib.Path(out, "fab-limits.json").write_text(
+            json.dumps({"sections": [], "reason": f"no {side} board"}), encoding="utf-8")
+        return
+    board_bytes = source.read_bytes()
+    project_bytes = source.with_suffix(".kicad_pro").read_bytes() if source.with_suffix(".kicad_pro").is_file() else b""
+    rules_bytes = source.with_suffix(".kicad_dru").read_bytes() if source.with_suffix(".kicad_dru").is_file() else b""
+    input_hash = hashlib.sha256(b"\0".join([board_bytes, FAB_TABLE.read_bytes(), project_bytes, rules_bytes])).hexdigest()
+    sections = fab_context(source)
+    for s in sections:
+        s.update(checked=[], violations=[], inputHash=input_hash)
+        if rules_bytes.strip():
+            s["coverageWarnings"].append(
+                "Authored rule file present: rule loading is not independently verified; "
+                "lexical lint does not validate units, constraint names or conditions, "
+                "and KiCad may silently ignore appended vendor rules")
+    supported = [s for s in sections if not s["unsupported"]]
+    if supported:
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            # Exact saved fills in every pass, matching ordinary render_side (no --refill-zones).
+            board_rows = fab_run_drc(source, root / "board", board_bytes, project_bytes, rules_bytes)
+            for s in supported:
+                vendor_rules, covered = fab_vendor_rules(s)
+                _, unchecked = fab_rule_section(s)
+                s["unchecked"] = list(unchecked)
+                vendor_rows = fab_run_drc(source, root / s["vendor"], board_bytes, project_bytes,
+                                          rules_bytes, (vendor_rules, covered))
+                s["violations"] = [v for v in fab_subtract(vendor_rows, board_rows) if v["type"] in covered]
+                if any(v["type"] == "invalid_outline" for v in vendor_rows):
+                    if "edgeClearanceMm" not in s["unchecked"]:
+                        s["unchecked"].append("edgeClearanceMm")
+                    warning = "Edge clearance not checked: no valid closed board outline"
+                    if warning not in s["coverageWarnings"]:
+                        s["coverageWarnings"].append(warning)
+                s["checked"] = [k for k in s["values"] if k not in s["unchecked"]
+                                and not (s["layers"] <= 2 and "Inner" in k)]
+    pathlib.Path(out, "fab-limits.json").write_text(json.dumps({"sections": sections}, sort_keys=True), encoding="utf-8")
 
 
 def board_changed(p):
@@ -441,7 +632,7 @@ def metadata3d(side, objects, keep, finish, missing):
             warning = f"{ref or '(empty reference)'} ({uid}): {reason} skipped"
             warnings.append(warning)
             skipped.add(ref)
-            print(f"::warning::{warning}")
+            print("::warning::" + workflow_command_escape(warning))
             continue
         reason = reasons.get(ref) or (None if obj.get("has_model") else "no model in footprint")
         box, pos = obj.get("box"), obj.get("pos")
@@ -453,7 +644,7 @@ def metadata3d(side, objects, keep, finish, missing):
                      and all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in box))
         if not valid_box:
             if box is not None:
-                print(f"::warning::{ref}: malformed bounding box {box!r}, using estimated bounds")
+                print("::warning::" + workflow_command_escape(f"{ref}: malformed bounding box {box!r}, using estimated bounds"))
             # Padless graphics get a 2 mm estimated box; it is not enclosure clearance.
             box = [pos[0] - 1, pos[1] - 1, pos[0] + 1, pos[1] + 1]
         layer = (obj.get("props") or {}).get("layer") or ""
@@ -653,7 +844,7 @@ def normalize_poster(path):
     path.write_bytes(png[:8] + chunk(b'IHDR', header) + metadata + chunk(b'IDAT', zlib.compress(output)) + chunk(b'IEND', b''))
 
 
-def export_glb(p, side, out, *, model=True):
+def export_glb(p, side, out, *, model=True, poster=True, viewer=True):
     """Best-effort raw/fallback model and shared still; render warnings never affect coverage."""
     pcb = board_path(p, side)
     folder = pathlib.Path(out)
@@ -678,17 +869,23 @@ def export_glb(p, side, out, *, model=True):
     if model:
         if run(glb_argv(pcb, folder), "board.raw.glb", "glb.log"):
             normalize_glb(folder / "board.raw.glb")
-            shutil.copyfile(folder / "board.raw.glb", folder / "board.glb")
+            if viewer:
+                shutil.copyfile(folder / "board.raw.glb", folder / "board.glb")
+            else:
+                (folder / "board.glb").unlink(missing_ok=True)
         else:
             (folder / "board.glb").unlink(missing_ok=True)
-    if run(poster_argv(pcb, folder), "poster.png", "poster.log"):
-        try:
-            normalize_poster(folder / "poster.png")
-        except (OSError, ValueError, zlib.error) as error:
-            (folder / "poster.png").unlink(missing_ok=True)
-            (folder / "poster.png.failed").write_text("normalization attempted and failed")
-            with (folder / "poster.log").open('a', encoding='utf-8') as log:
-                log.write(f'\nPoster normalization failed: {error}\n')
+    if poster:
+        if run(poster_argv(pcb, folder), "poster.png", "poster.log"):
+            try:
+                normalize_poster(folder / "poster.png")
+            except (OSError, ValueError, zlib.error) as error:
+                (folder / "poster.png").unlink(missing_ok=True)
+                (folder / "poster.png.failed").write_text("normalization attempted and failed")
+                with (folder / "poster.log").open('a', encoding='utf-8') as log:
+                    log.write(f'\nPoster normalization failed: {error}\n')
+    else:
+        (folder / "poster.png").unlink(missing_ok=True)
 
 
 PCBDRAW_VERSION = "1.3.0"   # the version the evidence installed; review.yml pins the same number
@@ -764,8 +961,11 @@ def render_cache_complete(cache, p, side, settings, purposes=("comparison",)):
 
 
 def run_purposes(det):
-    """Run modes this render serves: a snapshot-only dispatch has no comparison base; a comparison run also leaves a snapshot when det["snapshot"] is set."""
-    if det.get("base") is None:
+    """Run modes this render serves: a snapshot-only run has no comparison; a comparison run also leaves a snapshot when det["snapshot"] is set.
+
+    cmd_detect records SNAPSHOT_REASON for a snapshot-only run. A first release or first commit also has no base
+    but is still a comparison (every project added), so base=None alone means snapshot-only only when no reason is recorded."""
+    if det.get("reason") == SNAPSHOT_REASON if "reason" in det else det.get("base") is None:
         return ("snapshot",)
     return ("comparison", "snapshot") if det.get("snapshot") else ("comparison",)
 
@@ -796,6 +996,12 @@ def downloads_valid(cache, purpose, policy):
     return envelope.get("purpose") == purpose and envelope.get("policy") == download_policy_key(policy)
 
 
+def raw_glb_valid(cache):
+    """07's download source: 02's uncompressed board.raw.glb, non-empty."""
+    raw = pathlib.Path(cache, "board.raw.glb")
+    return raw.is_file() and raw.stat().st_size > 0
+
+
 def missing_products(cache, p, side, settings, purposes):
     """Names of the products this settings object requests that are absent or invalid in the per-side cache directory.
 
@@ -807,18 +1013,27 @@ def missing_products(cache, p, side, settings, purposes):
     if (settings["design"]["enabled"] or settings["3d"]["enabled"]) and board:
         if not poster_png_valid(cache / "poster.png") and not (cache / "poster.png.failed").is_file():
             missing.append("poster")
-    if settings["3d"]["enabled"] and board and not glb_valid(cache) and not (cache / "board.raw.glb.failed").is_file():
+    attempted = (cache / "board.raw.glb.failed").is_file()
+    if settings["3d"]["enabled"] and board and not glb_valid(cache) and not attempted:
+        missing.append("glb")
+    # 07: board.raw.glb is required for head only when downloads.enabled is True. Release-only renders stage
+    # fab files but never produce raw GLB, so requiring raw GLB for release-only would cause permanent cache misses.
+    elif side == "head" and settings.get("downloads", {}).get("enabled") and board and not raw_glb_valid(cache) and not attempted:
         missing.append("glb")
     if settings["checks"].get("release", "off") != "off" and not nonempty_dir(cache / "fab"):
         missing.append("fab")
     if settings.get("_snapshot_fabrication") is not None and not nonempty_dir(cache / "fab-snapshot"):
         missing.append("fab-snapshot")
-    if settings.get("downloads", {}).get("enabled", False):
+    downloads = settings.get("downloads", {}).get("enabled", False)
+    policy = settings.get("_snapshot_fabrication")
+    if side == "head":  # 07 exports downloads for head only
         for purpose in purposes:  # comparison reads downloads/, snapshot reads downloads-snapshot/
-            if purpose == "comparison" and not downloads_valid(cache, "comparison", settings):
+            if purpose == "comparison" and downloads and not downloads_valid(cache, "comparison", settings):
                 missing.append("downloads")
-            if purpose == "snapshot":  # with no captured policy there is nothing to validate against: still missing, never skipped
-                policy = settings.get("_snapshot_fabrication")
+            # render_downloads makes downloads-snapshot/ whenever the trusted policy was captured (release checks or downloads),
+            # and a head restored from base's shared revision cache has none. With no captured policy there is nothing to
+            # validate against: still missing, never skipped.
+            if purpose == "snapshot" and (downloads or policy is not None):
                 if policy is None or not downloads_valid(cache, "snapshot", {**settings, "fabrication": policy}):
                     missing.append("downloads-snapshot")
     return missing
@@ -864,6 +1079,11 @@ def render_cache(p, side, det, settings):
               "board_models": glb_input_digest(p, side)}
     identity = pathlib.Path(__file__).read_bytes() + json.dumps(inputs, sort_keys=True).encode()
     identity += json.dumps(image_export_identity(p, side), sort_keys=True, separators=(',', ':')).encode()
+    needs_downloads = side == "head" and (settings.get("downloads", {}).get("enabled") or settings["checks"].get("release", "off") != "off")
+    if needs_downloads:
+        identity += b"\0head-downloads-v1"
+    if fab_enabled(settings):
+        identity += FAB_TABLE.read_bytes() + (b"fab-head" if side == "head" else b"fab-base")
     return pathlib.Path(".render-cache") / revision / project_id(p["dir"]) / hashlib.sha256(identity).hexdigest()[:16]
 
 
@@ -897,10 +1117,17 @@ def render_fabrication(p, side, out, settings, products=("fab", "fab-snapshot"))
     if not os.path.isfile(pro):
         return
     compared = settings["checks"].get("release", "off") != "off"
+
+    def release(policy, dest):
+        try:
+            release_project(pro, "review", policy, dest, p["name"])
+        except (SystemExit, OSError, ValueError, IndexError, KeyError, csv.Error, zipfile.BadZipFile):
+            print("::warning::" + workflow_command_escape(f"{p['name']}: release outputs incomplete; continuing other exports"))
+
     if compared and "fab" in products:
         shutil.rmtree(f"{out}/fab", ignore_errors=True)
         os.makedirs(f"{out}/fab")
-        release_project(pro, "review", settings, f"{out}/fab", p["name"])
+        release(settings, f"{out}/fab")
     snapshot = settings.get("_snapshot_fabrication")
     if snapshot is not None and "fab-snapshot" in products:
         dest = f"{out}/fab-snapshot"
@@ -909,7 +1136,39 @@ def render_fabrication(p, side, out, settings, products=("fab", "fab-snapshot"))
             shutil.copytree(f"{out}/fab", dest)
         else:
             os.makedirs(dest)
-            release_project(pro, "review", {**settings, "fabrication": snapshot}, dest, p["name"])
+            release({**settings, "fabrication": snapshot}, dest)
+
+
+def glb_revision_matches(out, revision):
+    """07's Task 9A gate input: the full SHA the raw exporter in this folder last ran on."""
+    try:
+        return pathlib.Path(out, "board.raw.glb.revision").read_text(encoding="utf-8").strip() == revision
+    except (OSError, UnicodeError):
+        return False
+
+
+def record_glb_revision(out, revision):
+    """Written only after export_glb ran on this side's own checkout; never for bytes copied from the other side."""
+    if isinstance(revision, str) and re.fullmatch(r"[0-9a-f]{40}", revision):
+        pathlib.Path(out).mkdir(parents=True, exist_ok=True)
+        pathlib.Path(out, "board.raw.glb.revision").write_text(revision + "\n", encoding="utf-8")
+
+
+def render_downloads(p, side, out, settings, head, purposes, missing):
+    """07's head downloads: downloads/ under the comparison policy, downloads-snapshot/ under the trusted snapshot policy.
+
+    A full render (missing is None) makes each folder the run's purposes use; a partial cache hit only the missing ones."""
+    src = posixpath.join(side, p["dir"])
+    wanted = settings["downloads"]["enabled"] or settings["checks"].get("release", "off") != "off"
+    if "comparison" in purposes and wanted and (missing is None or "downloads" in missing):
+        export_downloads(p, src, out, settings, head)
+    policy = settings.get("_snapshot_fabrication")
+    if "snapshot" in purposes and policy is not None and (missing is None or "downloads-snapshot" in missing):
+        trusted = {**settings, "fabrication": policy}
+        try:
+            export_downloads(p, src, out, trusted, head, policy=trusted, purpose="snapshot")
+        except ValueError as error:  # the revision gate refused: the design report goes without downloads
+            print("::warning::" + workflow_command_escape(f"{p['name']}: design snapshot downloads skipped: {error}"))
 
 
 def restore_renders(args=None):
@@ -943,6 +1202,29 @@ def cache_renders(args=None):
                 (cache / '.complete').write_text(json.dumps(image_export_identity(p, side), sort_keys=True), encoding='utf-8')
 
 
+def cmd_copper(args):
+    # ponytail: recompute pair-specific copper once per run; no polygon cache.
+    # Each existing revision gets 120 s for CLI refill plus 60 s for collection;
+    # reserve another 60 s for startup, signed booleans and JSON serialization.
+    det = json.loads(pathlib.Path("review/detect.json").read_text())
+    script = pathlib.Path(__file__).resolve().parent / "tools" / "copper_area.py"
+    for p in det["projects"]:
+        paths = [pathlib.Path(side) / p["dir"] / (p["name"] + ".kicad_pcb") for side in ("base", "head")]
+        out = pathlib.Path("review") / project_id(p["dir"]) / "copper-diff.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        result = {"rows": [], "incomplete": []}
+        if any(f.exists() for f in paths):
+            try:
+                run = subprocess.run([sys.executable, str(script), *[str(f) if f.exists() else "-" for f in paths]],
+                                     capture_output=True, text=True,
+                                     timeout=180 * sum(f.exists() for f in paths) + 60, check=True)
+                result = json.loads(run.stdout)
+            except (subprocess.SubprocessError, ValueError, OSError) as exc:
+                result = {"rows": [], "incomplete": [{"channel": "routing", "reason": f"Copper comparison unavailable: {type(exc).__name__}"}]}
+                print(f"{p['name']}: copper unavailable: {exc}", file=sys.stderr)
+        out.write_text(json.dumps(result, allow_nan=False, separators=(",", ":")), encoding="utf-8")
+
+
 def cmd_render(args):
     with open("review/detect.json", encoding="utf-8") as fh:
         det = json.load(fh)
@@ -965,23 +1247,40 @@ def cmd_render(args):
                     print(f"{p['name']}: {side} render cache hit ({det[side]})")
                     continue
             else:
-                render_side(posixpath.join(side, p["dir"]), p["name"], out, netlist=settings["checks"].get("interfaces", "off") != "off")
+                # Connectivity evidence for every present schematic, whatever the check settings.
+                render_side(posixpath.join(side, p["dir"]), p["name"], out, netlist=True)
+                if fab_enabled(settings):
+                    try:
+                        render_fab(p, side, out, settings)
+                    except (OSError, ValueError, RuntimeError) as exc:
+                        sys.exit(f"Fab limits could not run for {p['name']}: {exc}")
                 missing = None  # a full render makes every product
-            if need_still and pathlib.Path(board_path(p, side)).is_file() and (missing is None or {"poster", "glb"} & set(missing)):
-                if side == "head" and shared_3d:
-                    os.makedirs(out, exist_ok=True)
-                    for name in ("board.raw.glb", "board.glb", "poster.png", "glb.log", "poster.log", "board.raw.glb.failed", "poster.png.failed"):
-                        source = pathlib.Path(f"review/{project_id(p['dir'])}/base/{name}")
-                        dest = pathlib.Path(out) / name
-                        dest.unlink(missing_ok=True)
-                        if source.is_file():
-                            shutil.copyfile(source, dest)
-                else:
-                    export_glb(p, side, out, model=export_3d)
-            if settings.get("design", {}).get("enabled", False) and os.path.isfile(board_path(p, side)) and (missing is None or not pathlib.Path(out, "pcbdraw.json").is_file()):
+            board = pathlib.Path(board_path(p, side)).is_file()
+            # The trusted snapshot's fabrication/download policy needs head's own raw export (07's Task 9A revision gate).
+            snapshot_downloads = side == "head" and "snapshot" in purposes and settings.get("_snapshot_fabrication") is not None and board
+            if missing is None or {"poster", "glb"} & set(missing) or (snapshot_downloads and "downloads-snapshot" in missing and not glb_revision_matches(out, det.get(side))):
+                if side == "head" and (settings["downloads"]["enabled"] or snapshot_downloads):
+                    export_glb(p, side, out, model=settings["downloads"]["enabled"] or export_3d, poster=need_still, viewer=export_3d)
+                    record_glb_revision(out, det.get(side))
+                elif need_still and board:
+                    if side == "head" and shared_3d:
+                        os.makedirs(out, exist_ok=True)
+                        for name in ("board.raw.glb", "board.glb", "poster.png", "glb.log", "poster.log", "board.raw.glb.failed", "poster.png.failed"):
+                            source = pathlib.Path(f"review/{project_id(p['dir'])}/base/{name}")
+                            dest = pathlib.Path(out) / name
+                            dest.unlink(missing_ok=True)
+                            if source.is_file():
+                                shutil.copyfile(source, dest)
+                        pathlib.Path(out, "board.raw.glb.revision").unlink(missing_ok=True)  # base bytes are never labelled as head's revision
+                    else:
+                        export_glb(p, side, out, model=export_3d)
+                        record_glb_revision(out, det.get(side))
+            if settings.get("design", {}).get("enabled", False) and board and (missing is None or not pathlib.Path(out, "pcbdraw.json").is_file()):
                 _, note = pcbdraw_plot(board_path(p, side), out, pcbdraw_run)
                 pathlib.Path(out, "pcbdraw.json").write_text(json.dumps({"note": note}), encoding="utf-8")
             render_fabrication(p, side, out, settings, ("fab", "fab-snapshot") if missing is None else missing)
+            if side == "head" and det.get("head"):
+                render_downloads(p, side, out, settings, det["head"], purposes, missing)
             print(f"{p['name']}: rendered {side}")
         if settings["libraries"]["enabled"]:
             roots = {side: posixpath.join(side, p["dir"]) for side in ("base", "head")}
@@ -1005,7 +1304,7 @@ def cmd_render(args):
                             # ponytail: unit 1 drawing; compare all units' pins, add unit views when requested.
                             pathlib.Path(f"{dest}/{lib_slug(c)}.svg").write_bytes(made[0].read_bytes())
                         except OSError:
-                            print(f"::warning::No drawing for library item {c['lib']}:{c['item']} ({side})")
+                            print("::warning::" + workflow_command_escape(f"No drawing for library item {c['lib']}:{c['item']} ({side})"))
 
     cache_renders()
 
@@ -1265,7 +1564,7 @@ def sch_objects(proj_dir, name):
             elif kind in ("wire", "bus"):
                 pts = points(n)
                 objs[key] = {"kind": kind, "ref": "", "props": {"points": " ".join(fmt_at(p) for p in pts)},
-                             "pos": list(pts[0]) if pts else None, "box": box_of(pts), "where": where}
+                             "points_mm": pts, "pos": list(pts[0]) if pts else None, "box": box_of(pts), "where": where}
             elif kind in ("label", "global_label", "hierarchical_label"):
                 a = at(n)
                 objs[key] = {"kind": kind.replace("_", " "), "ref": n[1], "props": {"text": n[1], "shape": val(n, "shape"), "position": fmt_at(a)},
@@ -1396,6 +1695,10 @@ def sheet_hotspots(proj_dir, name):
 def pcb_objects(path):
     with open(path, encoding="utf-8") as fh:
         root = parse_sexpr(fh.read())
+    return pcb_objects_from_root(root)
+
+
+def pcb_objects_from_root(root):
     net_names = {n[1]: n[2] for n in findall(root, "net") if len(n) > 2 and is_net_number(n[1])}  # older files number their nets
     net = lambda node: (lambda n: (net_names.get(n[1], n[-1]) if is_net_number(n[1]) else n[1]) if n else None)(find(node, "net"))
     where = {"board": True}
@@ -2145,24 +2448,129 @@ def pro_objects(path):
                          "props": {k: v for k, v in flatten(keep).items() if v != "None"}}}
 
 
-def project_objects(proj_dir, name):
+MM_RULE_KEYS = {"min_clearance", "min_track_width", "min_via_diameter", "min_through_hole_diameter",
+                "min_microvia_diameter", "min_microvia_drill", "min_hole_clearance", "min_hole_to_hole",
+                "min_copper_edge_clearance", "clearance", "track_width", "via_diameter", "via_drill",
+                "microvia_diameter", "microvia_drill", "diff_pair_width", "diff_pair_gap", "diff_pair_via_gap",
+                "min_via_annular_width", "min_connection", "min_groove_width", "min_silk_clearance",
+                "min_text_height", "min_text_thickness", "solder_mask_to_copper_clearance"}
+
+
+def rule_values(root: str, name: str) -> dict[str, object]:
+    """Read rule sources without flatten's stringification; absent revisions are empty.
+
+    Malformed project JSON returns an explicit _unavailable marker; independent
+    custom rules and board stackup remain readable.
+    """
+    out = {}
+
+    def walk(value, key):
+        if isinstance(value, dict):
+            for k, v in sorted(value.items()):
+                walk(v, f"{key}.{k}")
+        elif isinstance(value, list) and value and all(isinstance(v, dict) and "name" in v for v in value):
+            for v in sorted(value, key=lambda v: v["name"]):
+                walk(v, f"{key}.{v['name']}")
+        else:
+            out[key] = value
+
+    pro = pathlib.Path(root) / (name + ".kicad_pro")
+    if pro.exists():
+        try:
+            data = json.loads(pro.read_text(encoding="utf-8"))
+        except ValueError:
+            out["_unavailable"] = f"Project rules unavailable: malformed {pro.name}"
+            data = {}
+        board = data.get("board") or {}
+        design_settings = board.get("design_settings") or {}
+        walk(design_settings.get("rules") or {}, "rules")
+        net_settings = data.get("net_settings") or {}
+        if "classes" in net_settings:
+            walk(net_settings["classes"], "net_settings.classes")
+        # Pattern order is meaningful, unlike named class order. Keep assignments intact.
+        if "netclass_patterns" in net_settings:
+            out["net_settings.netclass_patterns"] = net_settings["netclass_patterns"]
+    dru = pathlib.Path(root) / (name + ".kicad_dru")
+    if dru.exists():
+        out["custom rules"] = dru.read_text(encoding="utf-8").replace("\r\n", "\n")
+    pcb = pathlib.Path(root) / (name + ".kicad_pcb")
+    if pcb.exists():
+        setup = find(parse_sexpr(pcb.read_text(encoding="utf-8")), "setup") or []
+        stack = find(setup, "stackup")
+        if stack:
+            out["stackup"] = stack
+    return out
+
+
+def diff_rules(base_root, head_root, name) -> list[dict]:
+    """Describe dimensional constraints, ordered assignments, custom text and stackup."""
+    b, h = rule_values(base_root, name), rule_values(head_root, name)
+    rows = []
+    unavailable = {"before": b.pop("_unavailable", None), "after": h.pop("_unavailable", None)}
+    if any(unavailable.values()):
+        row = electrical_row("rules-unavailable", "Project rules unavailable", channel="rules",
+                             detail={"kind": "unavailable", **unavailable})
+        row["document"] = "board"
+        rows.append(row)
+        # Unknown project rules must not become fabricated additions or removals.
+        for values in (b, h):
+            for key in list(values):
+                if key.startswith(("rules.", "net_settings.")):
+                    del values[key]
+    for key in sorted(b.keys() | h.keys()):
+        before, after = b.get(key), h.get(key)
+        if before == after:
+            continue
+        dimensional = key.rsplit(".", 1)[-1] in MM_RULE_KEYS
+        numeric = dimensional and all(v is None or type(v) in (int, float) for v in (before, after))
+        detail = {"kind": "number", "unit": "mm", "before": before, "after": after} if numeric else {
+            "kind": "text", "before": before, "after": after}
+        stackup = key == "stackup"
+        row = electrical_row("stackup" if stackup else "rule", key,
+                             channel="visual" if stackup else "rules",
+                             weight="light" if stackup else "heavy", detail=detail)
+        row["document"] = "board"
+        rows.append(row)
+    return rows
+
+
+def project_objects(proj_dir, name, issues=None):
     if not os.path.isdir(proj_dir):
         return {}
     objs = sch_objects(proj_dir, name)
     pcb = posixpath.join(proj_dir, f"{name}.kicad_pcb")
     if os.path.exists(pcb):
         objs.update(pcb_objects(pcb))
-    objs.update(pro_objects(posixpath.join(proj_dir, f"{name}.kicad_pro")))
-    dru = posixpath.join(proj_dir, f"{name}.kicad_dru")
-    if os.path.exists(dru):
-        with open(dru, encoding="utf-8") as fh:
-            objs["meta:dru"] = {"kind": "design rules", "ref": f"{name}.kicad_dru", "where": None,
-                                "props": {"custom rules": hashlib.sha1(fh.read().encode()).hexdigest()[:10]}}
+    for key, suffix, load in (
+        ("meta:pro", ".kicad_pro", pro_objects),
+        ("meta:dru", ".kicad_dru", lambda path: {"meta:dru": {
+            "kind": "design rules", "ref": name + ".kicad_dru", "where": None,
+            "props": {"custom rules": hashlib.sha1(pathlib.Path(path).read_bytes()).hexdigest()[:10]}}}),
+    ):
+        path = posixpath.join(proj_dir, name + suffix)
+        if not os.path.exists(path):
+            continue
+        try:
+            objs.update(load(path))
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
+            if issues is not None:
+                issues.append({"channel": "rules", "reason": f"Unreadable {suffix} evidence", "unknownMeta": key})
+            print(f"{path}: optional rules unavailable: {exc}", file=sys.stderr)
     return objs
 
 
-def diff_objects(base, head):
-    """Rows of added / removed / modified objects. UUID first; unmatched symbols and footprints by reference."""
+def project_pair(p, *, single=False):
+    """Both sides' objects; single=True (a design report) leaves base empty and never reads its checkout."""
+    issues = []
+    objs = {side: {} if single and side == "base" else project_objects(posixpath.join(side, p["dir"]), p["name"], issues) for side in ("base", "head")}
+    for key in {i["unknownMeta"] for i in issues if "unknownMeta" in i}:
+        for side in objs:
+            objs[side].pop(key, None)
+    return objs, issues
+
+
+def object_pairs(base, head):
+    """UUID pairs first; unmatched objects pair by their match key (reference for footprints and symbols)."""
     pairs = [(k, k) for k in base if k in head]
     b_left = {k: o for k, o in base.items() if k not in head}
     h_left = {k: o for k, o in head.items() if k not in base}
@@ -2172,6 +2580,12 @@ def diff_objects(base, head):
         if hk in h_left:
             pairs.append((k, hk))
             del b_left[k], h_left[hk]
+    return pairs, b_left, h_left
+
+
+def diff_objects(base, head):
+    """Rows of added / removed / modified objects. UUID first; unmatched symbols and footprints by reference."""
+    pairs, b_left, h_left = object_pairs(base, head)
     rows = []
     for bk, hk in pairs:
         b, h = base[bk], head[hk]
@@ -2328,7 +2742,7 @@ def library_report(changes, objects, out_dir, blobs, *, local_items=None):
             nickname, _, item = identity.rpartition(":")
             if identity == key or ((c["kind"], nickname) not in libraries and item == c["item"]
                                    and by_item.get((c["kind"], item)) == {c["lib"]}):
-                users.add(o["ref"].split(" unit ")[0])
+                users.add(base_ref(o["ref"]))
         users = sorted(users, key=natural)
         svg, sizes = {}, {}
         for side in ("base", "head"):
@@ -2359,17 +2773,18 @@ def library_report(changes, objects, out_dir, blobs, *, local_items=None):
 # ---- Checks: ERC, DRC, schematic parity, BOM fields. Violations new since base are called out. ----
 
 DEFAULT_SETTINGS = {
-    "checks": {"erc": "required", "drc": "required", "parity": "required", "bom": "informational", "release": "off", "interfaces": "off"},
+    "checks": {"erc": "required", "drc": "required", "parity": "required", "bom": "informational", "release": "off", "interfaces": "off", "fab_limits": "informational"},
     "interfaces": {},  # pattern overrides for the interfaces check
     "fail_on": "new",  # "new": only errors this change introduced fail a required check; "all": any error does
     "bom": {"required_fields": ["Value", "Footprint"], "critical_prefixes": ["U", "J", "Q", "D", "Y", "X", "K", "F"],
             "order_ready_fields": []},  # empty: the fabrication preset's fields
-    "fabrication": {"preset": "jlcpcb", "part_field": None},  # part_field defaults to the preset's (LCSC / MPN)
+    "fabrication": {"preset": "jlcpcb", "part_field": None, "check_limits": False},  # part_field defaults to the preset's (LCSC / MPN)
     "3d": {"enabled": False},
     "parts": {"enabled": False},
     "release": {"review": False},
     "digikey": {"enabled": False, "site": "US", "currency": "USD", "max_lookups": 100},
     "pdf": {"enabled": False},
+    "downloads": {"enabled": False, "step": True},  # head-revision files for the report's Download dialog
 
     "threads": {"enabled": False, "block_merge": False},
     "issues": {"enabled": False},
@@ -2379,7 +2794,35 @@ DEFAULT_SETTINGS = {
     "libraries": {"enabled": False},
     "design": {"enabled": False},  # head-only design snapshot on default-branch pushes, version tags and manual snapshot runs
 }
-CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields", "interfaces": "Interfaces", "release": "Release package"}
+CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields", "interfaces": "Interfaces", "release": "Release package", "fab_limits": "Fab limits"}
+
+
+def fab_profiles():
+    return json.loads(FAB_TABLE.read_text(encoding="utf-8"))
+
+
+def fab_context(pcb):
+    tree = parse_sexpr(pcb.read_text(encoding="utf-8"))
+    layers = [x[1] for x in (find(tree, "layers") or [])[1:]
+              if len(x) > 2 and x[1].endswith(".Cu")]
+    n = len(layers)
+    coverage_warnings = []
+    stack = find(find(tree, "setup") or [], "stackup") or []
+    thickness = {x[1]: find(x, "thickness") for x in findall(stack, "layer") if x[1] in layers}
+    for layer in layers:
+        t = thickness.get(layer)
+        if not t:
+            coverage_warnings.append(f"{layer}: copper thickness unknown; limits assume 0.035 mm (1 oz)")
+        elif abs(float(t[1]) - .035) > .000001:
+            coverage_warnings.append(f"{layer}: copper thickness {t[1]} mm; limits assume 0.035 mm (1 oz)")
+    sections = []
+    for vendor, key in (("jlcpcb", "jlcpcb-2l" if n == 2 else "jlcpcb-multilayer"), ("pcbway", "pcbway-std")):
+        profile = fab_profiles()[key]
+        sections.append({"vendor": vendor, "profile": key, "layers": n, "checkedOn": profile["checkedOn"],
+            "assumedCopperOz": 1, "unsupported": None if n in profile["layers"] else
+            f"not checked: profile covers {', '.join(map(str, profile['layers']))} layers; board has {n}",
+            "coverageWarnings": list(coverage_warnings), "unchecked": [], "values": profile["values"]})
+    return sections
 
 
 INTERFACE_PATTERNS = {
@@ -2404,7 +2847,7 @@ def load_settings(roots=("base", "head")):
                 else:
                     settings[k] = v
             break
-    for section in ("checks", "bom", "fabrication", "3d", "parts", "release", "digikey", "threads", "issues", "github", "waivers", "inventory", "libraries", "interfaces", "pdf", "design"):
+    for section in ("checks", "bom", "fabrication", "3d", "parts", "release", "digikey", "threads", "issues", "github", "waivers", "inventory", "libraries", "interfaces", "pdf", "downloads", "design"):
         if not isinstance(settings[section], dict):
             sys.exit(f"{SETTINGS_FILE}: {section} must be a table")
     if not isinstance(settings["bom"]["required_fields"], list) or not all(isinstance(f, str) for f in settings["bom"]["required_fields"]):
@@ -2423,6 +2866,10 @@ def load_settings(roots=("base", "head")):
             sys.exit(f"{SETTINGS_FILE}: interfaces.{k} must be one of {', '.join(INTERFACE_PATTERNS)} with a list of names")
     if settings["fabrication"]["preset"] not in PRESETS:
         sys.exit(f"{SETTINGS_FILE}: fabrication.preset must be one of {', '.join(PRESETS)}")
+    if type(settings["fabrication"]["check_limits"]) is not bool:
+        sys.exit(f"{SETTINGS_FILE}: fabrication.check_limits must be true or false")
+    if settings["fabrication"]["check_limits"] and settings["checks"]["fab_limits"] != "off" and settings["checks"]["drc"] == "off":
+        sys.exit(f'{SETTINGS_FILE}: fabrication.check_limits requires checks.drc != "off"')
     if settings["fail_on"] not in ("new", "all"):
         sys.exit(f"{SETTINGS_FILE}: fail_on must be \"new\" or \"all\"")
     if not isinstance(settings["3d"]["enabled"], bool):
@@ -2443,6 +2890,9 @@ def load_settings(roots=("base", "head")):
         sys.exit(f"{SETTINGS_FILE}: digikey.max_lookups must be an integer from 1 to 900")
     if not isinstance(settings["pdf"]["enabled"], bool):
         sys.exit(f"{SETTINGS_FILE}: pdf.enabled must be true or false")
+    for key in ("enabled", "step"):
+        if not isinstance(settings["downloads"][key], bool):
+            sys.exit(f"{SETTINGS_FILE}: downloads.{key} must be true or false")
 
     if not isinstance(settings["threads"]["enabled"], bool):
         sys.exit(f"{SETTINGS_FILE}: threads.enabled must be true or false")
@@ -2647,6 +3097,504 @@ def cmd_release(args):
         print("release/SHA256SUMS")
 
 
+# ---- Downloads: head-revision files for the report's Download dialog (downloads.enabled). ----
+
+DOWNLOAD_STEP_TIMEOUT = 120  # seconds; a slower STEP export is skipped and the reason recorded
+DOWNLOAD_LABELS = {"fab": "For fabrication", "pdf": "Schematic PDF", "step": "3D model (STEP)", "glb": "3D model (GLB)"}
+
+
+def safe_name(text):
+    """File-name-safe label: the Worker route and the gh command only ever see [A-Za-z0-9_.-]."""
+    return re.sub(r"[^A-Za-z0-9_.-]+", "-", text).strip("-.") or "project"
+
+
+def export_one(kind, args, dest, timeout=None):
+    """Run one kicad-cli export; record failed, slow or empty exports instead of raising."""
+    entry = {"kind": kind, "label": DOWNLOAD_LABELS[kind], "file": None, "error": None}
+    try:
+        if os.path.lexists(dest):
+            os.remove(dest)
+        r = subprocess.run(["kicad-cli", *args], capture_output=True, text=True, timeout=timeout)
+        if r.returncode:
+            entry["error"] = f"kicad-cli exited {r.returncode}"
+        elif not os.path.isfile(dest) or os.path.getsize(dest) == 0:
+            entry["error"] = "kicad-cli wrote no file"  # KiCad can exit 0 after printing an error (pcb export odb does)
+    except subprocess.TimeoutExpired:
+        entry["error"] = f"skipped: export took longer than {timeout} s"
+    except OSError as e:
+        entry["error"] = f"kicad-cli unavailable: {e}"
+    if entry["error"]:
+        try:
+            if os.path.lexists(dest):
+                os.remove(dest)
+        except OSError as e:
+            entry["error"] += f"; cannot remove output: {e}"
+    else:
+        entry["file"] = os.path.basename(dest)
+    return entry
+
+
+def fab_parts(pro, name, settings, fab_dir):
+    """Require outputs for the source types actually present; never equate rc=0 with completeness."""
+    stem = f"{fab_dir}/{name}-review-{settings['fabrication']['preset']}"
+    pcb, sch = pro[:-len(".kicad_pro")] + ".kicad_pcb", pro[:-len(".kicad_pro")] + ".kicad_sch"
+    parts = []
+    def csv_ok(path, header):
+        with open(path, newline="", encoding="utf-8-sig") as f:
+            rows = list(csv.reader(f))
+        # ponytail: header-only CSV is valid for a board with no placed parts; assembly readiness remains checks.release's job.
+        if not rows or rows[0] != header or any(len(row) != len(header) for row in rows[1:]):
+            raise ValueError("malformed fabrication CSV")
+    if os.path.isfile(pcb):
+        archive, pos = stem + "-gerbers.zip", stem + "-positions.csv"
+        with zipfile.ZipFile(archive) as z:
+            infos = z.infolist()
+            if not infos or any(i.file_size == 0 or i.is_dir() for i in infos) or z.testzip():
+                raise ValueError("empty or damaged Gerber archive")
+            names = [i.filename.lower() for i in infos]
+            if not any(n.endswith(".drl") for n in names):
+                raise ValueError("missing drill output")
+            # KiCad --no-x2 uses Protel extensions; also accept .gbr naming.
+            for layer in (l for l in board_layers(pcb) if l.endswith(".Cu")):
+                ext = {"F.Cu": ".gtl", "B.Cu": ".gbl"}.get(layer)
+                if layer.startswith("In"):
+                    ext = ".g" + layer[2:-3]
+                if not any(n.endswith("-" + layer.replace(".", "_").lower() + ".gbr") or (ext and n.endswith(ext)) for n in names):
+                    raise ValueError("missing copper Gerber: " + layer)
+        csv_ok(pos, list(POS_COLUMNS.values()))
+        parts += [archive, pos]
+    if os.path.isfile(sch):
+        bom = stem + "-bom.csv"
+        csv_ok(bom, [label for _, label in PRESETS[settings["fabrication"]["preset"]]["bom"]])
+        parts.append(bom)
+    if not parts or any(not os.path.isfile(f) or not os.path.getsize(f) for f in parts):
+        raise ValueError("missing fabrication output")
+    return parts
+
+
+CPL_TABLE = pathlib.Path(__file__).with_name("cpl_rotations") / "jlcpcb_cpl_rotations.csv"
+CPL_TABLE_SHA256 = "fce26b890863fa56c6fc8d91a44241d9f3b420c78da28a10bc13204903542698"
+CPL_OVERRIDE_HEADER = ["Designator", "Rotation", "Offset X", "Offset Y"]
+
+
+def load_cpl_table(path=CPL_TABLE):
+    """Rows of matthewlai/JLCKicadTools cpl_rotations_db.csv in file order: (compiled pattern, degrees, dx, dy)."""
+    data = pathlib.Path(path).read_bytes()
+    if hashlib.sha256(data).hexdigest() != CPL_TABLE_SHA256:
+        raise SystemExit(f"{path}: not the pinned CPL rotation table")
+    rows = list(csv.reader(data.decode("utf-8").splitlines(), skipinitialspace=True))
+    # The pinned source has whitespace before the final quoted header cell.
+    if not rows or rows[0] != ["Footprint pattern", "Rotation", "Offset X", "Offset Y"]:
+        raise SystemExit(f"{path}: unexpected CPL rotation table header")
+    table = []
+    for row in rows[1:]:
+        dx = float(row[2]) if len(row) > 2 else 0.0
+        dy = float(row[3]) if len(row) > 3 else 0.0
+        table.append((re.compile(row[0]), int(row[1]), dx, dy))
+    return table
+
+
+def cpl_rule(table, package):
+    """Last matching row wins, as in JLCKicadTools' FixRotations. re.match anchors only the start of the Package column."""
+    hit = None
+    for pattern, degrees, dx, dy in table:
+        if pattern.match(package):
+            hit = (degrees, dx, dy)
+    return hit
+
+
+def jlc_position(side, rotation, x, y, rule):
+    """One CPL row with the arithmetic of cpl_fix_rotations.py FixRotations (JLCKicadTools cdd504e, lines 121-173).
+    ponytail: the bottom-side mirror is the July 2022 rule the pinned code documents; unverified against JLCPCB's current behaviour (see cpl_rotations/SOURCE.md)."""
+    bottom = side == "Bottom"
+    if bottom and x < 0:
+        x = -x
+    if rule is not None:
+        degrees, dx, dy = rule
+        degrees %= 360  # Reduce integer overrides before float arithmetic, even beyond float range.
+        rotation = (rotation - degrees) % 360 if bottom else (rotation + degrees) % 360
+        x, y = x + dx, y + dy
+    if bottom:
+        rotation = (-rotation + 180) % 360
+    return rotation, x, y
+
+
+def load_cpl_overrides(path):
+    """Per-part overrides from <project folder>/<name>.cpl-overrides.csv. A listed Designator replaces its table rule."""
+    if not os.path.exists(path):
+        return {}
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        rows = list(csv.reader(f, strict=True))
+    if not rows or rows[0] != CPL_OVERRIDE_HEADER:
+        raise ValueError("CPL overrides header must be Designator,Rotation,Offset X,Offset Y")
+    overrides = {}
+    for row in rows[1:]:
+        if len(row) != 4 or not row[0]:
+            raise ValueError("malformed CPL override row")
+        if row[0] in overrides:
+            raise ValueError("duplicate CPL override for " + row[0])
+        dx, dy = float(row[2]), float(row[3])
+        if not (math.isfinite(dx) and math.isfinite(dy)):
+            raise ValueError("CPL override offset is not finite")
+        overrides[row[0]] = (int(row[1]), dx, dy)
+    return overrides
+
+
+def correct_positions(src, dest, table, overrides):
+    """Write the JLCPCB CPL with corrected rotation and offsets. Returns how many rows matched an override or a table rule."""
+    with open(src, newline="", encoding="utf-8") as f:
+        rows = list(csv.reader(f))
+    col = {name: rows[0].index(name) for name in ("Designator", "Package", "Mid X", "Mid Y", "Rotation", "Layer")}
+    matched = 0
+    with open(dest, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(rows[0])
+        for row in rows[1:]:
+            side = row[col["Layer"]]
+            if side not in ("Top", "Bottom"):
+                raise ValueError("unexpected CPL side: " + side)
+            rule = overrides.get(row[col["Designator"]]) or cpl_rule(table, row[col["Package"]])
+            if rule is not None:
+                matched += 1
+            rot, x, y = jlc_position(side, float(row[col["Rotation"]]), float(row[col["Mid X"]]), float(row[col["Mid Y"]]), rule)
+            row[col["Rotation"]], row[col["Mid X"]], row[col["Mid Y"]] = f"{rot:.6f}", f"{x:.6f}", f"{y:.6f}"
+            w.writerow(row)
+    return matched
+
+
+def cpl_for_download(pro, name, settings, raw, dest):
+    """Corrected CPL for the download zip only. Release evidence and checks.release keep KiCad's raw export."""
+    overrides_path = os.path.join(os.path.dirname(pro), f"{name}.cpl-overrides.csv")
+    if settings["fabrication"]["preset"] != "jlcpcb":
+        if os.path.exists(overrides_path):
+            raise ValueError("CPL rotation overrides apply to the jlcpcb preset only")
+        shutil.copyfile(raw, dest)  # no PCBWay rotation source is pinned, so PCBWay positions stay KiCad's
+        return dest
+    matched = correct_positions(raw, dest, load_cpl_table(), load_cpl_overrides(overrides_path))
+    print("::notice::" + workflow_command_escape(f"{name}: JLCPCB CPL rotation rules matched {matched} rows (JLCKicadTools table, pinned)"))
+    return dest
+
+
+def fab_entry(pro, name, settings, fab_dir, dest):
+    """Read raw release evidence; correct only the download zip's disposable CPL copy."""
+    entry = {"kind": "fab", "label": DOWNLOAD_LABELS["fab"], "file": None, "error": None}
+    expected = (SystemExit, OSError, ValueError, ArithmeticError, IndexError, KeyError, csv.Error, zipfile.BadZipFile)
+    try:
+        if os.path.lexists(dest):
+            os.remove(dest)
+        with tempfile.TemporaryDirectory(prefix=".fab-", dir=os.path.dirname(dest) or ".") as staging:
+            try:
+                parts = fab_parts(pro, name, settings, fab_dir)
+            except expected:
+                release_project(pro, "review", settings, staging, name)
+                parts = fab_parts(pro, name, settings, staging)
+            with zipfile.ZipFile(dest, "w") as z:
+                for part in parts:
+                    base = os.path.basename(part)
+                    if base.endswith("-positions.csv"):
+                        part = cpl_for_download(pro, name, settings, part, os.path.join(staging, "cpl-" + base))
+                    z.write(part, base)
+            fab_notices(name, settings, parts)
+        entry["file"] = os.path.basename(dest)
+    except expected:
+        print("::warning::" + workflow_command_escape(f"{name}: fabrication export failed (incomplete outputs, invalid CSV/archive or CPL overrides)"))
+        entry["error"] = "fabrication export failed"
+        try:
+            if os.path.lexists(dest):
+                os.remove(dest)
+        except OSError:
+            pass
+    return entry
+
+
+def glb_entry(raw, dest):
+    """Copy 02's raw head export; a missing or empty raw file is an error, never a second GLB export here."""
+    entry = {"kind": "glb", "label": DOWNLOAD_LABELS["glb"], "file": None, "error": None}
+    try:
+        if os.path.lexists(dest):
+            os.remove(dest)
+        if os.path.isfile(raw) and os.path.getsize(raw) > 0:
+            shutil.copyfile(raw, dest)
+            entry["file"] = os.path.basename(dest)
+        else:
+            print("::warning::" + workflow_command_escape("3D model (GLB): board.raw.glb was not produced"))
+            entry["error"] = "GLB export missing"
+    except OSError as e:
+        print("::warning::" + workflow_command_escape(f"3D model (GLB): {e}"))
+        entry["error"] = f"GLB export unavailable: {e}"
+        try:
+            if os.path.lexists(dest):
+                os.remove(dest)
+        except OSError:
+            pass
+    return entry
+
+
+def download_policy_key(policy):
+    """Only byte-affecting export policy; enabled gates collection, not fabrication identity."""
+    value = {"fabrication": policy["fabrication"], "step": policy.get("downloads", {}).get("step", True)}
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+
+def download_directory(out, purpose):
+    if purpose not in ("comparison", "snapshot"):
+        raise ValueError("invalid download purpose")
+    return f"{out}/" + ("downloads-snapshot" if purpose == "snapshot" else "downloads")
+
+
+def write_download_manifest(dl, entries, *, policy=None, purpose="comparison"):
+    """Additive policy-bound files envelope; never confuse comparison and trusted snapshot exports."""
+    if purpose == "snapshot" and policy is None:
+        raise ValueError("snapshot downloads need the trusted snapshot policy")
+    policy = DEFAULT_SETTINGS if policy is None else policy
+    if purpose not in ("comparison", "snapshot"):
+        raise ValueError("invalid download purpose")
+    files = []
+    for e in entries:
+        item = {"kind": e["kind"], "label": e["label"]}
+        if e["error"]:
+            item["error"] = e["error"]
+        else:
+            path = pathlib.Path(dl, e["file"])
+            with path.open("rb") as f:
+                sha = hashlib.file_digest(f, "sha256").hexdigest()
+            item.update(path=e["file"], bytes=path.stat().st_size, sha256=sha)
+        files.append(item)
+    pathlib.Path(dl, "downloads.json").write_text(json.dumps({"files": files, "purpose": purpose, "policy": download_policy_key(policy)}), encoding="utf-8")
+    return files
+
+
+def export_downloads(p, src, out, settings, head, *, policy=None, purpose="comparison"):
+    """Best-effort exports under an explicit trusted/comparison policy and separate manifest."""
+    if purpose == "snapshot" and policy is None:
+        raise ValueError("snapshot downloads need the trusted snapshot policy")
+    if not isinstance(head, str) or not re.fullmatch(r"[0-9a-f]{40}", head):
+        raise ValueError("head must be the full 40-character SHA")
+    settings = settings if policy is None else policy
+    name, dl = p["name"], download_directory(out, purpose)
+    pcb, sch = f"{src}/{name}.kicad_pcb", f"{src}/{name}.kicad_sch"
+    if purpose == "snapshot" and os.path.exists(pcb):
+        # Task 9A gate: the raw exporter must record its verified source revision.
+        # Never relabel comparison-head bytes as a different snapshot revision.
+        marker = pathlib.Path(out, "board.raw.glb.revision")
+        try:
+            revision = marker.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError):
+            revision = None
+        if revision != head:
+            raise ValueError("snapshot GLB revision must match the requested full SHA (Task 9A gate)")
+    shutil.rmtree(dl, ignore_errors=True)
+    os.makedirs(dl, exist_ok=True)
+    stem = f"{safe_name(name)}-{head[:7]}"
+    entries = []
+    if os.path.exists(pcb):
+        fab_dir = f"{out}/" + ("fab-snapshot" if purpose == "snapshot" else "fab")
+        entries.append(fab_entry(f"{src}/{name}.kicad_pro", name, settings, fab_dir, f"{dl}/fab-{stem}.zip"))
+    if settings["downloads"]["enabled"] and os.path.exists(sch):
+        dest = f"{dl}/{stem}-schematic.pdf"
+        entries.append(export_one("pdf", ["sch", "export", "pdf", "-o", dest, sch], dest))
+    if settings["downloads"]["enabled"] and os.path.exists(pcb):
+        if settings["downloads"]["step"]:
+            dest = f"{dl}/{stem}-board.step"
+            entries.append(export_one("step", ["pcb", "export", "step", "--subst-models", "-f", "-o", dest, pcb], dest, DOWNLOAD_STEP_TIMEOUT))
+        dest = f"{dl}/{stem}-board.glb"  # 02's uncompressed raw export, copied unchanged; never the Meshopt-compressed viewer GLB
+        entries.append(glb_entry(f"{out}/board.raw.glb", dest))
+    for e in entries:
+        if e["error"] and e["kind"] != "fab":
+            print("::warning::" + workflow_command_escape(f"{name}: {e['label']}: {e['error']}"))
+    write_download_manifest(dl, entries, policy=settings, purpose=purpose)
+    return entries
+
+
+# Pinned KiBot v1.9.1 JLCPCB.kibot.yaml position columns (lines 94-106).
+KIBOT_POSITION_HEADER = ["Designator", "Val", "Package", "Mid X", "Mid Y", "Rotation", "Layer"]
+# Protel extensions (KiCad --no-x2) for the layers both templates plot (JLCPCB lines 161-167, PCBWay lines 87-93).
+KIBOT_LAYER_SUFFIXES = {"F.Cu": ".gtl", "B.Cu": ".gbl", "F.SilkS": ".gto", "B.SilkS": ".gbo",
+                        "F.Mask": ".gts", "B.Mask": ".gbs", "Edge.Cuts": ".gko"}
+
+
+def kibot_differences(preset, gerber_names, bom_rows):
+    """Only the differences Task 3A checks. Everything else is recorded in kibot_templates/v1.9.1/SOURCE.md."""
+    lower = [n.lower() for n in gerber_names]
+    diffs = [f"missing {layer} ({suffix})" for layer, suffix in KIBOT_LAYER_SUFFIXES.items()
+             if not any(n.endswith(suffix) for n in lower)]
+    if preset == "jlcpcb":
+        if any(n.endswith((".gtp", ".gbp")) for n in lower):
+            diffs.append("stencil layers exported; JLCPCB template excludes them (lines 147-148)")
+        if bom_rows and "LCSC Part #" in bom_rows[0]:
+            lcsc = bom_rows[0].index("LCSC Part #")
+            if any(len(row) <= lcsc or not row[lcsc].strip() for row in bom_rows[1:]):
+                diffs.append("BOM rows without LCSC number; JLCPCB template filters them (line 115)")
+    return diffs
+
+
+def fab_notices(name, settings, parts):
+    """Print checked template differences as notices. They never fail the fabrication entry."""
+    preset = settings["fabrication"]["preset"]
+    archive = next((p for p in parts if p.endswith("-gerbers.zip")), None)
+    if archive is None:  # a schematic-only project has no Gerbers to compare
+        return
+    bom = next((p for p in parts if p.endswith("-bom.csv")), None)
+    with zipfile.ZipFile(archive) as z:
+        names = z.namelist()
+    rows = None
+    if bom:
+        with open(bom, newline="", encoding="utf-8-sig") as f:
+            rows = list(csv.reader(f))
+    for diff in kibot_differences(preset, names, rows):
+        print("::notice::" + workflow_command_escape(f"{name}: {preset} fabrication differs from KiBot v1.9.1 template: {diff}"))
+
+
+def collect_downloads(p, index, head, *, policy=None, purpose="comparison", report=None):
+    """The project's manifest, with its files copied into the purpose's staging folder for that run's downloads artifact."""
+    if purpose not in ("comparison", "snapshot"):
+        raise ValueError("invalid download purpose")
+    if purpose == "snapshot" and policy is None:
+        raise ValueError("snapshot downloads need the trusted snapshot policy")
+    if report not in (None, "design") or (report == "design") != (purpose == "snapshot"):
+        raise ValueError("report kind must match purpose: None with comparison, 'design' with snapshot")
+    if not re.fullmatch(r"[0-9a-f]{40}", head):
+        raise ValueError("head must be the full 40-character SHA")
+    snapshot = report == "design"
+    src = f"review/{project_id(p['dir'])}/head/" + ("downloads-snapshot" if snapshot else "downloads")
+    staging = "review/design-downloads" if snapshot else "review/downloads"
+    bundle = f"kicad-{'design' if snapshot else 'review'}-downloads-{head[:7]}"
+    try:
+        envelope = json.loads(pathlib.Path(f"{src}/downloads.json").read_text(encoding="utf-8"))
+        entries = envelope["files"]
+        if not isinstance(entries, list):
+            return None
+    except (OSError, KeyError, ValueError, TypeError):
+        return None
+    if snapshot and envelope.get("policy") != download_policy_key(policy):
+        return None  # a comparison-policy package never reaches a trusted snapshot
+    out = []
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        kind = e.get("kind")
+        label = e.get("label")
+        if not isinstance(kind, str) or not kind.strip():
+            continue
+        if not isinstance(label, str) or not label.strip():
+            continue
+        item = {"kind": kind, "label": label}
+        epath = e.get("path")
+        path = f"{src}/{epath}" if isinstance(epath, str) and re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,199}", epath) else ""
+        if path and os.path.isfile(path) and os.path.getsize(path) > 0:
+            os.makedirs(f"{staging}/{index}", exist_ok=True)
+            shutil.copyfile(path, f"{staging}/{index}/{epath}")
+            with open(path, "rb") as fh:
+                sha = hashlib.file_digest(fh, "sha256").hexdigest()
+            item.update(bytes=os.path.getsize(path), sha256=sha, path=f"{index}/{epath}", artifact=bundle)
+        else:
+            err = e.get("error")
+            item["error"] = str(err) if err is not None and str(err).strip() else "not exported"
+        out.append(item)
+    if out:
+        os.makedirs(f"{staging}/{index}", exist_ok=True)
+        pathlib.Path(f"{staging}/{index}/downloads.json").write_text(json.dumps({"files": out, "head": head}), encoding="utf-8")
+    return out
+
+
+FAB_START = "# kicad-review fab limits - start"
+FAB_END = "# kicad-review fab limits - end"
+
+
+def fab_owned_rules(text, section):
+    """Replace only our disposable rule section, preserving authored bytes."""
+    starts, ends = text.count(FAB_START), text.count(FAB_END)
+    if starts != ends or starts > 1:
+        raise ValueError("malformed fabrication rule markers")
+    owned = FAB_START + "\n" + section + "\n" + FAB_END
+    if starts:
+        a, end_start = text.index(FAB_START), text.index(FAB_END)
+        if end_start < a:
+            raise ValueError("reversed fabrication rule markers")
+        return text[:a] + owned + text[end_start + len(FAB_END):]
+    return text + ("" if text.endswith("\n") else "\n") + owned + "\n"
+
+
+def fab_identity(v):
+    """Raw DRC identity, independent of rule-limit prose when UUIDs suffice."""
+    items = v.get("items", [])
+    # UUID identity where complete; description fallback can go stale after movement.
+    complete = bool(items) and all(i.get("uuid") for i in items)
+    identity = tuple(sorted(i["uuid"] for i in items)) if complete else tuple(sorted(
+        json.dumps({"uuid": i.get("uuid"), "description": i.get("description", ""),
+                    "pos": i.get("pos")}, sort_keys=True) for i in items))
+    if not items:
+        identity = (v.get("description", ""),)
+    return (v["type"], "uuid" if complete else "fallback", identity)
+
+
+def fab_subtract(after, before):
+    """Subtract one matching occurrence at a time, retaining raw rows in order."""
+    counts = Counter(fab_identity(v) for v in before)
+    out = []
+    for v in after:
+        key = fab_identity(v)
+        if counts[key]:
+            counts[key] -= 1
+        else:
+            out.append(v)
+    return out
+
+
+def fab_rule_section(context):
+    """Generate fixed vendor geometry bounds and an explicit unchecked ledger."""
+    values, n = context["values"], context["layers"]
+    rules, unchecked = [], []
+    plated = "A.Type == 'Via' || (A.Type == 'Pad' && A.Pad_Type != 'NPTH, mechanical')"
+    npth = "A.Type == 'Pad' && A.Pad_Type == 'NPTH, mechanical'"
+    # Fixed vendor geometry only; no generated net-class conditions or escaping surface.
+    mapping = [
+        ("trackWidthOuterMm", "track_width", "outer", "", "min"),
+        ("trackWidthInnerMm", "track_width", "inner", "", "min"),
+        ("clearanceOuterMm", "clearance", "outer", "", "min"),
+        ("clearanceInnerMm", "clearance", "inner", "", "min"),
+        ("drillPlatedMinMm", "hole_size", "", plated, "min"),
+        ("drillPlatedMaxMm", "hole_size", "", plated, "max"),
+        ("drillNpthMinMm", "hole_size", "", npth, "min"),
+        ("annularMinMm", "annular_width", "", plated, "min"),
+        ("edgeClearanceMm", "edge_clearance", "", "", "min"),
+        ("holeToHoleMm", "hole_to_hole", "", "A.Type == 'Pad' && B.Type == 'Pad'", "min"),
+        ("holeToHoleViaMm", "hole_to_hole", "", "A.Type == 'Via' && B.Type == 'Via'", "min"),
+        ("viaDiameterMinMm", "via_diameter", "", "A.Type == 'Via'", "min")]
+    grouped = {}
+    for key, constraint, layer, condition, bound in mapping:
+        if layer == "inner" and n <= 2:
+            continue
+        if key not in values:
+            unchecked.append(key)
+            continue
+        grouped.setdefault((constraint, layer, condition), []).append((bound, values[key]))
+    for (constraint, layer, condition), bounds in grouped.items():
+        suffix = f' (layer {layer})' if layer else ''
+        suffix += f' (condition {json.dumps(condition)})' if condition else ''
+        limits = ' '.join(f'({bound} {value:g}mm)' for bound, value in bounds)
+        rules.append(f'(rule "fab {constraint} {layer}"{suffix} (constraint {constraint} {limits}))')
+    return "\n".join(rules), unchecked + ["holeToHoleMixedMm"]
+
+
+def fab_vendor_rules(context):
+    """Neutralize house bounds only in the disposable vendor attribution pass."""
+    rules, _ = fab_rule_section(context)
+    categories = {
+        'track_width': 'track_width', 'clearance': 'clearance',
+        'hole_size': 'drill_out_of_range', 'annular_width': 'annular_width',
+        'edge_clearance': 'copper_edge_clearance', 'hole_to_hole': 'hole_to_hole',
+        'via_diameter': 'via_diameter'}
+    covered = {diagnostic for constraint, diagnostic in categories.items()
+               if '(constraint ' + constraint + ' ' in rules}
+    # Fixed geometry bounds only; 1 km maximum is not a manufacturer limit.
+    neutral = '\n'.join(
+        f'(rule "fab neutral {constraint}" (constraint {constraint} (min 0mm)'
+        + (' (max 1000000mm)' if constraint in ('track_width', 'hole_size', 'via_diameter') else '') + '))'
+        for constraint in categories)
+    return neutral + '\n' + rules, covered
+
+
 def violation(v, scale, where):
     items = v.get("items", [])
     pos = [[round(i["pos"]["x"] * scale, 4), round(i["pos"]["y"] * scale, 4)] for i in items if "pos" in i]
@@ -2724,11 +3672,11 @@ def bom_violations(objs, fields):
         if o["kind"] != "symbol" or p.get("in_bom") == "no" or p.get("dnp") == "yes" or o["ref"].endswith("?"):
             continue
         missing = [f for f in fields if (p.get(f) or "").strip() in ("", "~")]
-        if missing and not o["ref"].split(" unit ")[0] in {v["ref"] for v in out}:
-            out.append({"type": "missing_fields", "severity": "error", "ref": o["ref"].split(" unit ")[0],
-                        "description": f"{o['ref'].split(' unit ')[0]} has no {', '.join(missing)}",
+        if missing and not base_ref(o["ref"]) in {v["ref"] for v in out}:
+            out.append({"type": "missing_fields", "severity": "error", "ref": base_ref(o["ref"]),
+                        "description": f"{base_ref(o['ref'])} has no {', '.join(missing)}",
                         "items": [], "uuids": [], "pos": o["pos"], "box": None, "where": o["where"],
-                        "key": ("bom", o["ref"].split(" unit ")[0], tuple(missing))})
+                        "key": ("bom", base_ref(o["ref"]), tuple(missing))})
     return out
 
 
@@ -2914,6 +3862,11 @@ COVERAGE_FIELDS = {
 }
 
 
+def base_ref(ref):
+    """Strip the parser's symbol-unit suffix from a reference."""
+    return (ref or "").split(" unit ")[0]
+
+
 def bom_parts(objs):
     """BOM symbols, one entry per reference (units of one part count once); DNP, excluded and unannotated parts left out."""
     out = {}
@@ -2921,7 +3874,7 @@ def bom_parts(objs):
         p = o["props"]
         if o["kind"] != "symbol" or p.get("in_bom") == "no" or p.get("dnp") == "yes" or o["ref"].endswith("?"):
             continue
-        out.setdefault(o["ref"].split(" unit ")[0], p)
+        out.setdefault(base_ref(o["ref"]), p)
     return out
 
 
@@ -2938,27 +3891,46 @@ def bom_coverage(objs, settings):
     return cov
 
 
+def bom_identity(obj):
+    """Canonical BOM contract for one schematic object (spec 08). Fields are unclipped; display clipping belongs to 09."""
+    p = obj.get("props") or {}
+    ref = base_ref(obj.get("ref"))  # units of one part share their base reference
+    reason = ("not_symbol" if obj.get("kind") != "symbol" else "dnp" if p.get("dnp") == "yes" else
+              "excluded" if p.get("in_bom") == "no" else "unannotated" if ref.endswith("?") else None)
+    value, footprint = p.get("Value", ""), p.get("Footprint", "")
+    lcsc, mpn = (field(p, LCSC_FIELDS) or "").upper() or None, field(p, MPN_FIELDS)
+    ds = field(p, ("datasheet",))
+    datasheet = ds if ds and ds.lower().startswith(("http://", "https://")) else None
+    manufacturer, category = field(p, MANUFACTURER_FIELDS), bom_category(ref, p.get("symbol"))
+    return {"included": reason is None, "excludedReason": reason, "ref": ref, "value": value, "footprint": footprint,
+            "lcsc": lcsc, "mpn": mpn, "manufacturer": manufacturer,
+            "datasheet": datasheet, "category": category,
+            # ensure_ascii=False, compact separators. 10 uses this key as received from 09 and never recomputes it.
+            "key": json.dumps([value, footprint, lcsc or "", mpn or "", category, manufacturer, datasheet], ensure_ascii=False, separators=(",", ":"))}
+
+
 def parts_lines(objs):
-    """One line per distinct part on the schematic (Value + Footprint + LCSC), with what blocks a supplier lookup."""
-    lines = {}
+    """One line per distinct part on the schematic (Value + Footprint + LCSC + MPN + category + manufacturer + datasheet),
+    with what blocks a supplier lookup."""
+    lines, first_key, conflicts = {}, {}, set()
     for o in objs.values():
-        p = o["props"]
-        if o["kind"] != "symbol" or p.get("in_bom") == "no" or p.get("dnp") == "yes" or o["ref"].endswith("?"):
+        b = bom_identity(o)
+        if not b["included"]:
             continue
-        lcsc = (field(p, LCSC_FIELDS) or "").upper() or None
-        ds = field(p, ("datasheet",))
-        line = lines.setdefault((p.get("Value", ""), p.get("Footprint", ""), lcsc), {
-            "value": p.get("Value", ""), "footprint": p.get("Footprint", ""), "lcsc": lcsc,
-            "mpn": field(p, MPN_FIELDS), "datasheet": ds if ds and ds.lower().startswith(("http://", "https://")) else None,
-            "refs": [], "problems": []})
-        if o["ref"] not in line["refs"]:
-            line["refs"].append(o["ref"])
+        if first_key.setdefault(b["ref"], b["key"]) != b["key"]:
+            conflicts.add(b["ref"])  # units of one reference disagree: count once and flag below
+            continue
+        line = lines.setdefault(b["key"], {
+            "value": b["value"], "footprint": b["footprint"], "lcsc": b["lcsc"], "mpn": b["mpn"],
+            "manufacturer": b["manufacturer"], "category": b["category"], "datasheet": b["datasheet"],
+            "key": b["key"], "refs": [], "problems": []})
+        if b["ref"] not in line["refs"]:
+            line["refs"].append(b["ref"])
             # Per-reference values: a grouped line can hide one reference's MPN or placeholder behind another's.
-            line.setdefault("_each", []).append((o["ref"], field(p, MPN_FIELDS), (p.get("Value", ""), field(p, MPN_FIELDS), lcsc)))
+            line.setdefault("_each", []).append((b["ref"], b["mpn"], (b["value"], b["mpn"], b["lcsc"])))
     by_lcsc = {}
     for l in lines.values():
         l["refs"].sort(key=natural)
-        l["key"] = "|".join([l["value"], l["footprint"], l["lcsc"] or ""])
         if l["lcsc"] and not re.fullmatch(r"C\d+", l["lcsc"]):
             l["problems"].append("bad_lcsc")
         if not l["lcsc"]:
@@ -2984,7 +3956,221 @@ def parts_lines(objs):
         if hit:
             l["problems"].append("mpn_footprint_conflict")
             l.setdefault("problem_refs", {})["mpn_footprint_conflict"] = hit
+        l["refsCompressed"] = ref_ranges(l["refs"])
+        if conflicts.intersection(l["refs"]):
+            l["problems"].append("unit_identity_conflict")
     return sorted(lines.values(), key=lambda l: natural(l["refs"][0]))
+
+
+# ---- BOM view: categories, reference ranges and summary (spec 08). ----
+
+BOM_CATEGORIES = ("Resistors", "Capacitors", "Inductors & Ferrites", "Diodes & LEDs", "Transistors",
+                  "ICs & Modules", "Connectors", "Test Points", "Mechanical", "Other")
+BOM_PREFIXES = {"R": "Resistors", "RN": "Resistors", "RV": "Resistors", "C": "Capacitors", "L": "Inductors & Ferrites",
+                "FB": "Inductors & Ferrites", "D": "Diodes & LEDs", "LED": "Diodes & LEDs", "Q": "Transistors",
+                "U": "ICs & Modules", "IC": "ICs & Modules", "J": "Connectors", "P": "Connectors", "CN": "Connectors",
+                "TP": "Test Points", "H": "Mechanical", "MH": "Mechanical"}
+# KiCad library nicknames that say what a part is when its reference prefix does not.
+BOM_LIBRARY_WORDS = (("connector", "Connectors"), ("testpoint", "Test Points"), ("mountinghole", "Mechanical"),
+                     ("transistor", "Transistors"), ("mcu", "ICs & Modules"), ("regulator", "ICs & Modules"),
+                     ("amplifier", "ICs & Modules"), ("memory", "ICs & Modules"), ("interface", "ICs & Modules"),
+                     ("sensor", "ICs & Modules"), ("rf_module", "ICs & Modules"))
+
+
+def bom_category(ref, lib_id):
+    """Category from the reference prefix (R, C, L/FB, D/LED, Q, U, J/P, TP, H/MH), then the symbol name
+    (Device:R_Small is an R), then the library nickname (Connector_Generic); Other for the rest."""
+    prefix = re.match(r"[A-Za-z]+", ref or "")
+    if prefix and prefix.group(0).upper() in BOM_PREFIXES:
+        return BOM_PREFIXES[prefix.group(0).upper()]
+    library, _, item = (lib_id or "").rpartition(":")
+    head = re.match(r"([A-Za-z]+)(?:_|$)", item)  # "R_Small" is an R; "L7805" is not an inductor
+    if head and head.group(1).upper() in BOM_PREFIXES:
+        return BOM_PREFIXES[head.group(1).upper()]
+    return next((category for word, category in BOM_LIBRARY_WORDS if word in library.lower()), "Other")
+
+
+def ref_ranges(refs):
+    """['R1','R3','R7','R8','R9','R12'] -> 'R1, R3, R7-R9, R12'. Runs of two or more join. Prefixes stay apart;
+    sub-parts (U1A), suffixes (R5A), leading zeros (R01) and non-numeric references stay literal and break a run."""
+    out, run = [], []
+
+    def flush():
+        out.append(f"{run[0][0]}{run[0][1]}-{run[-1][0]}{run[-1][1]}" if len(run) > 1 else "".join(run[0]))
+        run.clear()
+
+    for ref in sorted(set(refs), key=lambda ref: (natural(ref), ref)):
+        m = re.fullmatch(r"([A-Za-z_]+)([1-9]\d*)", ref)
+        if m and run and run[-1][0] == m.group(1) and int(run[-1][1]) + 1 == int(m.group(2)):
+            run.append(m.groups())
+            continue
+        if run:
+            flush()
+        if m:
+            run.append(m.groups())
+        else:
+            out.append(ref)
+    if run:
+        flush()
+    return ", ".join(out)
+
+
+def bom_summary(lines):
+    """Header numbers of the BOM view; byCategory counts components and keeps BOM_CATEGORIES order."""
+    by = Counter()
+    for line in lines:
+        by[line["category"]] += len(line["refs"])
+    return {"components": sum(by.values()), "unique": len(lines), "withMpn": sum(1 for l in lines if present(l["mpn"])),
+            "byCategory": {c: by[c] for c in BOM_CATEGORIES if by[c]}}
+
+
+# Vendored bom_csv.py (Bouni/kicad-jlcpcb-tools, MIT; commit and licence in vendor/bom_csv.py). Loaded by path, so this
+# module's own bom_csv(lines) writer keeps its name.
+_VENDOR_SPEC = importlib.util.spec_from_file_location("vendor_bom_csv", pathlib.Path(__file__).with_name("vendor") / "bom_csv.py")
+vendor_bom_csv = importlib.util.module_from_spec(_VENDOR_SPEC)
+_VENDOR_SPEC.loader.exec_module(vendor_bom_csv)
+
+
+# ---- BOM files for the report (spec 08): the generic CSV, the JLCPCB file through the vendored planner, and PCBWay. ----
+# ponytail: ceiling: these writers serve the report only; the release (07) keeps KiCad's own export (Owner decision 2026-10-26:
+# option A). Ceiling of the JLCPCB file: the planner splits by the bytes-less-CRLF rule, so its configured budget reserves two
+# bytes for the CRLF before planning. A split therefore fits the stricter written-record limit instead of refusing an otherwise
+# splittable group; a reference that cannot fit still refuses the whole file (fail closed).
+
+BOM_LINE_MAX_BYTES = vendor_bom_csv.BOM_LINE_MAX_BYTES  # 2048, the vendored rule; JLCPCB rejects longer designator cells
+# Configure this private, path-loaded planner once; the vendored source and logic stay unchanged.
+vendor_bom_csv.BOM_LINE_MAX_BYTES = BOM_LINE_MAX_BYTES - 2
+BOM_JLCPCB_HEADER = ("Comment", "Designator", "Footprint", "LCSC", "Quantity")
+BOM_PCBWAY_HEADER = ("Designator", "Qty", "Manufacturer", "Mfg Part #", "Description/Value", "Package/Footprint")
+BOM_HEADER = ("Category", "Quantity", "Value", "Footprint", "References", "MPN", "LCSC", "Datasheet")
+
+
+def neutral(text):
+    """A cell a spreadsheet would run as a formula (=, +, -, @, tab, CR) gets a leading quote. Applied once per cell."""
+    text = "" if text is None else str(text)
+    return "'" + text if text[:1] in ("=", "+", "-", "@", "\t", "\r") else text
+
+
+def csv_line(cells):
+    """One CSV line with CRLF; every cell passes through neutral()."""
+    out = io.StringIO()
+    csv.writer(out, lineterminator="\r\n").writerow([neutral(c) for c in cells])
+    return out.getvalue()
+
+
+def bom_order(lines):
+    return sorted(lines, key=lambda l: (BOM_CATEGORIES.index(l["category"]), natural(l["refs"][0])))
+
+
+def bom_csv(lines):
+    return csv_line(BOM_HEADER) + "".join(
+        csv_line([l["category"], len(l["refs"]), l["value"], l["footprint"], ", ".join(l["refs"]), l["mpn"], l["lcsc"], l["datasheet"]])
+        for l in bom_order(lines))
+
+
+def bom_fabrication_lines(lines, objects, part_field, preset):
+    """Split ordering fields separately without changing displayed LCSC/MPN lines."""
+    if objects is None:
+        if part_field and part_field != PRESETS[preset]["part_field"]:
+            raise ValueError("Custom fabrication.part_field needs head symbol properties")
+        return lines
+    selected = (part_field.strip().lower(),) if part_field else (LCSC_FIELDS if preset == "jlcpcb" else MPN_FIELDS)
+    by_ref = {}
+    for obj in objects.values():
+        identity = bom_identity(obj)
+        # Repository inputs carry the board separately: strip symbol units before qualifying,
+        # never interpret a literal " unit " in a project name as a symbol-unit suffix.
+        ref = f"{obj['_bomBoard']}:{identity['ref']}" if "_bomBoard" in obj else identity["ref"]
+        if not identity["included"] or ref in by_ref:
+            continue  # match parts_lines: the first eligible unit supplies each reference's fields
+        number = field(obj["props"], selected)
+        if preset == "jlcpcb" and not part_field:
+            number = number.upper() if number else None  # same normalization as parts_lines
+        by_ref[ref] = number
+    out = []
+    for line in lines:
+        groups = {}
+        for ref in line["refs"]:
+            groups.setdefault(by_ref.get(ref), []).append(ref)
+        out.extend({**line, "refs": refs, "orderingPart": number} for number, refs in groups.items())
+    return out
+
+
+def bom_jlcpcb_csv(lines):
+    """Comment, Designator, Footprint, LCSC, Quantity. The vendored planner (vendor_bom_csv.plan_bom) decides every row,
+    so a longer designator list continues on another row of the same part with its own Quantity. This adapter adds the
+    formula guard before planning and fails closed: a reference that cannot fit, or a written record over
+    BOM_LINE_MAX_BYTES including its CRLF, raises ValueError instead of writing an oversize row."""
+    groups = [vendor_bom_csv.BomGroup(neutral(l["value"]), tuple(neutral(ref) for ref in l["refs"]), neutral(l["footprint"]),
+                                      neutral(l.get("orderingPart", l["lcsc"]))) for l in bom_order(lines)]
+    plan = vendor_bom_csv.plan_bom(groups, None)
+    if plan.warnings:
+        raise ValueError(f"JLCPCB export unavailable ({BOM_LINE_MAX_BYTES} UTF-8 bytes including CRLF): {plan.warnings[0]}. Shorten Value, Footprint or the ordering field, or use the generic CSV.")
+    out = [csv_line(BOM_JLCPCB_HEADER)]
+    for row in plan.lines:
+        text = csv_line(row)
+        if len(text.encode("utf-8")) > BOM_LINE_MAX_BYTES:
+            raise ValueError(f"JLCPCB export unavailable: the BOM row for {row[1].split(',')[0]} is {len(text.encode('utf-8'))} UTF-8 bytes with its line break, over {BOM_LINE_MAX_BYTES}. Shorten Value, Footprint or the ordering field, or use the generic CSV.")
+        out.append(text)
+    return "".join(out)
+
+
+def bom_pcbway_csv(lines):
+    return csv_line(BOM_PCBWAY_HEADER) + "".join(
+        csv_line([",".join(l["refs"]), len(l["refs"]), l["manufacturer"], l.get("orderingPart", l["mpn"]), l["value"], l["footprint"]]) for l in bom_order(lines))
+
+
+def bom_exports(lines, preset, part_field=None, objects=None):
+    """Keep report/generic CSV usable if fabrication export fails."""
+    out = {"preset": preset, "csv": bom_csv(lines), "fab": None, "fabError": None}
+    try:
+        fabrication = bom_fabrication_lines(lines, objects, part_field, preset)
+        out["fab"] = bom_pcbway_csv(fabrication) if preset == "pcbway" else bom_jlcpcb_csv(fabrication)
+    except ValueError as exc:
+        out["fabError"] = str(exc)
+    return out
+
+
+def bom_repository(boards, preset, part_field=None):
+    """Combined BOM across the repository's projects (Owner decision 2026-10-26). A board line joins another board's line
+    only when key, category, manufacturer and datasheet all match. Board-qualified references stay distinct;
+    quantities add only inside a joined line."""
+    names = [b["name"] for b in boards]
+    if len(set(names)) != len(names) or not all(names):
+        return {"boards": names, "error": "Combined BOM unavailable: project names must be unique and non-empty.", "summary": bom_summary([]), "lines": [], "exports": None}
+    joined, objects = {}, {}
+    for b in boards:
+        for uid, obj in b["objects"].items():
+            objects[(b["name"], uid)] = {**obj, "_bomBoard": b["name"]}
+        for line in b["lines"]:
+            ident = json.dumps([line["key"], line["category"], line["manufacturer"], line["datasheet"]], ensure_ascii=False, separators=(",", ":"))
+            comb = joined.setdefault(ident, {"key": line["key"], "category": line["category"], "value": line["value"], "footprint": line["footprint"],
+                                             "lcsc": line["lcsc"], "mpn": line["mpn"], "manufacturer": line["manufacturer"], "datasheet": line["datasheet"],
+                                             "refs": [], "boards": {}})
+            comb["refs"] += [(b["name"], ref) for ref in line["refs"]]
+            comb["boards"][b["name"]] = len(line["refs"])
+    lines = []
+    for comb in joined.values():
+        runs = {}
+        for name, ref in comb["refs"]:
+            runs.setdefault(name, []).append(ref)
+        lines.append({**comb, "refs": [f"{name}:{ref}" for name, ref in comb["refs"]],
+                      "refsCompressed": "; ".join(f"{name}:{ref_ranges(refs)}" for name, refs in runs.items())})
+    lines = bom_order(lines)
+    return {"boards": names, "error": None, "summary": bom_summary(lines), "lines": lines,
+            "exports": bom_exports(lines, preset, part_field, objects)}
+
+
+def compact_bom_lines(data):
+    """Copy of the report data with each BOM line's derived `key` and null optional fields left out, for the embedded page only.
+    Python keeps both in memory and in review/data.json; the page never reads `key` and treats a missing optional field as null."""
+    slim = lambda l: l and {k: v for k, v in l.items() if k != "key" and not (v is None and k in ("lcsc", "mpn", "manufacturer", "datasheet"))}
+    out = {**data, "projects": [{**p, "parts": {**p["parts"], "lines": [slim(l) for l in p["parts"]["lines"]],
+                                                 "changes": [{**r, "before": slim(r["before"]), "after": slim(r["after"])} for r in p["parts"]["changes"]]}}
+                                if p.get("parts") else p for p in data["projects"]]}
+    if data.get("bom"):
+        out["bom"] = {**data["bom"], "lines": [slim(l) for l in data["bom"]["lines"]]}
+    return out
 
 
 def diff_parts(base, head):
@@ -2996,7 +4182,7 @@ def diff_parts(base, head):
         x, y = b.get(ref), h.get(ref)
         if x and y and x["key"] == y["key"]:
             continue
-        action = "added" if not x else "removed" if not y else "swapped" if x["lcsc"] != y["lcsc"] else "value" if x["value"] != y["value"] else "footprint"
+        action = "added" if not x else "removed" if not y else "swapped" if x["lcsc"] != y["lcsc"] else "value" if x["value"] != y["value"] else "footprint" if x["footprint"] != y["footprint"] else "mpn"
         r = rows.setdefault((action, x and x["key"], y and y["key"]), {"action": action, "refs": [], "before": x, "after": y})
         r["refs"].append(ref)
     return list(rows.values())
@@ -3025,7 +4211,7 @@ def mark_new_problems(base_lines, head_lines):
 
 def dnp_mismatches(objs):
     """References fitted on one of schematic and board and DNP on the other."""
-    sym = {o["ref"].split(" unit ")[0]: o["props"].get("dnp") == "yes" for o in objs.values() if o["kind"] == "symbol"}
+    sym = {base_ref(o["ref"]): o["props"].get("dnp") == "yes" for o in objs.values() if o["kind"] == "symbol"}
     fp = {o["ref"]: "dnp" in (o["props"].get("attributes") or "").split() for o in objs.values() if o["kind"] == "footprint"}
     return sorted((r for r in sym.keys() & fp.keys() if sym[r] != fp[r]), key=natural)
 
@@ -3049,7 +4235,7 @@ def waiver_key(v):
 
 
 WAIVERS_FILE = "kicad-review-waivers.toml"
-WAIVABLE = ("erc", "drc", "parity")
+WAIVABLE = ("erc", "drc", "parity", "fab_limits")
 
 
 def parse_waivers(text, source):
@@ -3127,7 +4313,7 @@ def load_waivers(ref):
         out["proposed"] = [e for e in entries if (e["check"], e["match"]) not in out["active"]]
         out["invalid"] += invalid
     for m in out["invalid"]:
-        print(f"::warning::{m}")
+        print("::warning::" + workflow_command_escape(f"{m}"))
     return out
 
 
@@ -3157,6 +4343,82 @@ def run_check(name, settings, head, base, waivers=None):
     if waivers is not None:
         result["waived"] = len(head) - len(live)
     return result
+
+
+FAB_EVIDENCE_SOURCE = ('kicad-cli pcb drc; isolated board-only and vendor DRC passes per revision; '
+                       'vendor-only findings paired between head and base by multiset identity; '
+                       'fab_limits.json dated profile; coverage limited to checked limits '
+                       '(see unchecked, unsupported and coverageWarnings)')
+FAB_VENDORS = ('jlcpcb', 'pcbway')
+FAB_VENDOR_LABELS = {'jlcpcb': 'JLCPCB', 'pcbway': 'PCBWay'}
+
+
+def fab_read_audit(out_dir, side, p, vendor):
+    path = pathlib.Path(out_dir, side, 'fab-limits.json')
+    if not path.is_file():
+        sys.exit(f'Fab limits output missing for {p["name"]} ({side})')
+    sections = [s for s in json.loads(path.read_text(encoding='utf-8'))['sections'] if s['vendor'] == vendor]
+    if len(sections) != 1:
+        sys.exit(f'Fab limits output for {p["name"]} ({side}) has no single {vendor} section')
+    return sections[0]
+
+
+def fab_check(p, settings, out_dir, waivers, vendor, *, single=False):
+    if not fab_enabled(settings):
+        return None
+    level = settings['checks']['fab_limits']
+    # Owner decision 2026-10-26: no default comparison values. not_run has no head audit, so it has no base
+    # comparison and carries no baselineAvailable or fixed key. Every other result takes both from the base audit below.
+    empty = {'name':'fab_limits','title':'Fab limits','vendor':vendor,'level':level,
+             'errors':0,'new_errors':0,'warnings':0,'new_warnings':0,'violations':[],
+             'checked':[],'unchecked':[],'coverageWarnings':[],
+             'confidence':'deterministic','evidence_source':FAB_EVIDENCE_SOURCE}
+    head_board = board_path(p, 'head')
+    fab_regular_input(pathlib.Path(head_board))
+    if not os.path.isfile(head_board):
+        result = {**empty,'status':'not_run','reason':'no head board','unsupported':'no head board'}
+        if waivers is not None:
+            result['waived'] = 0
+        return result
+    head_meta = fab_read_audit(out_dir, 'head', p, vendor)
+    # A design report (single) never reads the base checkout, even when it is still on disk.
+    base_board = None if single else board_path(p, 'base')
+    if base_board is not None:
+        fab_regular_input(pathlib.Path(base_board))
+    base_meta = fab_read_audit(out_dir, 'base', p, vendor) if base_board is not None and os.path.isfile(base_board) else None
+    # A base comparison needs both audits to be supported; an unsupported side is never compared.
+    baseline = base_meta is not None and not base_meta['unsupported'] and not head_meta['unsupported']
+    head_raw = head_meta['violations']
+    base_raw = base_meta['violations'] if baseline else []
+    new_ids = {id(v) for v in fab_subtract(head_raw, base_raw)} if baseline else {id(v) for v in head_raw}
+    head = []
+    for raw in head_raw:
+        row = {**violation(raw, 1, {'board':True}), 'confidence':'deterministic',
+               'evidence_source':FAB_EVIDENCE_SOURCE}
+        row['_new'] = id(raw) in new_ids
+        head.append(row)
+    # run_check supplies waivers and ordering; its set-based new flags are replaced by the multiset pairing.
+    result = run_check('fab_limits', settings, head, None, waivers)
+    for v in result['violations']:
+        v['new'] = v.pop('_new')
+    result['violations'].sort(key=lambda v: (not v['new'], v['severity'] != 'error', v['type']))
+    live = [v for v in result['violations'] if not v.get('waived')]
+    count = lambda sev, new=False: sum(1 for v in live if v['severity'] == sev and (v['new'] or not new))
+    failing = count('error', new=settings['fail_on'] == 'new') > 0
+    result.update(status='pass' if not failing else 'fail' if level == 'required' else 'warn',
+                  errors=count('error'), warnings=count('warning'),
+                  new_errors=count('error', True), new_warnings=count('warning', True),
+                  fixed=len(fab_subtract(base_raw, head_raw)) if baseline else 0,
+                  baselineAvailable=baseline, confidence='deterministic', evidence_source=FAB_EVIDENCE_SOURCE)
+    for key in ('vendor','profile','checkedOn','assumedCopperOz','checked','unchecked','unsupported','coverageWarnings'):
+        result[key] = head_meta[key]
+    if head_meta['unsupported']:
+        result.update(status='fail' if level == 'required' else 'warn', reason=head_meta['unsupported'])
+    return result
+
+
+def fab_checks(p, settings, out_dir, waivers=None, *, single=False):
+    return [c for c in (fab_check(p, settings, out_dir, waivers, vendor, single=single) for vendor in FAB_VENDORS) if c]
 
 
 def project_checks(p, settings, objs, waivers=None, *, single=False):
@@ -3196,6 +4458,7 @@ def project_checks(p, settings, objs, waivers=None, *, single=False):
             c = run_check("release", settings, side("head"), side("base"))
             c["package"] = package_summary(f"{out_dir}/head/{fab}")
             out.append(c)
+    out.extend(fab_checks(p, settings, out_dir, waivers, single=single))
     ic = interface_check(p, settings, objs, f"review/{project_id(p['dir'])}", single=single)
     return out + ([ic] if ic else [])
 
@@ -3215,6 +4478,472 @@ def parse_netlist(text):
     nets = {val(n, "name"): [{"ref": val(x, "ref"), "pin": val(x, "pin"), "function": val(x, "pinfunction", ""), "type": val(x, "pintype", "")}
                              for x in findall(n, "node")] for n in findall(find(root, "nets") or [], "net")}
     return comps, nets
+
+
+def net_members(text, objects, commit):
+    """Return observed members, candidate anchors and net-scoped wiring issues.
+
+    None marks an unknown net, distinct from an observed empty set. Comparers must
+    suppress a net pair if either side is unknown, not treat it as added/removed.
+    Multi-unit anchors are candidates: only the pin manifest can select the owning
+    unit (or units for shared pins); positions here are symbol, not pin, positions.
+    Task 8 resolves candidates against that manifest. Missing sheet identity makes
+    membership unknown rather than conflating distinct schematic instances.
+
+    Per spec and plan prose, power symbols ('#' references) are skipped rather than
+    fabricated into component pins. Per Open Question 4, missing or unannotated
+    references (e.g. 'R?', '') fall back to symbol UUID only when exactly one candidate
+    exists; otherwise connectivity identity is ambiguous and comparison is suppressed.
+    """
+    _, parsed = parse_netlist(text)
+    by_ref = {}
+    for uid, o in objects.items():
+        if o["kind"] == "symbol":
+            ref = o["props"].get("reference", o["ref"])
+            by_ref.setdefault(ref, []).append((uid, o))
+    nets, anchors, issues = {}, {}, []
+    for name, nodes in sorted(parsed.items()):
+        members, net_anchors, reasons = set(), {}, set()
+        unknown = False
+        for node in nodes:
+            ref, pin = node["ref"] or "", node["pin"] or ""
+            if ref.startswith("#"):  # Power symbols and flags (ref starts with '#') are skipped; they are not fabricated as component pins
+                continue
+            candidates = by_ref.get(ref, [])
+            units = [((o.get("where") or {}).get("sheet"), o["props"].get("unit", "1"))
+                     for _, o in candidates]
+            invalid = not ref or "?" in ref
+            # A missing or unannotated reference has no UUID in the netlist node, so only a single matching symbol candidate can be disambiguated.
+            ambiguous = (not pin or not candidates
+                         or any(s is None for s, _ in units)
+                         or len(units) != len(set(units))
+                         or len({s for s, _ in units}) != 1
+                         or (invalid and len(candidates) != 1))
+            if ambiguous:
+                unknown = True
+                reasons.add(("Connectivity identity is ambiguous; schematic membership comparison suppressed", True))
+                continue
+            if invalid:
+                reasons.add(("Some connected pins have missing references; using symbol UUID and pin number", False))
+            key = f"{candidates[0][0]}:{pin}" if invalid else f"{ref}.{pin}"
+            members.add(key)
+            net_anchors[key] = [{"uuid":uid.rsplit("/",1)[-1], "ref":ref, "pin":pin,
+                                 "unit":o["props"].get("unit", "1"), "sheet":(o.get("where") or {}).get("sheet"),
+                                 "pos":o.get("pos"), "commit":commit}
+                                for uid, o in candidates]
+        nets[name] = None if unknown else members
+        if not unknown:
+            anchors.update(net_anchors)
+        issues.extend({"channel":"wiring", "net":name, "reason":r, "unknown":u} for r, u in sorted(reasons))
+    return nets, anchors, issues
+
+
+def validate_netlist(text):
+    """Raise ValueError unless text is exactly one usable netlist export."""
+    # parse_sexpr returns only the first expression, so reject truncated or trailing content here.
+    depth, quoted, escaped, roots, end = 0, False, False, 0, None
+    for index, char in enumerate(text):
+        if quoted:
+            if escaped: escaped = False
+            elif char == "\\": escaped = True
+            elif char == '"': quoted = False
+        elif char == '"': quoted = True
+        elif char == "(":
+            if depth == 0:
+                roots += 1
+                if roots != 1: raise ValueError("trailing netlist expression")
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth < 0: raise ValueError("unbalanced netlist")
+            if depth == 0: end = index + 1
+    if quoted or depth != 0 or roots != 1 or text[end:].strip():
+        raise ValueError("incomplete or trailing netlist content")
+    root = parse_sexpr(text)
+    if not isinstance(root, list) or not root or root[0] != "export":
+        raise ValueError("not a netlist export")
+    if any(not isinstance(field, list) or not field or not isinstance(field[0], str) for field in root[1:]):
+        raise ValueError("bad export field")
+    sections = findall(root, "nets")
+    if len(sections) != 1:
+        raise ValueError("missing or duplicate nets section")
+    def identity(node, key):
+        fields = findall(node, key)
+        if len(fields) != 1 or len(fields[0]) != 2 or not isinstance(fields[0][1], str) or not fields[0][1]:
+            raise ValueError("invalid netlist " + key)
+        return fields[0][1]
+    names = set()
+    for net in sections[0][1:]:
+        if not isinstance(net, list) or not net or net[0] != "net":
+            raise ValueError("bad net")
+        if any(not isinstance(field, list) or not field for field in net[1:]):
+            raise ValueError("bad net field")
+        name = identity(net, "name")
+        if name in names:
+            raise ValueError("duplicate net name")
+        names.add(name)
+        for node in findall(net, "node"):
+            identity(node, "ref"); identity(node, "pin")
+    try:  # The legacy projection must also succeed, so every consumer sees the same envelope.
+        parse_netlist(text)
+    except (TypeError, AttributeError, IndexError, KeyError) as exc:
+        raise ValueError(f"malformed netlist projection: {exc}") from exc
+
+
+def validated_net_members(text, objects, commit):
+    validate_netlist(text)
+    return net_members(text, objects, commit)
+
+
+def electrical_row(kind, ref, action="modified", channel="wiring", weight="heavy", detail=None, where=None):
+    return {"kind":kind, "ref":ref, "action":action, "channel":channel, "weight":weight,
+            "detail":detail or {}, "where":where, "pos":None, "box":None,
+            "props":{}, "anchors":{"base":[], "head":[]}, "document":"schematic"}
+
+
+def diff_nets(base, head):
+    """Match equal memberships first, then compare connected overlap components.
+
+    A None from net_members is unknown, not empty: suppress that name on both
+    sides. The producer's issues carry the corresponding incompleteness reason.
+    Anchors remain empty until the caller attaches the side-specific evidence.
+    """
+    unknown = {n for side in (base, head) for n, members in side.items() if members is None}
+    b = {n:members for n, members in base.items() if n not in unknown}
+    h = {n:members for n, members in head.items() if n not in unknown}
+    rows = []
+
+    def emit(kind, bs, hs):
+        before = set().union(*(base[n] for n in bs))
+        after = set().union(*(head[n] for n in hs))
+        action = "added" if not bs else "removed" if not hs else "modified"
+        transitions = []
+        for pin in sorted(before | after):
+            old = sorted(n for n in bs if pin in base[n])
+            new = sorted(n for n in hs if pin in head[n])
+            if old != new:
+                transitions.append({"pin":pin, "before":old, "after":new})
+        detail = {"kind":"members", "added":sorted(after - before), "removed":sorted(before - after),
+                  "beforeNets":sorted(bs), "afterNets":sorted(hs), "transitions":transitions}
+        if kind == "net-renamed":
+            detail["autoNamed"] = any(n.startswith("Net-(") or n.startswith("unconnected-(") for n in [*bs, *hs])
+        rows.append(electrical_row(kind, " + ".join(sorted(hs or bs)), action, detail=detail))
+
+    for bn in sorted(list(b)):
+        matches = [hn for hn in sorted(h) if b[bn] and b[bn] == h[hn]]
+        if len(matches) == 1:
+            hn = matches[0]
+            if bn != hn:
+                emit("net-renamed", [bn], [hn])
+            del b[bn], h[hn]
+
+    edges = {(bn, hn) for bn in b for hn in h if b[bn] & h[hn]}
+    linked_b, linked_h = {bn for bn, hn in edges}, {hn for bn, hn in edges}
+    # A name cannot pre-empt a member overlap, including a join or split.
+    edges |= {(n, n) for n in b.keys() & h.keys() if n not in linked_b and n not in linked_h}
+    while b or h:
+        bs, hs = ({min(b)}, set()) if b else (set(), {min(h)})
+        while True:
+            nb = bs | {bn for bn, hn in edges if hn in hs}
+            nh = hs | {hn for bn, hn in edges if bn in nb}
+            if (nb, nh) == (bs, hs):
+                break
+            bs, hs = nb, nh
+        if not bs:
+            emit("net-added", bs, hs)
+        elif not hs:
+            emit("net-removed", bs, hs)
+        elif len(bs) == len(hs) == 1:
+            bn, hn = next(iter(bs)), next(iter(hs))
+            if bn != hn or b[bn] != h[hn]:
+                emit("net-members", bs, hs)
+        else:
+            if len(bs) > 1:
+                emit("net-joined", bs, hs)
+            if len(hs) > 1:
+                emit("net-split", bs, hs)
+        for n in bs:
+            b.pop(n)
+        for n in hs:
+            h.pop(n)
+        edges = {(bn, hn) for bn, hn in edges if bn in b and hn in h}
+    return rows
+
+
+def wire_counts(objects):
+    """Connected collinear wire runs per sheet; source endpoints rounded once to 0.001 mm."""
+    lines = {}
+    for o in objects.values():
+        if o["kind"] != "wire":
+            continue
+        raw_pts = o.get("points_mm")
+        if raw_pts is None:
+            values = [float(x) for x in re.findall(r"[-+]?(?:\d*\.)?\d+(?:[eE][-+]?\d+)?", o.get("props", {}).get("points", ""))]
+            raw_pts = [values[i:i + 2] for i in range(0, len(values), 2)]
+        pts = [tuple(round(round(x, 3) * 1000) for x in p) for p in raw_pts]
+        sheet = (o.get("where") or {}).get("sheet", "/")
+        for a, b in zip(pts, pts[1:]):
+            a, b = sorted((a, b))
+            dx, dy = b[0] - a[0], b[1] - a[1]
+            divisor = math.gcd(dx, dy)
+            if not divisor:
+                continue
+            dx, dy = dx // divisor, dy // divisor
+            # Integer direction and line offset avoid floating-point slope tolerances.
+            key = (sheet, dx, dy, dx * a[1] - dy * a[0])
+            lines.setdefault(key, []).append((a, b))
+    result = Counter()
+    for (sheet, *_), segments in lines.items():
+        merged = []
+        for a, b in sorted(segments):
+            if merged and a <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(b, merged[-1][1]))
+            else:
+                merged.append((a, b))
+        for a, b in merged:
+            result[(sheet, tuple(x / 1000 for x in a), tuple(x / 1000 for x in b))] = 1
+    return result
+
+
+def diff_wires(base, head):
+    b, h = wire_counts(base), wire_counts(head)
+    drawn, erased = sum((h - b).values()), sum((b - h).values())
+    return [electrical_row("wires", "Wires drawn / erased", weight="medium",
+                           detail={"kind": "wires", "drawn": drawn, "erased": erased})] if drawn or erased else []
+
+
+NUMBER_TOKEN = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
+
+
+def pad_geometry(tokens):
+    """Pad geometry key: bare numbers rounded to 0.0001 mm as pcb_objects does, so re-saved spellings match."""
+    def norm(x):
+        if isinstance(x, list):
+            return [norm(y) for y in x]
+        if isinstance(x, Quoted) or not NUMBER_TOKEN.fullmatch(x):
+            return str(x)
+        return round(float(x), 4) + 0.0
+    return repr([norm(x) for x in tokens])
+
+
+def board_pads(path):
+    """Physical pads per footprint UUID: UUID, number and local geometry from the PCB, net from the semantic parser."""
+    if not pathlib.Path(path).is_file():
+        return {}
+    root = parse_sexpr(pathlib.Path(path).read_text(encoding="utf-8"))
+    objects = pcb_objects_from_root(root)
+    result = {}
+    for fp in findall(root, "footprint"):
+        uid = val(fp, "uuid") or val(fp, "tstamp")
+        if uid not in objects:
+            continue
+        pads = findall(fp, "pad")
+        fp_at = at(fp)
+        fp_angle = fp_at[2] if fp_at and len(fp_at) > 2 else 0.0
+        counts, seen = Counter(p[1] for p in pads), Counter()
+        result[uid] = []
+        for p in pads:
+            number = p[1]
+            seen[number] += 1
+            suffix = "#" + str(seen[number]) if counts[number] > 1 else ""
+            geom = [x for x in p[1:] if not (isinstance(x, list) and x and x[0] in ("net", "uuid", "tstamp", "pinfunction", "pintype"))]
+            geom = [(["at", *x[1:3], str(round(((float(x[3]) if len(x) > 3 else 0.0) - fp_angle) % 360, 3) % 360)]
+                     if isinstance(x, list) and x and x[0] == "at" else x) for x in geom]
+            result[uid].append({"uuid": val(p, "uuid") or val(p, "tstamp"), "number": number,
+                                "geom": pad_geometry(geom),
+                                "net": objects[uid]["props"].get("pad " + number + suffix + " net") or ""})
+    return result
+
+
+def pad_pairs(base, head, replaced=False):
+    """Pair physical pads by UUID, then by unique number plus geometry; repeated numbers never pair by number alone."""
+    pairs, b, h = [], list(base), list(head)
+
+    def take(predicate):
+        for x in list(b):
+            matches = [y for y in h if predicate(x, y)]
+            if len(matches) != 1:
+                continue
+            y = matches[0]
+            if sum(predicate(z, y) for z in b) != 1:
+                continue
+            pairs.append((x, y))
+            b.remove(x)
+            h.remove(y)
+
+    take(lambda x, y: bool(x["uuid"]) and x["uuid"] == y["uuid"])
+    # Duplicate-number pads never pair by number alone once UUIDs are gone; only unique number-plus-geometry evidence does.
+    compatible = lambda x, y: not (x["uuid"] and y["uuid"] and x["uuid"] != y["uuid"])
+    take(lambda x, y: (compatible(x, y) or replaced) and (x["number"], x["geom"]) == (y["number"], y["geom"]))
+    # The replacement fallback pairs a pad by number only when that number is unique on both sides.
+    take(lambda x, y: (compatible(x, y) or replaced) and x["number"] == y["number"] and
+         sum(p["number"] == x["number"] for p in base) == 1 and
+         sum(p["number"] == y["number"] for p in head) == 1)
+    return pairs
+
+
+def diff_board_pins(base, head, base_pads, head_pads, commits):
+    """Rows for matched footprints whose physical pad net changed. Added or removed pads are not connectivity claims."""
+    rows = []
+    for bk, hk in object_pairs(base, head)[0]:
+        b, h = base[bk], head[hk]
+        if b["kind"] != "footprint" or h["kind"] != "footprint":
+            continue
+        for bp, hp in pad_pairs(base_pads.get(bk, []), head_pads.get(hk, []), replaced=bk != hk):
+            if bp["net"] == hp["net"]:
+                continue
+            r = electrical_row("board-pad-net", h["ref"] + "." + hp["number"],
+                               detail={"kind": "pad-net", "pin": hp["number"], "before": bp["net"],
+                                       "after": hp["net"], "boardOnly": True},
+                               where={"board": True})
+            r.update(document="board", pos=h.get("pos"), box=h.get("box"))
+            # Derived row does not own scene changeIds. Keep each revision identity separately.
+            # Board anchors carry board=True and omit sheet (PCBs have no sheet; consumed by Task 8.1/8.2).
+            for side, uid, o, pad in (("base", bk, b, bp), ("head", hk, h, hp)):
+                r["anchors"][side] = [{"uuid": uid, "padUuid": pad["uuid"], "ref": o["ref"],
+                                       "pin": pad["number"], "pos": o.get("pos"),
+                                       "commit": commits.get(side), "board": True}]
+            rows.append(r)
+    return rows
+
+
+def read_copper(path):
+    """Strict reader of the optional copper-diff.json; any malformed field makes routing unavailable."""
+    unavailable = lambda reason: ([], [{"channel": "routing", "reason": reason}])
+    try:
+        data = json.loads(pathlib.Path(path).read_text(encoding="utf-8"),
+                          parse_constant=lambda x: (_ for _ in ()).throw(ValueError(x)))
+        if not isinstance(data, dict) or not isinstance(data.get("rows"), list) or not isinstance(data.get("incomplete"), list):
+            raise ValueError("bad envelope")
+        rows = []
+        for x in data["rows"]:
+            if not isinstance(x.get("net"), str) or not isinstance(x.get("layer"), str):
+                raise ValueError("bad identity")
+            for key in ("addedMm2", "removedMm2"):
+                # math.isfinite raises OverflowError for integers too large for a float.
+                if type(x.get(key)) not in (int, float) or not math.isfinite(x[key]) or x[key] < 0:
+                    raise ValueError("bad area")
+            for key in ("addedContours", "removedContours"):
+                if not isinstance(x.get(key), list):
+                    raise ValueError("bad contours")
+                for ring in x[key]:
+                    if not isinstance(ring, list) or len(ring) < 3:
+                        raise ValueError("bad ring")
+                    for pt in ring:
+                        if not isinstance(pt, list) or len(pt) != 2 or any(type(v) not in (int, float) or not math.isfinite(v) for v in pt):
+                            raise ValueError("bad point")
+            r = electrical_row("copper", f"{x['net'] or '(unconnected)'} on {x['layer']}", channel="routing", weight="medium",
+                               detail={"kind": "area", **{k: x[k] for k in ("layer", "addedMm2", "removedMm2", "addedContours", "removedContours")}},
+                               where={"board": True})
+            r["document"] = "board"
+            pts = [pt for key in ("addedContours", "removedContours") for ring in x[key] for pt in ring]
+            r["box"] = [min(p[0] for p in pts), min(p[1] for p in pts), max(p[0] for p in pts), max(p[1] for p in pts)] if pts else None
+            rows.append(r)
+        issues = data["incomplete"]
+        if any(not isinstance(i, dict) or i.get("channel") != "routing" or not isinstance(i.get("reason"), str) for i in issues):
+            raise ValueError("bad issues")
+        return rows, issues
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
+        return unavailable("Copper comparison missing or malformed")
+
+
+def schematic_pin_ids(text, objects):
+    """Pins proven to exist: a uniquely resolved component whose exported libpart enumerates the pin.
+
+    A missing net node alone is never proof of disconnection; without this proof a pin stays unknown.
+    """
+    def identity(node):
+        key = (val(node, "lib"), val(node, "part"))
+        return key if all(isinstance(k, str) and k for k in key) else None
+
+    root = parse_sexpr(text)
+    libraries = {}
+    for part in findall(find(root, "libparts") or [], "libpart"):
+        if identity(part):
+            libraries[identity(part)] = {
+                val(pin, "num") for pin in findall(find(part, "pins") or [], "pin") if val(pin, "num")}
+    refs = {}
+    for o in objects.values():
+        if o["kind"] == "symbol":
+            refs.setdefault(o["props"].get("reference", o.get("ref", "")), []).append(o)
+    result = set()
+    components = findall(find(root, "components") or [], "comp")
+    for comp in components:
+        ref = val(comp, "ref")
+        candidates = refs.get(ref, [])
+        identities = [((o.get("where") or {}).get("sheet"), o["props"].get("unit", "1")) for o in candidates]
+        if not ref or "?" in ref or not candidates or len(identities) != len(set(identities)):
+            continue
+        sheets = {sheet for sheet, _ in identities}
+        if len(sheets) != 1 or None in sheets:
+            continue
+        if sum(val(c, "ref") == ref for c in components) != 1:
+            continue
+        result.update(ref + "." + pin for pin in libraries.get(identity(find(comp, "libsource")), set()))
+    return result
+
+
+def electrical_changes(p, out, objs, commits):
+    """Net, wire, board-pad, copper and rule rows for one project pair, plus channel incompleteness issues.
+
+    A present schematic with missing, malformed or ambiguous netlist evidence makes the whole
+    schematic membership pair unknown: no net rows, and board-pad board-only status unknown.
+    """
+    roots = {s: posixpath.join(s, p["dir"]) for s in ("base", "head")}
+    members, anchors, issues = {}, {}, []
+    known_pins = {"base": set(), "head": set()}
+    usable = True
+    for side, root in roots.items():
+        members[side], anchors[side] = {}, {}
+        if not pathlib.Path(root, p["name"] + ".kicad_sch").is_file():
+            continue  # An absent schematic is an absent side, not unknown evidence.
+        try:
+            text = read_netlist(pathlib.Path(out) / side)
+            members[side], anchors[side], found = validated_net_members(text, objs[side], commits.get(side, ""))
+            known_pins[side] = schematic_pin_ids(text, objs[side])
+            issues += [{**i, "document": "schematic"} for i in found]
+            if any(i.get("unknown") for i in found):
+                usable = False
+        except (OSError, ValueError, TypeError, IndexError, KeyError, AttributeError) as exc:
+            usable = False
+            issues.append({"channel": "wiring", "document": "schematic",
+                           "reason": f"{side} netlist unavailable: {str(exc)[:500]}"})
+    netrows = diff_nets(members["base"], members["head"]) if usable else []
+    for r in netrows:
+        for side, key in (("base", "beforeNets"), ("head", "afterNets")):
+            pins = set().union(*(members[side][n] for n in r["detail"][key]))
+            r["anchors"][side] = [a for pin in sorted(pins) for a in anchors[side].get(pin, [])]
+        first = next(iter(r["anchors"]["head"] or r["anchors"]["base"]), None)
+        r["where"] = {"sheet": first["sheet"]} if first else None
+    pcbs = {s: pathlib.Path(root, p["name"] + ".kicad_pcb") for s, root in roots.items()}
+    padrows = diff_board_pins(objs["base"], objs["head"], board_pads(pcbs["base"]), board_pads(pcbs["head"]), commits)
+
+    def pin_net(side, key):
+        """Schematic net of a pin: None means unknown; "" means a proven pin with no net assignment."""
+        if not usable:
+            return None
+        found = [name for name, pins in members[side].items() if key in pins]
+        if len(found) == 1:
+            return found[0]
+        if found:
+            return None
+        return "" if key in known_pins[side] else None
+
+    for r in padrows:
+        bp, hp = r["anchors"]["base"][0], r["anchors"]["head"][0]
+        before, after = pin_net("base", bp["ref"] + "." + bp["pin"]), pin_net("head", hp["ref"] + "." + hp["pin"])
+        r["detail"]["boardOnly"] = (None if before is None or after is None else
+                                    (before, after) != (r["detail"]["before"], r["detail"]["after"]))
+        if r["detail"]["boardOnly"] is None:
+            r["detail"]["evidenceNote"] = "Schematic assignment unavailable; board-only status unknown"
+    copperrows, found = read_copper(pathlib.Path(out) / "copper-diff.json") if any(f.is_file() for f in pcbs.values()) else ([], [])
+    issues += [{**i, "document": "board"} for i in found]
+    try:
+        rulerows = diff_rules(roots["base"], roots["head"], p["name"])
+    except (OSError, ValueError, TypeError, AttributeError, IndexError):
+        rulerows = []
+        issues.append({"channel": "rules", "document": "board", "reason": "Rules evidence missing or malformed"})
+    return netrows + diff_wires(objs["base"], objs["head"]) + padrows + copperrows + rulerows, issues
 
 
 def ohms(value):
@@ -3240,20 +4969,29 @@ def matches(name, patterns):
 def interface_check(p, settings, objs, out_dir, *, single=False):
     if settings["checks"].get("interfaces", "off") == "off":
         return None
+    def not_run(reason, incomplete=False):
+        return {"name": "interfaces", "title": CHECK_NAMES["interfaces"], "level": settings["checks"]["interfaces"],
+                "status": "not_run", "reason": reason, **({"incomplete": True} if incomplete else {}),
+                "errors": 0, "new_errors": 0, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []}
+    if not pathlib.Path("head", p["dir"], p["name"] + ".kicad_sch").is_file():
+        return not_run("no schematic")
     patterns = {k: INTERFACE_PATTERNS[k] + settings["interfaces"].get(k, []) for k in INTERFACE_PATTERNS}
-    def side(s):
-        path = f"{out_dir}/{s}/netlist.net"
-        if not os.path.exists(path):
-            return None, None
-        syms = {o["ref"].split(" unit ")[0]: o for o in (objs.get(s) or {}).values() if o["kind"] == "symbol"}
-        where_of = lambda ref: (syms[ref]["where"], syms[ref]["pos"][:2] if syms[ref].get("pos") else None) if ref in syms else ({"sheet": "/"}, None)
-        with open(path, encoding="utf-8") as fh:
-            return interface_findings(*parse_netlist(fh.read()), patterns, where_of)
-    (head, coverage), (base, _) = side("head"), ((None, None) if single else side("base"))
-    if head is None:
-        return {"name": "interfaces", "title": CHECK_NAMES["interfaces"], "level": settings["checks"]["interfaces"], "status": "not_run",
-                "reason": "no schematic", "errors": 0, "new_errors": 0, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []}
-    c = run_check("interfaces", settings, head, base)
+    findings, coverage = {"base": None}, None
+    for side in ("head",) if single else ("head", "base"):  # a design report never reads the base checkout
+        if not pathlib.Path(side, p["dir"], p["name"] + ".kicad_sch").is_file():
+            findings[side] = None  # An absent base schematic is an empty baseline, not failed evidence.
+            continue
+        try:
+            text = read_netlist(pathlib.Path(out_dir) / side)
+            syms = {base_ref(o["ref"]): o for o in (objs.get(side) or {}).values() if o["kind"] == "symbol"}
+            where_of = lambda ref: (syms[ref]["where"], syms[ref]["pos"][:2] if syms[ref].get("pos") else None) if ref in syms else ({"sheet": "/"}, None)
+            findings[side], found = interface_findings(*parse_netlist(text), patterns, where_of)
+            if side == "head":
+                coverage = found
+        except (OSError, ValueError, TypeError, IndexError, KeyError, AttributeError) as exc:
+            # Never compute new/fixed counts against unavailable evidence for a present schematic.
+            return not_run(f"{side} netlist unavailable: {exc}", True)
+    c = run_check("interfaces", settings, findings["head"], findings["base"])
     c["coverage"] = coverage
     return c
 
@@ -3564,7 +5302,106 @@ def read_optional_json(path, default=None):
     return json.loads(pathlib.Path(path).read_text()) if pathlib.Path(path).is_file() else default
 
 
-def build_project(p, blobs, settings, waivers=None, change_offset=0, *, single=False, context=None):
+CHANNELS = ("components","wiring","routing","rules","board","visual")
+
+
+def dedupe_electrical(rows, typed):
+    """Drop generic metadata keys that a typed rule or stackup row already describes.
+
+    Typed rule refs are rule_values keys; meta:pro flattens design_settings under "board.",
+    named classes by name and pattern lists by index, so map each ref to that flattened prefix.
+    """
+    refs = {r["ref"] for r in typed if r["kind"] in ("rule", "stackup")}
+    prefixes = {"board." + k if k.startswith("rules.") else k for k in refs
+                if k.startswith(("rules.", "net_settings.classes.")) or k == "net_settings.netclass_patterns"}
+    under = lambda key, p: key == p or key.startswith((p + ".", p + "["))
+    result = []
+    for row in rows:
+        uid = row.get("uuid")
+        if uid == "meta:dru" and "custom rules" in refs:
+            continue
+        if uid == "meta:pro":
+            superseded = lambda key: any(under(key, p) for p in prefixes)
+        elif uid == "meta:setup":
+            superseded = lambda key: "stackup" in refs and under(key, "stackup")
+        else:
+            result.append(row)
+            continue
+        row = dict(row)
+        if "changes" in row:
+            row["changes"] = [c for c in row["changes"] if not superseded(c[0])]
+            if not row["changes"]:
+                continue
+        else:
+            row["props"] = {k: v for k, v in row.get("props", {}).items() if not superseded(k)}
+            if not row["props"]:
+                continue
+        result.append(row)
+    return result
+
+
+def classify_change(row, document=None):
+    r = dict(row)
+    k = r["kind"]
+    channel = ("components" if k in ("symbol","footprint") else "wiring" if k in
+               ("wire","bus","junction","no connect","power symbol","label","global label","hierarchical label")
+               else "routing" if k in ("track","via","zone") else "rules" if k == "design rules"
+               else "board" if k == "board outline" else "visual")
+    props = {x[0].lower() for x in r.get("changes",[])}
+    heavy = channel == "rules" or channel == "components" and (r["action"] != "modified" or "footprint" in props)
+    weight = "heavy" if heavy else "medium" if channel in ("routing","board") or k == "wire" else "light"
+    r.setdefault("channel",channel); r.setdefault("weight",weight)
+    if document is not None:
+        r["document"] = document
+    else:
+        r.setdefault("document", "board" if (r.get("where") or {}).get("board") or r.get("uuid") in ("meta:setup","meta:pro","meta:dru","meta:title_block:board") else "schematic")
+    if "position" in props and r.get("pos") and r.get("pos_before"):
+        a,b = r["pos_before"][:2],r["pos"][:2]
+        r.setdefault("detail",{"kind":"position","before":a,"after":b,
+                              "distanceMm":sum((x-y)**2 for x,y in zip(a,b))**0.5})
+    return r
+
+
+def electrical_summary(rows, issues, present=None):
+    present = present if present is not None else {"schematic","board"}
+    # Legacy issues infer their producer; new producers always set document explicitly.
+    unique = {(i.get("document") or ("schematic" if i["channel"]=="wiring" else "board"),
+               i["channel"],i["reason"]) for i in issues}
+    issues = [{"document":d,"channel":c,"reason":r} for d,c,r in sorted(unique)]
+    def headline(selected):
+        component = lambda r: r["kind"] in ("symbol","footprint")
+        counts = [
+            (sum(component(r) and r["action"] == "added" for r in selected),"added"),
+            (sum(component(r) and any(k.lower() == "value" for k,*_ in r.get("changes",[])) for r in selected),"values"),
+            (sum(component(r) and any(k.lower() == "footprint" for k,*_ in r.get("changes",[])) for r in selected),"footprints"),
+            (sum(r["kind"] == "net-added" for r in selected),"nets added"),
+            (sum(r["kind"] == "net-removed" for r in selected),"nets removed"),
+            (sum(r["kind"] == "net-joined" for r in selected),"net joins"),
+            (sum(component(r) and any(k.lower() == "position" for k,*_ in r.get("changes",[])) for r in selected),"moved")]
+        return " · ".join(f"{n} {label}" for n,label in counts if n) or "No headline changes"
+    def channels(selected, documents, selected_issues):
+        producers = {"schematic":{"components","wiring","visual"},
+                     "board":{"components","wiring","routing","rules","board","visual"}}
+        applicable = set().union(*(producers[d] for d in documents)) if documents else set()
+        applicable |= {r.get("channel") for r in selected}
+        applicable |= {i["channel"] for i in selected_issues}
+        return [{"channel":c,"total":sum(r.get("channel") == c for r in selected),
+                 "heavy":sum(r.get("channel") == c and r.get("weight") == "heavy" for r in selected),
+                 "status":"incomplete" if any(i["channel"] == c for i in selected_issues) else
+                          "complete" if c in applicable else "not_applicable"}
+                for c in CHANNELS]
+    documents = []
+    for d in ("schematic","board"):
+        if d not in present: continue
+        selected = [r for r in rows if r.get("document") == d]
+        found = [i for i in issues if i["document"] == d]
+        documents.append({"document":d,"headline":headline(selected),
+                          "channels":channels(selected,{d},found),"incomplete":found})
+    return {"headline":headline(rows),"channels":channels(rows,present,issues),
+            "incomplete":issues,"documents":documents}
+
+
+def build_project(p, blobs, settings, waivers=None, change_offset=0, bom_sink=None, *, single=False, context=None):
     """single=True: the design as it is at head. The base side may still be on disk; it is not read."""
     out = f"review/{project_id(p['dir'])}"
     sides = [s for s in (("head",) if single else ("base", "head")) if os.path.isdir(f"{out}/{s}")]
@@ -3645,8 +5482,17 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0, *, single=F
                 text = gzip.decompress(base64.b64decode(blobs[key])).decode() if key else None
                 pair[side] = add_blob(blobs, comparison_svg(text, side, schematic)) if text else None
             row['svgCompare'] = pair
-    objs = {side: {} if single and side == "base" else project_objects(posixpath.join(side, p["dir"]), p["name"]) for side in ("base", "head")}
-    changes = [] if single else diff_objects(objs["base"], objs["head"])
+    objs, source_issues = project_pair(p, single=single)
+    summary = None
+    if single:  # one revision: no change rows, no electrical summary (so no fake "removed nets")
+        changes = []
+    else:
+        det = read_optional_json("review/detect.json", {})
+        extra, issues = electrical_changes(p, out, objs, {s: det.get(s, "") for s in ("base", "head")})
+        changes = [classify_change(r) for r in dedupe_electrical(diff_objects(objs["base"], objs["head"]), extra)] + extra
+        present = {d for d, suffix in (("schematic", ".kicad_sch"), ("board", ".kicad_pcb"))
+                   if any(pathlib.Path(s, p["dir"], p["name"] + suffix).is_file() for s in ("base", "head"))}
+        summary = electrical_summary(changes, source_issues + issues, present)
     for n, change in enumerate(changes, change_offset + 1):
         change["id"] = f"c{n}"
     inspect = image_pair(None, None)
@@ -3670,8 +5516,9 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0, *, single=F
                 scene = board_geometry(pcb)
                 # Child pads, text and graphics use their owning footprint's UUID;
                 # standalone tracks/vias/zones use their own. Never match by net/ref.
+                # Derived electrical rows carry anchors, not owner UUIDs, so they never claim objects.
                 ids = {(r["kind"], r.get("uuid_before", r["uuid"]) if side == "base" else r["uuid"]): r["id"]
-                       for r in changes if (r.get("where") or {}).get("board")
+                       for r in changes if r.get("uuid") and (r.get("where") or {}).get("board")
                        and r["action"] != ("added" if side == "base" else "removed")}
                 for obj in scene["objects"]:
                     uid = obj["changeUuid"]
@@ -3700,6 +5547,7 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0, *, single=F
         has_base = any(o["kind"] == "symbol" for o in objs["base"].values())
         parts = {"lines": lines["head"], "changes": diff_parts(lines["base"], lines["head"]),
                  "supplier": None,  # Filled only when DigiKey lookup is enabled.
+                 "summary": bom_summary(lines["head"]), "exports": bom_exports(lines["head"], settings["fabrication"]["preset"], settings["fabrication"].get("part_field"), objs["head"]),
                  "coverage": {"base": bom_coverage(objs["base"], settings) if has_base else None, "head": bom_coverage(objs["head"], settings)},
                  "field_changes": field_changes(objs["base"], objs["head"]), "dnp_mismatch": dnp_mismatches(objs["head"])}
         if single:  # nothing is compared, so no part is added and no problem is new
@@ -3707,6 +5555,8 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0, *, single=F
             parts["coverage"]["base"] = None
             for line in parts["lines"]:
                 line["new_problems"] = []
+        if bom_sink is not None:  # repository BOM (Task 5A) reads the head lines and objects
+            bom_sink.append({"name": p["name"], "lines": lines["head"], "objects": objs["head"]})
     allowed_sides = ("head",) if single else ("base", "head")
     if settings["3d"]["enabled"]:
         models = {side: f"{out}/{side}/board.glb" for side in allowed_sides}
@@ -3740,7 +5590,7 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0, *, single=F
     if single:
         absolute_checks(checks)
     return {"name": p["name"], "dir": p["dir"], "status": p["status"], "sheets": sheets, "board": board,
-            "changes": changes, "checks": checks,
+            "changes": changes, **({} if single else {"summary": summary}), "checks": checks,
             **({"parts": parts} if parts else {}),
             **({"libraries": libraries} if libraries else {}),
             **({"objects": index} if index is not None else {})}
@@ -3751,7 +5601,9 @@ def absolute_checks(checks):
     for c in checks:
         for v in c["violations"]:
             v["new"] = False
-        c["new_errors"] = c["new_warnings"] = c["fixed"] = 0
+        c["new_errors"] = c["new_warnings"] = 0
+        if "fixed" in c:  # 04's not_run fab result has no base comparison, so it carries no fixed key at all
+            c["fixed"] = 0
 
 
 def assign_ids(projects):
@@ -3828,7 +5680,7 @@ def finalize_report(data, assets_dir):
             print(f"Warning: {meta['kind']} asset {key} decoded size {size} exceeds {cap} bytes; keeping inline.", file=sys.stderr)
             del data['assets'][key]
     write_image_assets(data['blobs'], data['assets'], assets_dir)
-    payload = json.dumps(data, separators=(',', ':')).replace('<', '\\u003c')
+    payload = json.dumps(compact_bom_lines(data), separators=(',', ':')).replace('<', '\\u003c')
     return inline_page(f'window.REVIEW_DATA = {payload};')
 
 
@@ -3941,7 +5793,7 @@ def merge_supplier(projects, lookup):
 def filtered_settings(settings):
     """Keep opted-out report data compatible; embedded UI bytes may change."""
     report_settings = {k: v for k, v in settings.items()
-                       if k != "release" and not ((k in ("3d", "parts", "digikey", "threads", "issues", "waivers", "inventory", "libraries", "pdf", "design") and not v["enabled"]) or (k == "github" and not v["check_runs"]))}
+                       if k != "release" and not ((k in ("3d", "parts", "digikey", "threads", "issues", "waivers", "inventory", "libraries", "pdf", "downloads", "design") and not v["enabled"]) or (k == "github" and not v["check_runs"]))}
     if not settings["parts"]["enabled"]:
         report_settings["bom"] = {"required_fields": settings["bom"]["required_fields"]}
     if settings["checks"].get("interfaces") == "off":  # opted-out report settings stay identical
@@ -3949,6 +5801,9 @@ def filtered_settings(settings):
         report_settings.pop("interfaces", None)
     if settings["checks"].get("release") == "off":  # opted-out report settings stay identical
         report_settings["checks"] = {k: v for k, v in report_settings["checks"].items() if k != "release"}
+    if not fab_enabled(settings):
+        report_settings['checks'] = {k: v for k, v in report_settings['checks'].items() if k != 'fab_limits'}
+        report_settings['fabrication'] = {k: v for k, v in report_settings['fabrication'].items() if k != 'check_limits'}
     return report_settings
 
 
@@ -3981,12 +5836,19 @@ def cmd_report(args):
         "run_id": env.get("GITHUB_RUN_ID", ""),
     }
     waivers = load_waivers(env.get("WAIVERS_REF") or det["base"]) if settings["waivers"]["enabled"] else None
+    shutil.rmtree("review/downloads", ignore_errors=True)
     data["projects"] = []
     change_offset = 0
-    for p in det["projects"]:
-        project = build_project(p, blobs, settings, waivers, change_offset)
+    bom_boards = []
+    for i, p in enumerate(det["projects"]):
+        project = build_project(p, blobs, settings, waivers, change_offset, bom_boards)
+        downloads = collect_downloads(p, i, det["head"]) if settings.get("downloads", {}).get("enabled") or settings["checks"].get("release", "off") != "off" else None
+        if downloads:
+            project["downloads"] = downloads
         data["projects"].append(project)
         change_offset += len(project["changes"])
+    if len(bom_boards) >= 2:  # repository-wide BOM, only when there are several projects (Owner decision 2026-10-26)
+        data["bom"] = bom_repository(bom_boards, settings["fabrication"]["preset"], settings["fabrication"].get("part_field"))
     load_supplier(settings, data["projects"])
     assign_ids(data["projects"])
     if waivers is not None:
@@ -4010,7 +5872,7 @@ def cmd_report(args):
         fh.write(f"name={name}\n")
         fh.write(f"issues={'true' if settings['issues']['enabled'] else 'false'}\n")
         fh.write(f"pdf={'true' if settings.get('pdf', {}).get('enabled') else 'false'}\npdf_name={name[:-5]}.pdf\n")
-
+        fh.write(f"downloads={'true' if os.path.isdir('review/downloads') and os.listdir('review/downloads') else 'false'}\ndownloads_name=kicad-review-downloads-{det['head'][:7]}\n")
         fh.write(f"threads={'true' if settings['threads']['enabled'] else 'false'}\n")
 
 
@@ -4125,7 +5987,7 @@ def thumbnail_index(index, plan, src_dir, cap=50):
                 poster = rel if rel.is_file() else pathlib.Path(project["poster"])
             png = poster_thumbnail(poster.read_bytes())
         except (OSError, ValueError, zlib.error, struct.error):
-            print(f"::notice::No thumbnail for {workflow_command_escape(key)}: its poster is not a plain 8-bit PNG", file=sys.stderr)
+            print("::notice::" + workflow_command_escape(f"No thumbnail for {key}: its poster is not a plain 8-bit PNG"), file=sys.stderr)
             continue
         entries = [e for e in index["projects"].get(key, []) if e["sha"] != plan["sha"]]
         entries.insert(0, {"sha": plan["sha"], "date": plan["committedAt"], "png": base64.b64encode(png).decode("ascii")})
@@ -4298,6 +6160,46 @@ def changes_markdown(p, limit=60):
     return lines
 
 
+def connectivity_markdown(project, limit=20):
+    rows = [
+        r for r in project.get("changes", [])
+        if r.get("kind") in (
+            "net-added", "net-removed", "net-joined",
+            "net-split", "net-renamed", "net-members"
+        )
+    ]
+    if not rows:
+        return []
+
+    out = ["", "#### Connectivity", "", "| Change | Net | Members |", "|---|---|---|"]
+    for r in rows[:limit]:
+        d = r.get("detail") or {}
+        added = d.get("added") or []
+        removed = d.get("removed") or []
+        pins = " ".join([*(f"+{p}" for p in added), *(f"−{p}" for p in removed)])
+
+        before_nets = d.get("beforeNets") or []
+        after_nets = d.get("afterNets") or []
+        relation = (" + ".join(str(b) for b in before_nets) + " → " + " + ".join(str(a) for a in after_nets)) if (before_nets or after_nets) else ""
+
+        transitions = []
+        for t in d.get("transitions") or []:
+            if not isinstance(t, dict):
+                continue
+            pin = str(t.get("pin", ""))
+            before = " + ".join(str(b) for b in (t.get("before") or [])) or "(unconnected)"
+            after = " + ".join(str(a) for a in (t.get("after") or [])) or "(unconnected)"
+            transitions.append(f"{pin}: {before} → {after}")
+        moved = "; ".join(transitions)
+
+        summary_text = moved or pins or relation
+        out.append(f"| {cell(r.get('kind', ''))} | {cell(r.get('ref', ''))} | {cell(summary_text)} |")
+
+    if len(rows) > limit:
+        out.append(f"| | | and {len(rows) - limit} more in the report |")
+    return out
+
+
 def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="", threads=None, log="", issues=None):
     out = [MARKER, "## KiCad review", ""]
     short = lambda s: s[:9] if s else "nothing"
@@ -4320,6 +6222,19 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="
     for i, p in enumerate(data["projects"]):
         out += ["", f"### {md(p['name'])}" + (f" (`{p['dir'].replace('`', "'").replace('\n', ' ').replace('\r', ' ')}`, {p['status']})" if p["dir"] or p["status"] != "modified" else ""), "",
                 summary_sentence(p) + "."]
+        summary = p.get("summary")
+        if summary:
+            headline = summary.get("headline", "")
+            if headline:
+                out += ["", md(headline[:200])]
+            for issue in summary.get("incomplete", []):
+                channel = str(issue.get("channel", ""))
+                reason = str(issue.get("reason", ""))
+                note = f"{channel}: {reason}"
+                if len(note) > 200:
+                    note = note[:199] + "…"
+                out += ["", md(note)]
+        out += connectivity_markdown(p)
         shots = [s for s in images if s["project"] == i]
         if shots:
             out += [""]
@@ -4387,7 +6302,7 @@ def cmd_shots(args):
         if r.returncode == 0 and os.path.exists(out):
             done.append(s)
         else:
-            print(f"::warning::Screenshot of {s['title']} failed: {r.stderr[-300:]}")
+            print("::warning::" + workflow_command_escape(f"Screenshot of {s['title']} failed: {r.stderr[-300:]}"))
     with open(f"review/images/shots.json", "w", encoding="utf-8") as fh:
         json.dump(done, fh, indent=2)
     print(f"{len(done)} screenshot(s)")
@@ -4410,21 +6325,21 @@ def cmd_summary(args):
                 for key in ("data", "repository", "pullRequest", "reviewThreads"):
                     review_threads = review_threads.get(key) if isinstance(review_threads, dict) else None
                 if not isinstance(raw, dict) or raw.get("errors") or not isinstance(review_threads, dict) or not review_threads:
-                    print("::warning::review/threads.json has no review threads; thread counts left out")
+                    print("::warning::" + workflow_command_escape("review/threads.json has no review threads; thread counts left out"))
                 elif review_threads.get("totalCount", 0) > len(review_threads.get("nodes") or []):
                     # ponytail: first 100 threads; fail closed beyond the ceiling until paginated.
-                    print("::warning::review/threads.json is incomplete; thread counts left out")
+                    print("::warning::" + workflow_command_escape("review/threads.json is incomplete; thread counts left out"))
                 else:
                     threads = thread_counts(raw)
             except ValueError:
-                print("::warning::review/threads.json is not JSON; thread counts left out")
+                print("::warning::" + workflow_command_escape("review/threads.json is not JSON; thread counts left out"))
     issues = None
     if data["settings"].get("issues", {}).get("enabled") and os.path.exists("review/issues.json"):
         with open("review/issues.json", encoding="utf-8") as fh:
             try:
                 issues = touched_issues(json.load(fh), data)
             except ValueError:
-                print("::warning::review/issues.json is not JSON; issue links left out")
+                print("::warning::" + workflow_command_escape("review/issues.json is not JSON; issue links left out"))
     log = ""
     if os.environ.get("HISTORY") == "true":
         previous = ""
@@ -4460,8 +6375,9 @@ def cmd_summary(args):
 
 PROBLEM_TEXT = {"missing_lcsc": "missing LCSC number", "bad_lcsc": "LCSC number malformed", "lcsc_conflict": "one LCSC number on several values",
                 "placeholder": "placeholder value", "mpn_footprint_conflict": "one MPN on several footprints",
+                "unit_identity_conflict": "conflicting identities across symbol units",
                 "out_of_stock": "out of stock", "not_found": "not found at DigiKey", "ambiguous": "several DigiKey matches", "discontinued": "discontinued", "unavailable": "lookup unavailable"}
-BLOCKING = {"missing_lcsc", "bad_lcsc", "lcsc_conflict", "placeholder", "mpn_footprint_conflict", "out_of_stock", "not_found", "discontinued"}
+BLOCKING = {"missing_lcsc", "bad_lcsc", "lcsc_conflict", "placeholder", "mpn_footprint_conflict", "unit_identity_conflict", "out_of_stock", "not_found", "discontinued"}
 
 
 def parts_markdown(data):
@@ -4586,8 +6502,22 @@ def checks_markdown(data):
     lines = ["", "### Checks", "", "| Project | Check | Result | Errors (new) | Warnings (new) | Fixed |", "|---|---|---|---|---|---|"]
     for p in data["projects"]:
         for c in p["checks"]:
-            lines.append(f"| {md(p['name'])} | {c['title']} ({c['level']}) | {STATUS_ICON[c['status']]} {c['status'].replace('_', ' ')}{': ' + md(c['reason']) if c.get('reason') else ''} | "
-                         f"{c['errors']} ({c['new_errors']}) | {c['warnings']} ({c['new_warnings']}) | {c['fixed']} |")
+            vendor = FAB_VENDOR_LABELS.get(c.get('vendor'), c.get('vendor'))
+            title = f"{c['title']} · {vendor}" if vendor else c['title']
+            lines.append(f"| {md(p['name'])} | {md(title)} ({c['level']}) | {STATUS_ICON[c['status']]} {c['status'].replace('_', ' ')}{': ' + md(c['reason']) if c.get('reason') else ''} | "
+                         f"{c['errors']} ({c['new_errors']}) | {c['warnings']} ({c['new_warnings']}) | {c.get('fixed', '—')} |")
+    for p in data['projects']:
+        for c in p['checks']:
+            if c['name'] != 'fab_limits':
+                continue
+            vendor = FAB_VENDOR_LABELS.get(c.get('vendor'))
+            label = f'Fab limits ({vendor})' if vendor else 'Fab limits'
+            prefix = f"**{md(p['name'])}**: " if len(data['projects']) > 1 else ''
+            if c.get('unsupported') or c['status'] == 'not_run':
+                text = f"{label}: not checked — {md(c.get('unsupported') or c.get('reason', 'unavailable'))}."
+            else:
+                text = f"{label}: {c['errors'] + c['warnings']} violations" + (f" ({c['waived']} waived)" if c.get('waived') else '') + '. Eligible limits only; see coverage in Checks.'
+            lines += ['', prefix + text]
     news = [(p["name"], c["title"], v) for p in data["projects"] for c in p["checks"] for v in c["violations"]
             if v["new"] and v["severity"] == "error" and not v.get("waived")]
     if news:
@@ -4703,7 +6633,7 @@ def cmd_pdf(args):
         fh.write(page)
     name = os.environ.get("PDF_NAME", "")
     if not re.fullmatch(r"kicad-review-(?:[0-9a-f]{7}|none)-[0-9a-f]{7}-(?:pass|fail)\.pdf", name):
-        print("::warning::PDF report failed: invalid PDF_NAME")
+        print("::warning::" + workflow_command_escape("PDF report failed: invalid PDF_NAME"))
         return
     out = os.path.abspath(f"review/{name}")
     try:
@@ -4716,7 +6646,7 @@ def cmd_pdf(args):
     except (OSError, subprocess.TimeoutExpired):
         if os.path.exists(out):
             os.remove(out)
-        print("::warning::PDF report failed: Chrome unavailable, failed or timed out")
+        print("::warning::" + workflow_command_escape("PDF report failed: Chrome unavailable, failed or timed out"))
         return
     print(f"{out}: {os.path.getsize(out) / 1e6:.2f} MB")
 
@@ -4732,6 +6662,10 @@ def log_row(data, when: str) -> str:
     per = [("" if len(data["projects"]) == 1 else f"{md(p['name'])}: ")
            + " · ".join(f"{md(c['title'])} {c['errors']} ({c['new_errors']})" for c in p["checks"])
            for p in data["projects"]]
+    for index, project in enumerate(data["projects"]):
+        headline = project.get("summary",{}).get("headline","")
+        if headline:
+            per[index] += (" · " if per[index] else "") + md(headline[:200])
     row = f"| [{when}]({data['links'].get('run', '')}) | `{(data['head'] or '')[:7]}` | {'❌ fail' if failed else '✅ pass'} | {' ; '.join(per) or '—'} |"
     row = row.replace("\n", " ").replace("\r", " ")
     return row if LOG_ROW.fullmatch(row) else ""
@@ -4769,7 +6703,8 @@ def check_runs(data):
                 raise KeyError(c["status"])
             r["conclusions"].append(rank)
             r["new"] += c["new_errors"]
-            r["rows"].append(f"| {md(p['name'])} | {STATUS_ICON[c['status']]} {c['status'].replace('_', ' ')} | {c['errors']} ({c['new_errors']}) | {c['warnings']} ({c['new_warnings']}) |")
+            project_label = md(p['name']) + (f" ({FAB_VENDOR_LABELS[c['vendor']]})" if c.get('vendor') in FAB_VENDOR_LABELS else '')
+            r["rows"].append(f"| {project_label} | {STATUS_ICON[c['status']]} {c['status'].replace('_', ' ')} | {c['errors']} ({c['new_errors']}) | {c['warnings']} ({c['new_warnings']}) |")
     out = []
     for r in runs.values():
         _, conclusion, title = CHECK_RESULTS[min(r["conclusions"])]
@@ -4813,6 +6748,8 @@ def main():
     p.set_defaults(func=cmd_render)
     p = sub.add_parser("prepare-3d", help="write revision-scoped metadata for the 3D processor")
     p.set_defaults(func=cmd_prepare3d)
+    p = sub.add_parser("copper", help="refilled copper differences of both revisions (run inside the KiCad container)")
+    p.set_defaults(func=cmd_copper)
     p = sub.add_parser("release", help="fabrication outputs for a version tag (run inside the KiCad container)")
     p.add_argument("--tag", required=True)
     p.set_defaults(func=cmd_release)

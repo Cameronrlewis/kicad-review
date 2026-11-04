@@ -56,13 +56,15 @@ The site's re-run feature expects the caller workflow to be named `kicad-review.
 | `fail_on` | `"new"` | `"new"`: a required check fails only on errors the change introduced. `"all"`: any error fails it. |
 | `checks.erc`, `checks.drc`, `checks.parity` | `"required"` | `required`, `informational` or `off` |
 | `checks.bom` | `"informational"` | as above |
+| `checks.fab_limits` | `"informational"` | as above; eligible vendor geometry limits when opted in |
 | `checks.interfaces` | `"off"` | as above; design-review rules on the schematic netlist |
 | `interfaces.<rule>` | built-in names | net or pin-function names for a rule (`uart_tx`, `i2c_sda`, `i2c_scl`, `can_h`, `can_l`, `esd_parts`; `spi` is accepted for compatibility but unused) |
 | `checks.release` | `"off"` | as above; builds and checks the fabrication package (adds about 2–4 s per board) |
 | `bom.required_fields` | `["Value", "Footprint"]` | symbol fields every BOM part must have (DNP and excluded-from-BOM parts are skipped) |
 | `bom.critical_prefixes` | `["U", "J", "Q", "D", "Y", "X", "K", "F"]` | reference prefixes whose datasheet coverage is shown separately |
 | `bom.order_ready_fields` | preset's fields | fields every part needs to count as order-ready (JLCPCB: Value, Footprint, LCSC; PCBWay: Value, Footprint, MPN) |
-| `fabrication.preset` | `"jlcpcb"` | `jlcpcb` or `pcbway` |
+| `fabrication.preset` | `"jlcpcb"` | `jlcpcb` or `pcbway`; downloads and BOM preset, not the fab-limit vendor |
+| `fabrication.check_limits` | `false` | opt in to both JLCPCB and PCBWay limit checks; requires ordinary DRC (`checks.drc != "off"`) |
 | `fabrication.part_field` | `LCSC` / `MPN` | symbol field holding the supplier part number |
 | `3d.enabled` | `false` | export every available board revision (including unchanged boards) as a realistic GLB with copper, soldermask, silkscreen, and still poster; viewer provides Assembled/Bare board toggling, studio lighting presets (Bench, Low sun, Photo); footprints with missing 3D models show placeholder boxes and coverage limitations; ruler/two-point measurement is deferred; failed exports are recorded without failing the review |
 | `parts.enabled` | `false` | show the parts list and its changes in the Parts tab and pull request comment |
@@ -72,13 +74,14 @@ The site's re-run feature expects the caller workflow to be named `kicad-review.
 | `digikey.currency` | `"USD"` | price currency, three uppercase letters (for example `CAD`) |
 | `digikey.max_lookups` | `100` | maximum distinct MPNs per run, integer 1–900; excess lines show "not looked up: run limit" |
 | `pdf.enabled` | `false` | also make a printable PDF (cover, summaries, pictures, changes, new errors) as a separate artifact; download it from the review site |
-
+| `downloads.enabled` | `false` | export the head revision's fabrication zip (Gerbers, drill, positions, BOM), schematic PDF, STEP model and uncompressed GLB, and offer them with the GitHub zips of both revisions in the report's **Download** dialog; adds about 6-11 s per board |
+| `downloads.step` | `true` | include the STEP model; it is skipped, with the reason shown, when the export takes over 120 s |
 | `threads.enabled` | `false` | pin discussion threads to parts and points in the review site; they are stored as pull-request review comments |
 | `inventory.enabled` | `false` | add an "All parts" list to the report's Changes tab: every symbol and footprint, searchable, click to zoom |
 | `libraries.enabled` | `false` | Review local symbol and footprint libraries: drawings, pin/pad changes, used-by references, and warnings |
 | `github.check_runs` | `false` | also publish one GitHub check run per check (`kicad-review / ERC`, `… / DRC`, …); the caller needs `checks: write` |
 | `threads.block_merge` | `false` | fail the review while any blocking thread is open; needs `threads.enabled`; creating, resolving or reopening a blocking thread in the review site re-runs the review |
-| `waivers.enabled` | `false` | read `kicad-review-waivers.toml`; a waived ERC, DRC or parity finding stays listed but no longer fails its check |
+| `waivers.enabled` | `false` | read `kicad-review-waivers.toml`; a waived ERC, DRC, parity or fab-limit finding stays listed but no longer fails its check |
 
 With `checks.release` on, each review also builds the fabrication package for the chosen preset and checks it: a Gerber for every copper layer and the outline, mask and paste on sides with SMD parts, drill files when the board has holes, a position file when SMD parts are fitted, and BOM and position file agreeing on references. Tagged releases also get a `SHA256SUMS` file so the files sent to the fab can be checked against the release.
 
@@ -87,6 +90,64 @@ For pull requests the base revision's settings file wins, so a change cannot rel
 Set the Actions variable `KICAD_REVIEW_SITE` to your companion review site's URL to make review comments link to its report page.
 
 Review history is off by default. Set the Actions variable `KICAD_REVIEW_HISTORY` to exactly `true` to keep the newest 50 review runs in the PR comment. The log records errors (new errors), not warnings. Failed or cancelled runs add no row; the previous log is carried over.
+
+## Fabrication limit checks (optional)
+
+Opt in to required checks with:
+
+```toml
+[checks]
+fab_limits = "required"
+
+[fabrication]
+preset = "jlcpcb"
+check_limits = true
+```
+
+Enabled fabrication limits require ordinary DRC (`checks.drc != "off"`); the incompatible combination is rejected. The default is opt-out (`fabrication.check_limits = false`) with `checks.fab_limits = "informational"`. Setting the check to `off` also disables it. Both JLCPCB and PCBWay are checked on every enabled review; `fabrication.preset` still chooses only the fabrication downloads and BOM preset. JLCPCB uses `jlcpcb-2l` for two copper layers and `jlcpcb-multilayer` for four or six; PCBWay uses `pcbway-std` for two, four or six. Other layer counts are explicitly not checked, never a clean pass. With `github.check_runs = true`, both vendor sections aggregate into one stable `kicad-review / Fab limits` check run, with vendor-qualified project rows.
+
+Both base and head revisions are audited. Fab findings are paired as new, existing or fixed, so `fail_on = "new"` counts only fab errors absent from the base audit, rather than all newly audited errors. Without a usable base audit (for example, an added board or unsupported base layers), every head finding is newly audited and `baselineAvailable` is `false`. Other comparison-mode checks still label newly audited findings rather than claiming historical newness. In spec 06 single-mode presentation, absolute current `errors`/`warnings` are shown and comparison-only new/fixed labels are suppressed; status, `baselineAvailable: false` when supplied, and the full coverage ledger are retained. This includes zero-count unsupported failures and no-board `not_run` results: zero is not proof of a pass. A no-board `not_run` has no `baselineAvailable` or `fixed` field because no head audit exists.
+
+The ordinary board DRC remains authoritative and unchanged. Each disposable vendor pass neutralizes house bounds, then enforces the vendor profile constraints; exclusions are cleared only in that temporary copy. Only ordinary-visible findings are subtracted from the vendor pass. An excluded house finding is not itself a vendor failure, while genuine vendor geometry remains checked despite authored Ignore severities or exclusions. Keeping the ordinary results and vendor-only additions preserves stricter house checks without rewriting the original board or rules. Temporary rules own only the section between `# kicad-review fab limits - start` and `# kicad-review fab limits - end`; authored rules outside it stay intact.
+
+The immutable versioned table `fab_limits.json` beside the CLI is distinct from the generated per-project audits `review/<project-id>/head/fab-limits.json` and `review/<project-id>/base/fab-limits.json`. The check name is `fab_limits`: one section per vendor, distinguished by `vendor` (`jlcpcb` or `pcbway`). Explicit `confidence: "deterministic"` and `evidence_source` on checks and findings describe KiCad evidence for checked geometry, not certified vendor capabilities or complete coverage. `warnings` remains the existing integer violation count; optional `coverageWarnings: list[str]` carries nonwaivable uncertainty messages, also stored in cached metadata. The report's Checks ledger separates checked, unchecked and unsupported limits from numeric findings.
+
+Profiles assume 1 oz copper (`assumedCopperOz = 1`, 0.035 mm). Missing/unknown stackup copper thickness or nonstandard thickness produces a coverage warning; these limits do not establish suitability for 2 oz copper. Without a valid closed outline, edge clearance is not checked. Mixed pad–via hole spacing is not checked; pad–pad and via–via checks apply only where the profile supplies their respective limits. Missing profile values, ambiguous mixed-pair limits and otherwise unsupported checks remain visible as unchecked. Retained limits without fresh publication support are explicitly identified as active study assumptions in the provenance section below. This is not a fabrication guarantee; confirm manufacturing options and uncertain study assumptions with the vendor. The provenance section below preserves the 2026-10-24 study values and records the fresh 2026-10-27 vendor-page check and per-profile `checkedOn` dates.
+
+Fab findings can be waived like DRC findings. Waived counts remain visible, and one waiver applies to the same geometry in both vendor sections; uncertainty/coverage warnings cannot be waived. Re-running uses the existing GitHub review workflow (or the connected site's re-run action), not an offline check or a new service. The downloaded report embeds its results and does not fetch profiles or run DRC.
+
+## Fabrication profile provenance
+
+`fab_limits.json` keeps all twelve study profiles. Only `jlcpcb-2l`, `jlcpcb-multilayer` and `pcbway-std` were re-read on **2026-10-27**; the other nine retain their study date. A fresh `checkedOn` means the page was reviewed, not that every stored limit is published or that the board is vendor-certified. All limits below are millimetres and apply to the profile's assumed copper weight, not every manufacturing option.
+
+Changes from the **2026-10-24 study values** (each URL was read on 2026-10-27):
+
+- `jlcpcb-2l.drillPlatedMinMm`: 0.2 -> 0.15 (https://jlcpcb.com/capabilities/pcb-capabilities, 2026-10-27). Drill Diameter: “2-layer: 0.15 – 6.3 mm”.
+- `jlcpcb-multilayer.drillPlatedMinMm`: 0.2 -> 0.15 (https://jlcpcb.com/capabilities/pcb-capabilities, 2026-10-27). Drill Diameter: “Multilayer: 0.15 – 6.3 mm”.
+- `pcbway-std.drillPlatedMinMm`: 0.2 -> 0.15 (https://www.pcbway.com/capabilities.html, 2026-10-27). Standard Drill Sizes (CNC): “Min drill size is 0.15mm, max drill is 6.0mm.”
+- `pcbway-std.holeToHoleMm`: 0.4064 -> 0.45 (https://www.pcbway.com/helpcenter/Engineering_Questions/limited_holes_spacing.html, 2026-10-27). “For standard 1oz copper thickness” and “Currently, the minimum spacing for different nets we can support is 0.45 mm for plated through holes and 0.30 mm for vias.” This supplementary source, not the main standard capability table, supports the change. The existing pad–pad rule does not distinguish nets, so it also conservatively applies the published different-net minimum to same-net pairs. The published via minimum is not added as a new profile field in this refresh; via–via remains unchecked for this profile.
+
+Unchanged limits were compared with the following first-party text, all read on **2026-10-27**. Grouped keys share the quoted source, not an inferred numerical conversion.
+
+| Profile and keys | Retained value | Exact source text | Source URL |
+|---|---|---|---|
+| `jlcpcb-2l`: `trackWidthOuterMm`, `clearanceOuterMm` | 0.1 | “Min. track width and spacing (1 oz)” / “1- and 2-layer: 0.10 / 0.10 mm (4 / 4 mil)” | https://jlcpcb.com/capabilities/pcb-capabilities |
+| `jlcpcb-multilayer`: `trackWidthOuterMm`, `trackWidthInnerMm`, `clearanceOuterMm`, `clearanceInnerMm` | 0.09 | “Multilayer: 0.09 / 0.09 mm (3.5 / 3.5 mil). 3 mil is acceptable in BGA fan-outs.” | https://jlcpcb.com/capabilities/pcb-capabilities |
+| `jlcpcb-2l`, `jlcpcb-multilayer`: `drillPlatedMaxMm` | 6.3 | “2-layer: 0.15 – 6.3 mm”; “Multilayer: 0.15 – 6.3 mm”; “Holes with diameter ≥ 6.3 mm are CNC routed from a smaller drilled hole.” | https://jlcpcb.com/capabilities/pcb-capabilities |
+| `jlcpcb-2l`, `jlcpcb-multilayer`: `drillNpthMinMm` | 0.5 | “Min. Non-plated holes” / “0.50mm” | https://jlcpcb.com/capabilities/pcb-capabilities |
+| `jlcpcb-2l`: `annularMinMm` | 0.18 | “PTH annular ring” / “2-layer:” / “1 oz: Recommended 0.25 mm or above; absolute minimum 0.18 mm” | https://jlcpcb.com/capabilities/pcb-capabilities |
+| `jlcpcb-multilayer`: `annularMinMm` | 0.15 | “PTH annular ring” / “Multilayer:” / “1 oz: Recommended 0.20 mm or above; absolute minimum 0.15 mm” | https://jlcpcb.com/capabilities/pcb-capabilities |
+| `jlcpcb-2l`, `jlcpcb-multilayer`: `edgeClearanceMm` | 0.2 | “Copper clearance from routed board edges: ≧0.2 mm” | https://jlcpcb.com/capabilities/pcb-capabilities |
+| `jlcpcb-2l`, `jlcpcb-multilayer`: `holeToHoleMm` | 0.45 | “Pad Hole-to-Hole Spacing” / “0.45mm” | https://jlcpcb.com/capabilities/pcb-capabilities |
+| `jlcpcb-2l`, `jlcpcb-multilayer`: `holeToHoleViaMm` | 0.2 | “Via Hole-to-Hole Spacing” / “0.2mm” | https://jlcpcb.com/capabilities/pcb-capabilities |
+| `pcbway-std`: `trackWidthOuterMm`, `trackWidthInnerMm` | 0.1 | “Min manufacturable trace is 4mil(0.1mm), Please view the below \"Advanced PCB\" or contact us if your board exceeds these.” | https://www.pcbway.com/capabilities.html |
+| `pcbway-std`: `clearanceOuterMm`, `clearanceInnerMm` | 0.1 | “Min manufacturable spacing is 4mil(0.1mm), Please view the below \"Advanced PCB\" or contact us if your board exceeds these.” | https://www.pcbway.com/capabilities.html |
+| `pcbway-std`: `drillPlatedMaxMm` | 6 | “Min drill size is 0.15mm, max drill is 6.0mm. Any holes greater than 6mm or smaller than 0.2mm will be subject to extra charges.” | https://www.pcbway.com/capabilities.html |
+| `pcbway-std`: `annularMinMm` | 0.15 | “Min Width of Annular Ring” / “0.15mm(6mil)” / “For pads with vias in the middle, Min width for Annular Ring is 0.15mm(6mil).” | https://www.pcbway.com/capabilities.html |
+
+**Unverified study values retained, not freshly substantiated:** `pcbway-std.drillNpthMinMm = 0.45` and `pcbway-std.edgeClearanceMm = 0.25`. On 2026-10-27, https://www.pcbway.com/capabilities.html did not publish a separate standard-tier NPTH minimum or standard-tier edge-clearance limit supporting these study values. There is no supporting standard-tier quote for either value. The generic drill-size range does not separately identify NPTH. The capability page does list “Line to board edge distance / CNC milling / 0.25mm” in its advanced-tier table; this 0.25 mm value is deliberately not applied to `pcbway-std`. https://www.pcbway.com/advanced-pcb-capabilities.html was also read on 2026-10-27, but its advanced-tier values are not used for `pcbway-std`. These two stored constraints remain active study assumptions, not verified vendor minima; obtain vendor confirmation before relying on them for fabrication sign-off. The former `pcbway-std.holeToHoleMm = 0.4064` study value corresponds to the capabilities page's advanced-table “Hole to hole spacing >=16MIL” row, not its standard table; it is superseded by 0.45 mm, supported by the standard-1 oz different-net plated-hole rule in PCBWay's help-center page cited above.
+
+Scope cautions: the lower JLCPCB drill option is conditional; the quoted general range above is used instead. JLCPCB's routed-edge limit does not cover V-cuts. PCBWay's hole-to-trace page (https://www.pcbway.com/helpcenter/Engineering_Questions/the_spacing_from_hole_to_trace.html, read 2026-10-27) says “min 0.2 mm from non-plated hole to trace, and min 0.35 mm from plated hole to trace”; neither is a hole-to-hole or board-edge limit, so neither replaces a profile value. The refreshed drill minima describe capability, not the preferred economical drilling option, and a drill exactly at the minimum is not a guaranteed fab finding.
 
 ## Interface checks (optional)
 
@@ -110,6 +171,10 @@ Recognised field names (case-insensitive):
 
 - LCSC: `lcsc`, `lcsc part`, `lcsc part #`, `lcsc part number`, `jlcpcb part #`.
 - Manufacturer part number: `mpn`, `manufacturer_part_number`, `manufacturer part number`, `mfr. part #`, `mfg part #`.
+
+The Parts tab has two views, **Problems** (above) and **BOM**. The BOM view reads like an order sheet: a header (`55 components · 30 unique parts · 3 with MPN`), category chips with counts (Resistors, Capacitors, Inductors & Ferrites, Diodes & LEDs, Transistors, ICs & Modules, Connectors, Test Points, Mechanical, Other), and a table grouped by category with quantity, part (value and footprint), references compressed to ranges (`R7-R12`; sub-parts such as `U1A` and suffixed references such as `R5A` stay literal), MPN, LCSC number and datasheet link. Every column sorts, and the change marks from the Problems view stay. A line is one value, footprint, LCSC number, MPN, category, manufacturer and datasheet, so the same value with two MPNs is two lines. Parts marked do-not-populate (DNP) and parts excluded from the BOM are not listed. Category comes from the reference prefix (R, C, L/FB, D/LED, Q, U, J/P, TP, H/MH), then the symbol name, then the library name; everything else is Other. With two or more projects, the BOM view also offers **All boards**: board-qualified references (`Alpha:R1`) and combined counts. Each project has its own BOM; All boards provides a combined download across projects.
+
+**CSV ↓** and **JLCPCB ↓** (**PCBWay ↓** when `fabrication.preset = "pcbway"`) save the head revision's BOM from the report itself; nothing is fetched. The generic CSV download starts with a UTF-8 BOM for Excel; fabrication files keep their exact first-line headers without a BOM. The CSV has `Category, Quantity, Value, Footprint, References, MPN, LCSC, Datasheet`. The JLCPCB file has `Comment, Designator, Footprint, LCSC, Quantity`, and no JLCPCB record exceeds 2,048 UTF-8 bytes including its CRLF (stricter than the vendored planner, which excludes the CRLF): a long designator list continues on another row. If one reference plus fixed fields exceeds the limit, no fabrication file is offered; an actionable diagnostic names the reference. The generic CSV and report remain available. Cells that start with `=`, `+`, `-`, `@`, tab or carriage return get a leading `'` so a spreadsheet does not run them. Both presets honor `fabrication.part_field` with the preset fallback; displayed LCSC/MPN are unchanged. Combined exports use board-qualified references such as `Alpha:R1`; JLCPCB uploader acceptance of a colon in a designator has not been verified, so its button says **JLCPCB review file ↓** (or **PCBWay review file ↓**); treat the All boards download as an ordering review file, not an upload-verified file. The JLCPCB file uses the vendored `vendor/bom_csv.py` planner with a formula guard and fail-closed checks. The release exporter is separate: release JLCPCB retains `LCSC Part #`, no Quantity, grouping by Value/Footprint/resolved part field, and no Python byte ceiling. Report/release files are not byte-equivalent. On the review site the report may save files (`allow-downloads` in its sandbox).
 
 ### DigiKey stock and price (optional)
 
@@ -157,7 +222,7 @@ When enabled, the workflow's "Collect review threads" step reads the pull reques
 
 ## Waivers (optional)
 
-A waiver accepts one specific ERC, DRC or parity finding: for example a deliberate clearance under a connector shield. BOM-field findings cannot be waived; fix their fields in the schematic. Waivers are off by default. Enable them with `enabled = true` under `[waivers]` in `kicad-review.toml` on the default branch. Settings still come from the review's base revision, so open pull requests pick up that setting after merging the default branch into their head.
+A waiver accepts one specific ERC, DRC, parity or fab-limit finding: for example a deliberate clearance under a connector shield. For fab limits, the same geometry is waived in both vendor sections, and waived counts remain visible; coverage uncertainty cannot be waived. BOM-field findings cannot be waived; fix their fields in the schematic. Waivers are off by default. Enable them with `enabled = true` under `[waivers]` in `kicad-review.toml` on the default branch. Settings still come from the review's base revision, so open pull requests pick up that setting after merging the default branch into their head.
 
 Press **Waive…** on a finding in the report to get a TOML snippet, not an automatic waiver. Fill in `reason` and `by`, and add the entry to `kicad-review-waivers.toml` at the repository root through a separate pull request to the target branch. See the fully commented [example file](examples/kicad-review-waivers.toml). Once that merges, re-run the review that had the finding.
 
@@ -182,6 +247,14 @@ Pull-request reviews have a **History** page: commits, approvals and change requ
 The check log is **off by default**. Alongside `KICAD_REVIEW_SITE`, set the calling repository's Actions variable `KICAD_REVIEW_HISTORY=true` to keep the newest 50 check-result rows in the existing bot comment. This adds a comments fetch on same-repository PR runs; forks do not fetch it. With the variable unset, comments and job summaries stay unchanged. History still shows commits, reviews and threads without the log.
 
 Logged results outlive the 90-day reports; links disappear when their artifacts expire or are unavailable. Rows record errors (total and new), not warnings. Failed or cancelled runs add no row; failure and no-change comments carry the previous log. The log is editable by anyone who can edit the bot comment, not immutable. History trusts only the GitHub Actions bot's marked comment and reads the first 100 comments/threads and last 100 commits/reviews.
+
+## Downloads (optional)
+
+The report's **Download** button always offers GitHub's zip of the repository at the head and at the base commit. When `checks.release` is not `off`, its head fabrication package is uploaded even if downloads are disabled. With `[downloads] enabled = true`, each run also exports, for the head revision only, `fab-<project>-<sha>.zip` (the Gerber zip, positions CSV and BOM CSV for the configured `fabrication.preset`; the package built by `checks.release` is reused when present), `<project>-<sha>-schematic.pdf`, `<project>-<sha>-board.step` and `<project>-<sha>-board.glb` (KiCad's raw uncompressed export, `board.raw.glb`, produced for downloads even when the 3D view is off; not the compressed model the 3D view embeds). A failed or slow export (STEP over 120 s) is listed with its reason and never fails the review. The files are uploaded as one artifact per run, `kicad-review-downloads-<sha>`, kept 90 days.
+
+On the review site the entries download directly; the site reads one file out of the artifact and keeps its repository-read check. In the offline report each entry shows a copy-able `gh run download <run> -R <repo> -n kicad-review-downloads-<sha> -D kicad-review-downloads` command, with the file at `kicad-review-downloads/<project index>/<name>`. Limits: the "KiCad project" zip is the whole repository, not only the project folder; base-revision fabrication files are not made; the site reads every page (up to ten pages of one hundred) of the run's artifact list to find the single matching bundle, and refuses a missing, expired or ambiguous bundle.
+
+CPL rotation corrections apply only to the JLCPCB positions in the download zip; release evidence and `checks.release` keep KiCad's raw export, and PCBWay positions are not corrected. Corrections use vendored table rules from [cpl_rotations](cpl_rotations/SOURCE.md) (GPL-3.0) and KiBot template conventions from [kibot_templates/v1.9.1](kibot_templates/v1.9.1/SOURCE.md) (AGPL-3.0). Per-project overrides may be placed at `<project folder>/<name>.cpl-overrides.csv` with header `Designator,Rotation,Offset X,Offset Y`. A listed Designator replaces any table rule with integer rotation degrees and float millimetre offsets. Malformed rows, duplicate designators, non-integer angles, non-finite offsets, or an overrides file with a non-`jlcpcb` preset fail only the fabrication download entry (`fabrication export failed`) without failing the review.
 
 ## When the workflow repository moves (for example to ParadigmEngineering)
 
@@ -376,11 +449,19 @@ and remains as the fallback when WebGL is unavailable.
 - **3D coverage and placeholders**: footprints lacking a 3D model render hatched placeholder boxes, and the view summarizes honest **3D coverage** (footprints, with-model, placeholders, triangles, and primitives). Missing models are also catalogued in the missing models table.
 - **Deferred measurements**: ruler and two-point measurement tools are deferred; standard camera orientation and Fit actions are provided.
 
+## Electrical and copper changes
+
+Electrical and copper comparison runs automatically on every review; there is **no new setting** and no opt-in required. Schematic netlists are exported automatically for comparison, even when interface checks are disabled (the default `checks.interfaces = "off"`). Rename matching is by members before names: nets with identical member pin sets are matched as renames before examining changed pin sets. Ambiguous references mark wiring incomplete rather than guessing connections.
+
+Copper is refilled in disposable project copies using KiCad's zone filler with a 120 s zone refill per revision, a 0.05 mm² threshold and 0.005 mm polygon approximation (`SHAPE_POLY_SET`). Unavailable routing or container timeouts mark the routing channel incomplete and do not turn off other checks.
+
+Format v1 adds optional fields additively: `project.changes[].channel` (`components`, `wiring`, `routing`, `rules`, `board`, `visual`), `weight` (`heavy`, `medium`, `light`), `detail`, `anchors`, and `project.summary` (`headline`, `channels`, `incomplete`). Older reports and data without these fields continue to load normally, with legacy display behaviour.
+
 ## Developing the review page
 
 Open `ui/review.html` in a browser: it loads real data from `ui/sample/review-data.js`.
 Run the page checks with `node ui/check.mjs` (headless Chrome; set `CHROME=` to its path on Linux),
-or `node ui/check.mjs --dark` for the dark theme. Run the site checks with `node --import ./site/css-loader.mjs --test site/test.mjs`.
+or `node ui/check.mjs --dark` for the dark theme. Run UI unit and sandbox-download checks with `node --test ui/*.test.mjs` (also in CI). The download check finds headless Chrome through `CHROME`, `CHROME_PATH` or PATH, uses an isolated temporary directory, and skips when Chrome is unavailable. To run it alone with the Worker CSS loader explicitly, use `node --import ./site/css-loader.mjs --test ui/bom-download.test.mjs`. Build browser fixture pages with `python3 ui/build-fixtures.py <output-directory>`. Run the site checks with `node --import ./site/css-loader.mjs --test site/test.mjs`.
 
 To refresh the sample, take the data out of any generated report (a CI artifact or a local run of
 `detect`, `render` and `report`):
@@ -422,7 +503,7 @@ and `changes` or `props`) and `checks[]` (counts and `violations[]` with `id`, `
 `box`, `where`); and `blobs` (gzip + base64 SVG text, optional board-scene JSON, and opted-in GLB bytes). When `3d.enabled` is true
 on every review, `board.model3d` has base/head GLB blob ids (or `null`), `enabled`, `changed`, and
 an `errors` map for unavailable exports, and `board.no_model` lists `{ref, side, reason}` entries (`file not found` or `no model in
-footprint`). Positions and boxes are drawing millimetres.
+footprint`). Positions and boxes are drawing millimetres. With `parts.enabled`, `projects[].parts` also has `summary` (`components`, `unique`, `withMpn`, `byCategory`) and `exports` (`preset`, `csv`, `fab`: the download file texts), and each `lines[]` entry has `category`, `refsCompressed` and `manufacturer`; with two or more projects, the top-level `bom` (`boards`, `error`, `summary`, `lines`, `exports`) also appears. All are additive and absent in older reports, which show only the Problems view.
 
 Image fields grow format v1 **additively**: sheets may add `svgThemes` and
 `hotspots` with base/head blob ids; board layers may add `svgThemes`, and the board
@@ -455,7 +536,8 @@ Unchanged sheets, board layers (including blank layers), board geometry, and ena
 available at both revisions. The viewer labels these views “No layout changes”, “No schematic changes
 on this sheet”, or “No 3D changes” without hiding the design. Identical board/model inputs share one
 GLB export, including its generated timestamp. Actions caches rendered outputs per commit, project,
-settings, KiCad image, and tool version; a complete warm hit avoids starting the KiCad container.
+settings, KiCad image, and tool version; a warm render hit still performs pair-specific copper analysis, so it no longer promises no container start for this feature.
 
 Library review (`[libraries] enabled = true`) covers only library files inside the project folder. Nicknames come from the file name (`Parts.kicad_sym` or `Parts.pretty` means `Parts`); library tables and external libraries are not resolved. Footprint item names come from `.kicad_mod` file stems, including legacy KiCad `module` files; symbol item names come from their declarations without a library prefix. For placed-part usage, exact library IDs win. When a placed part's nickname is not a local library, its item name is matched only if exactly one local library across the compared revisions contains that item of the same kind. This supports renamed or global nicknames without guessing when names are ambiguous, including duplicates in unchanged local libraries. All symbol units contribute pins; the drawing shows unit 1. Pad removals or renumbering and symbol electrical-type changes warn when placed parts use the item.
 With waivers enabled, format v1 adds `violations[].waiver_key`, `violations[].waived` for matched findings, `checks[].waived` counts on waivable checks, and top-level `waivers` lists (`stale`, `expired`, `proposed`, `invalid`); these additive fields are absent when waivers are off.
+With downloads enabled, format v1 adds optional `projects[].downloads[]` entries (`kind` of `fab`, `pdf`, `step` or `glb`, `label`, and either `bytes`, `sha256`, `path` and `artifact`, or an `error` string); the key is absent when downloads are off and release checking is off. Each project folder in the artifact includes `downloads.json` with a `files` envelope; successful records contain `kind`, `label`, `path`, `bytes` and `sha256`, while failed records contain `kind`, `label` and `error`. The per-render manifest uses project-relative paths; the staged artifact/report manifest prefixes paths with the project index and adds `artifact`.

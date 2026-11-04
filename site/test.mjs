@@ -539,12 +539,27 @@ test('review route shows the repository after a pull-access check and refreshes 
 });
 
 test('shared CSP module permits report WebAssembly without weakening sandbox or wrapper policies', () => {
-  assert.equal(reportCsp, "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox; default-src 'none'; script-src 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:; worker-src blob:; connect-src 'none'; frame-ancestors 'self'");
+  assert.equal(reportCsp, "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads; default-src 'none'; script-src 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:; worker-src blob:; connect-src 'none'; frame-ancestors 'self'");
   assert.match(reportCsp, /'wasm-unsafe-eval'/);
   assert.doesNotMatch(reportCsp, /'unsafe-eval'/);
   assert.match(reportCsp, /connect-src 'none'/);
   assert.doesNotMatch(reportCsp, /allow-same-origin/);
   assert.equal(frameCsp, "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; frame-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
+});
+
+test('report CSP and both iframe sandboxes allow only the BOM downloads token', () => {
+  const tokens = s => s.trim().split(/\s+/);
+  const expected = ['allow-scripts', 'allow-popups', 'allow-popups-to-escape-sandbox', 'allow-downloads'];
+  assert.deepEqual(tokens(reportCsp.match(/sandbox ([^;]*)/)[1]), expected);
+  const pages = [reviewPage({ user: 'u', owner: 'o', repo: 'r', id: 9, name: 'kicad-review.html' }), sharedPage({ token: 'body.signature', name: 'kicad-review.html' })];
+  for (const html of pages) {
+    const attrs = [...html.matchAll(/sandbox="([^"]*)"/g)].map(m => m[1]);
+    assert.ok(attrs.length >= 1);
+    for (const attr of attrs) assert.deepEqual(tokens(attr), expected);
+  }
+  assert.ok(!reportCsp.includes('allow-same-origin') && /connect-src 'none'/.test(reportCsp));
+  // Preserve the 02 worker directive.
+  assert.match(reportCsp, /worker-src blob:/);
 });
 
 test('artifact frame and raw route redirect unsigned users without GitHub calls', async () => {
@@ -628,7 +643,7 @@ test('framed artifact page keeps the report sandboxed and escapes metadata', asy
     assert.match(body, /✕ NEEDS WORK/);
     assert.match(body, /https:\/\/github\.com\/Cameronrlewis\/repo\/actions\/runs\/123/);
     assert.match(body, /<iframe[^>]+src="\/r\/Cameronrlewis\/repo\/a\/44\/raw"/);
-    assert.match(body, /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"/);
+    assert.match(body, /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads"/);
     assert.doesNotMatch(body, /allow-same-origin/);
     assert.match(body, /event\.source === iframe\.contentWindow/);
     assert.match(body, /kicadReviewHash/);
@@ -2009,7 +2024,7 @@ test('guest report streams only signed artifact sandboxed without exposing GitHu
     const response = await worker.fetch(request(`/s/${token}`), appEnv); const html = await response.text();
     assert.equal(response.status, 200); guestSecurity(response);
     assert.match(html, /Read-only shared review/); assert.ok(html.includes(`src="/s/${token}/raw"`));
-    assert.match(html, /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"/);
+    assert.match(html, /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads"/);
     assert.match(html, /referrerpolicy="no-referrer"/);
     assert.doesNotMatch(html, /Sign out|All reviews|href="\/"|thread-composer|installation-secret|user-token|PRIVATE KEY/);
     assert.equal(response.headers.get('Content-Security-Policy'), "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; frame-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
@@ -2091,6 +2106,8 @@ test('revoke is writer-only, validates POST and persists a fresh repository-scop
 test('missing share secrets keep existing review HTML byte-identical and guest routes inactive', async () => {
   const props = { user: 'octocat', owner: 'Cameronrlewis', repo: 'repo', id: '123', name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html' };
   const current = reviewPage({ ...props, share: false }).replace(/<style>[\s\S]*?<\/style>/, '<style>\n</style>')
+    // BOM downloads add only this separately asserted sandbox token to the pinned frame.
+    .replace('allow-popups-to-escape-sandbox allow-downloads', 'allow-popups-to-escape-sandbox')
     // Deployment provenance is additive to the pinned pre-footer shell.
     .replace('<meta name="deploy-sha" content="unknown">', '')
     .replace('<footer class="deployment" aria-label="Deployment">Deployed commit <code>unknown</code></footer>', '')
@@ -3043,7 +3060,7 @@ test('S2 wrapper themes the opaque sandbox without changing raw routes', () => {
   assert.match(html, /attributeFilter: \['data-theme'\]/);
   assert.match(html, /postMessage\(\{ kicadReviewTheme: theme \}, '\*'\)/);
   assert.match(html, /event\.source === iframe\.contentWindow && event\.data\?\.kicadReviewReady === true\) \{ loading\.hidden = true; syncTheme/);
-  assert.match(html, /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"/);
+  assert.match(html, /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads"/);
   assert.doesNotMatch(html, /allow-same-origin|contentDocument/);
   assert.match(html, /<nav class="review-bar" aria-label="Review navigation">/);
   assert.match(html, /<\/nav><div class="review-stage">/);
@@ -3266,7 +3283,7 @@ test('bench-t2 review chrome has one header, one bar, one merge badge and menu-o
     assert.match(body, /href="#kr-mark"/);
     assert.match(body, /data-review-copy/);
     assert.match(body, /data-review-goto/);
-    assert.match(body, /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"/);
+    assert.match(body, /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads"/);
     assert.doesNotMatch(body, /allow-same-origin/);
   }
 });
@@ -5005,7 +5022,7 @@ test('BR02 measurement wrapper fixture keeps one opaque report frame that receiv
   const frames = [...html.matchAll(/<iframe\b[^>]*>/g)].map(m => m[0]);
   assert.equal(frames.length, 1);
   assert.match(frames[0], /id="review-report"/); assert.match(frames[0], /src="\/r\/o\/r\/a\/12\/raw"/);
-  assert.match(frames[0], /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"/);
+  assert.match(frames[0], /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads"/);
   assert.match(html, /const raw = "\/r\/o\/r\/a\/12\/raw";[\s\S]*iframe\.src = raw \+ location\.hash/);
   assert.match(html, /"endpoint":"\/r\/o\/r\/a\/12\/3d\/"/);
   assert.doesNotMatch(html, /Review3D|review3d\.js/, 'viewer runs only inside the report frame');
@@ -5748,4 +5765,326 @@ test('a stored report with a board still but no 3D model inlines poster code onl
   assert.ok(!html.includes('src="review3d.js"'));
   assert.doesNotMatch(html, /\.src\s*=\s*['"][^'"]*\.js['"]/, 'self-contained report must not load scripts at run time');
   assert.ok(html.indexOf('window.Review3D = (() =>') < html.indexOf('const D = window.REVIEW_DATA'));
+});
+
+import { deflateRawSync } from 'node:zlib';
+import { zipEntries, zipEntryStream, exactRange } from './zip.js';
+
+// Independent bitwise reference for ZIP fixture checksums.
+function fixtureCrc32(data) {
+  let crc = 0xffffffff;
+  for (const byte of data) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function makeZip(files) {
+  const parts = [], central = []; let offset = 0;
+  for (const f of files) {
+    const name = Buffer.from(f.name), body = f.deflate ? deflateRawSync(f.data) : f.data, method = f.deflate ? 8 : 0, extra = Buffer.alloc(4);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(method, 8);
+    local.writeUInt32LE(fixtureCrc32(f.data), 14); local.writeUInt32LE(body.length, 18); local.writeUInt32LE(f.data.length, 22); local.writeUInt16LE(name.length, 26); local.writeUInt16LE(extra.length, 28);
+    parts.push(local, name, extra, body);
+    const entry = Buffer.alloc(46);
+    entry.writeUInt32LE(0x02014b50, 0); entry.writeUInt16LE(20, 4); entry.writeUInt16LE(20, 6); entry.writeUInt16LE(method, 10);
+    entry.writeUInt32LE(fixtureCrc32(f.data), 16); entry.writeUInt32LE(body.length, 20); entry.writeUInt32LE(f.data.length, 24); entry.writeUInt16LE(name.length, 28); entry.writeUInt32LE(offset, 42);
+    central.push(entry, name);
+    offset += 30 + name.length + extra.length + body.length;
+  }
+  const dir = Buffer.concat(central), end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(files.length, 8); end.writeUInt16LE(files.length, 10);
+  end.writeUInt32LE(dir.length, 12); end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...parts, dir, end]);
+}
+const rangeOf = (buf) => async (a, b) => new Response(buf.subarray(a, b + 1), { status: 206, headers: { 'Content-Range': `bytes ${a}-${b}/${buf.length}` } });
+
+test('zip reader lists entries and streams stored and deflated data', async () => {
+  const zip = makeZip([{ name: '0/fab-P-aaaaaaa.zip', data: Buffer.from('PK-stored') },
+    { name: '0/P-aaaaaaa-schematic.pdf', data: Buffer.from('%PDF-1.7 '.repeat(50)), deflate: true }, { name: '1/empty.glb', data: Buffer.alloc(0) }]);
+  const entries = await zipEntries(rangeOf(zip), zip.length);
+  assert.deepEqual(entries.map(e => [e.name, e.method, e.bytes]), [['0/fab-P-aaaaaaa.zip', 0, 9], ['0/P-aaaaaaa-schematic.pdf', 8, 450], ['1/empty.glb', 0, 0]]);
+  assert.equal(await new Response(await zipEntryStream(rangeOf(zip), entries[0])).text(), 'PK-stored');
+  assert.equal(await new Response(await zipEntryStream(rangeOf(zip), entries[1])).text(), '%PDF-1.7 '.repeat(50));
+  assert.equal((await new Response(await zipEntryStream(rangeOf(zip), entries[2])).arrayBuffer()).byteLength, 0);
+});
+
+test('zip reader rejects non-zip, zip64 and truncated input', async () => {
+  const junk = Buffer.from('not a zip at all, long enough to hold a record end');
+  await assert.rejects(zipEntries(rangeOf(junk), junk.length), /not a zip/);
+  const zip = makeZip([{ name: 'a', data: Buffer.from('x') }]);
+  const big = Buffer.from(zip); big.writeUInt32LE(0xffffffff, big.length - 22 + 16);
+  await assert.rejects(zipEntries(rangeOf(big), big.length), /zip64 unsupported/);
+  await assert.rejects(zipEntries(rangeOf(Buffer.alloc(5)), 5), /not a zip/);
+});
+
+test('zip reader validates directory, header and payload boundaries and exact ranges', async () => {
+  const good = makeZip([{ name: '0/a.glb', data: Buffer.from('glTF') }]);
+  const end = good.length - 22, directory = good.readUInt32LE(end + 16);
+  for (const mutate of [
+    b => b.writeUInt16LE(60000, directory + 28),
+    b => b.writeUInt16LE(60000, directory + 30),
+    b => b.writeUInt32LE(directory - 10, directory + 42),
+    b => b.writeUInt32LE(60000, directory + 20),
+    b => b.writeUInt32LE(directory + 1, end + 16),
+    b => b.writeUInt16LE(1, end + 20),
+  ]) {
+    const b = Buffer.from(good); mutate(b);
+    await assert.rejects(zipEntries(rangeOf(b), b.length), /bad|not a zip/);
+  }
+  // Remove an actual central-directory byte while retaining its advertised size/count.
+  const truncated = Buffer.concat([good.subarray(0, directory + 45), good.subarray(directory + 46)]);
+  await assert.rejects(zipEntries(rangeOf(truncated), truncated.length), /bad directory/);
+  for (const mutate of [b => b.writeUInt16LE(60000, 28), b => b.writeUInt16LE(8, 8), b => { b[30] ^= 1; }]) {
+    const b = Buffer.from(good); mutate(b);
+    const [entry] = await zipEntries(rangeOf(b), b.length);
+    await assert.rejects(zipEntryStream(rangeOf(b), entry), /bad entry/);
+  }
+  const [entry] = await zipEntries(rangeOf(good), good.length);
+  const shortHeader = async (a,b) => new Response(good.subarray(a, b === 29 ? 20 : b + 1), { status:206, headers:{'Content-Range':`bytes ${a}-${b}/${good.length}`} });
+  await assert.rejects(zipEntryStream(shortHeader, entry), /bad range length/);
+  const badHeader = async () => new Response('x', { status:206, headers:{'Content-Range':`bytes 1-1/${good.length}`} });
+  await assert.rejects(exactRange(badHeader, 0, 0, good.length), /range not honoured/);
+  const shortRange = async (a,b) => new Response(good.subarray(a,b), { status:206, headers:{'Content-Range':`bytes ${a}-${b}/${good.length}`} });
+  await assert.rejects(zipEntries(shortRange, good.length), /bad range length/);
+  // Payload truncation can happen after headers were sent: body must error, not end successfully.
+  const payloadStart = entry.offset + 30 + Buffer.byteLength(entry.name) + 4;
+  const shortPayload = async (a,b) => a === payloadStart ? shortRange(a,b) : rangeOf(good)(a,b);
+  const stream = await zipEntryStream(shortPayload, entry);
+  await assert.rejects(new Response(stream).arrayBuffer(), /bad range length/);
+});
+
+
+test('zip reader rejects corrupted payloads and incorrect empty-entry CRC', async () => {
+  assert.equal(fixtureCrc32(Buffer.from('123456789')), 0xcbf43926);
+  for (const deflate of [false, true]) {
+    const zip = makeZip([{ name: 'a', data: Buffer.from('123456789'), deflate }]);
+    const [entry] = await zipEntries(rangeOf(zip), zip.length);
+    // For stored data, corrupt one payload byte. For deflate, change both recorded
+    // CRCs so decompression succeeds but its uncompressed CRC must still fail.
+    if (!deflate) zip[35] ^= 1;
+    else { entry.crc = (entry.crc ^ 1) >>> 0; zip.writeUInt32LE(entry.crc, 14); }
+    await assert.rejects(new Response(await zipEntryStream(rangeOf(zip), entry)).arrayBuffer(), /CRC-32 mismatch/);
+  }
+  const empty = makeZip([{ name: 'empty', data: Buffer.alloc(0) }]);
+  const [entry] = await zipEntries(rangeOf(empty), empty.length);
+  entry.crc = 1; empty.writeUInt32LE(1, 14);
+  await assert.rejects(async () => new Response(await zipEntryStream(rangeOf(empty), entry)).arrayBuffer(), /CRC-32 mismatch/);
+});
+
+test('zip reader caps central-directory allocation before fetching it', async () => {
+  const size = 16 * 1024 * 1024 + 1, total = size + 22;
+  const tail = Buffer.alloc(65557), end = tail.length - 22;
+  tail.writeUInt32LE(0x06054b50, end);
+  tail.writeUInt16LE(1, end + 8); tail.writeUInt16LE(1, end + 10);
+  tail.writeUInt32LE(size, end + 12);
+  let calls = 0;
+  const range = async (a, b) => {
+    calls++;
+    assert.equal(a, total - tail.length); assert.equal(b, total - 1);
+    return new Response(tail, { status: 206, headers: { 'Content-Range': `bytes ${a}-${b}/${total}` } });
+  };
+  await assert.rejects(zipEntries(range, total), /central directory exceeds 16 MiB limit/);
+  assert.equal(calls, 1);
+});
+
+test('zip reader passes large stored entries through with no per-byte JavaScript work', async () => {
+  // A per-byte CRC here overran the Worker CPU limit on multi-MB STEP/GLB entries (truncated 200s, then 503s).
+  const size = 4 * 1024 * 1024, step = 64 * 1024, zip = makeZip([{ name: '0/P-bbbbbbb-board.glb', data: Buffer.alloc(size, 7) }]);
+  const [entry] = await zipEntries(rangeOf(zip), zip.length), start = entry.offset + 30 + entry.name.length + 4;
+  const sent = []; let touched = 0;
+  const range = async (a, b) => {
+    if (a !== start) return rangeOf(zip)(a, b);
+    // Payload chunks are proxies: any access but byteLength (iteration, indexing, slicing) counts as per-byte work.
+    const body = new ReadableStream({ pull(controller) {
+      const o = sent.length * step;
+      if (o >= size) return controller.close();
+      const chunk = new Proxy(zip.subarray(a + o, a + Math.min(o + step, size)), { get(target, key) {
+        if (key !== 'byteLength') touched++;
+        const value = Reflect.get(target, key, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      } });
+      sent.push(chunk); controller.enqueue(chunk);
+    } });
+    return { status: 206, headers: new Headers({ 'Content-Range': `bytes ${a}-${b}/${zip.length}` }), body };
+  };
+  const reader = (await zipEntryStream(range, entry)).getReader(), got = [];
+  for (let read; !(read = await reader.read()).done;) got.push(read.value);
+  assert.equal(touched, 0, 'stored payload bytes are never read in JavaScript');
+  assert.equal(got.length, size / step); assert.ok(got.every((chunk, i) => chunk === sent[i]), 'chunks pass through uncopied');
+  // Inflating is per-byte work too; the upload stores entries, so a large deflated one is refused before its payload is fetched.
+  const deflated = makeZip([{ name: 'big.step', data: Buffer.alloc(64 * 1024 + 1), deflate: true }]), [big] = await zipEntries(rangeOf(deflated), deflated.length);
+  const fetched = [];
+  await assert.rejects(zipEntryStream(async (a, b) => { fetched.push(a); return rangeOf(deflated)(a, b); }, big), /deflated entry too large/);
+  assert.deepEqual(fetched, [big.offset, big.offset + 30], 'only the local header and name are read');
+});
+
+// workerd's FixedLengthStream, emulated: records the size it was given and passes bytes through.
+function stubFixedLengthStream() {
+  const made = [], original = globalThis.FixedLengthStream;
+  globalThis.FixedLengthStream = class { constructor(size) { const pair = new TransformStream(); this.size = size; this.readable = pair.readable; this.writable = pair.writable; made.push(this); } };
+  return { made, restore: () => { if (original) globalThis.FixedLengthStream = original; else delete globalThis.FixedLengthStream; } };
+}
+
+test('large stored entries pipe the upstream body natively into a FixedLengthStream of the entry size', async () => {
+  // A JavaScript transform on every network chunk still overran the Worker CPU limit on a 14 MB GLB (a truncated 200).
+  const data = Buffer.alloc(256 * 1024, 9), zip = makeZip([{ name: '0/P-bbbbbbb-board.glb', data }]);
+  const [entry] = await zipEntries(rangeOf(zip), zip.length), start = entry.offset + 30 + entry.name.length + 4;
+  const fixed = stubFixedLengthStream(), pipes = [];
+  try {
+    const range = async (a, b) => {
+      const response = await rangeOf(zip)(a, b);
+      if (a !== start) return response;
+      const body = response.body, pipeTo = body.pipeTo.bind(body);
+      body.pipeThrough = () => assert.fail('no JavaScript transform on the large path');
+      body.pipeTo = (dest, options) => { pipes.push(dest); return pipeTo(dest, options); };
+      return response;
+    };
+    const stream = await zipEntryStream(range, entry), fls = fixed.made.at(-1);
+    assert.equal(fls.size, entry.size); assert.equal(entry.size, data.length);
+    assert.equal(stream, fls.readable, 'the FixedLengthStream readable is returned as is');
+    assert.deepEqual(pipes, [fls.writable], 'the upstream body pipes straight into it');
+    assert.ok(Buffer.from(await new Response(stream).arrayBuffer()).equals(data));
+    // A Content-Length other than the wanted length is refused before any body is streamed.
+    const longer = async (a, b) => { const r = await rangeOf(zip)(a, b); if (a === start) r.headers.set('Content-Length', String(b - a + 2)); return r; };
+    await assert.rejects(zipEntryStream(longer, entry), /bad range length/);
+    // Through the whole route: no wrapper re-wraps, tees or buffers the body.
+    const big = Buffer.alloc(70 * 1024, 3), routeZip = makeZip([{ name: '0/P-bbbbbbb-board.glb', data: big }, { name: '0/downloads.json', data: downloadEnvelope() }]);
+    const sealed = await signedIn(), restore = downloadFetch({ zip: routeZip });
+    try {
+      const response = await call('/r/Cameronrlewis/repo/a/123/download/0/glb', { headers: { Cookie: `s=${sealed}` } });
+      const last = fixed.made.at(-1);
+      assert.equal(response.status, 200); assert.equal(last.size, big.length);
+      assert.equal(response.body, last.readable, 'the response body is the FixedLengthStream readable');
+      assert.ok(Buffer.from(await response.arrayBuffer()).equals(big));
+    } finally { restore(); }
+  } finally { fixed.restore(); }
+});
+
+function downloadFetch({ zip, event = 'pull_request', rangeOk = true, badRange = false, forbidden = false, shortPayload = false, bundles, bundle = { id: 124, name: 'kicad-review-downloads-bbbbbbb', expired: false, workflow_run: { id: 9, head_sha: 'b'.repeat(40) } }, report = { name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', workflow_run: { id: 9, head_sha: 'b'.repeat(40) } } }) {
+  return mockFetch(async (url, options = {}) => {
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return forbidden ? new Response(JSON.stringify({permissions:{pull:false},owner:{login:'Cameronrlewis'}})) : accessibleRepo();
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/123') return new Response(JSON.stringify(report));
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo/actions/runs/9') return new Response(JSON.stringify({ id: 9, event }));
+    const pageMatch = /^https:\/\/api\.github\.com\/repos\/Cameronrlewis\/repo\/actions\/runs\/9\/artifacts\?per_page=100&page=(\d+)$/.exec(url);
+    if (pageMatch) { const rows = bundles || (bundle ? [bundle] : []), page = +pageMatch[1]; return new Response(JSON.stringify({ artifacts: rows.slice((page - 1) * 100, page * 100) })); }
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/124/zip') {
+      assert.equal(options.redirect, 'manual', 'GitHub redirect must not forward the token');
+      assert.ok(new Headers(options.headers).has('Authorization'), 'GitHub API request stays authenticated');
+      return new Response(null, { status: 302, headers: { Location: 'https://blob.example/z' } });
+    }
+    assert.equal(url, 'https://blob.example/z');
+    const blobHeaders = new Headers(options.headers);
+    assert.equal(blobHeaders.get('Authorization'), null, 'never send the GitHub token to the redirected host');
+    assert.deepEqual([...blobHeaders.keys()], ['range'], 'probe and all ZIP ranges send only Range');
+    // workerd rejects redirect 'error'; 'manual' plus the 206 check refuses any further redirect.
+    assert.equal(options.redirect, 'manual', 'signed-URL fetch must not follow further redirects');
+    const m = /^bytes=(\d+)-(\d+)$/.exec(blobHeaders.get('Range') || '');
+    if (!m || !rangeOk) return new Response(zip, { status: 200 });
+    const payloadStart = 30 + Buffer.byteLength('0/fab-P-bbbbbbb.zip') + 4;
+    const bodyEnd = shortPayload && +m[1] === payloadStart ? +m[2] : +m[2] + 1;
+    return new Response(zip.subarray(+m[1], bodyEnd), { status: 206, headers: { 'Content-Range': badRange ? `bytes 1-1/${zip.length}` : `bytes ${m[1]}-${Math.min(+m[2], zip.length - 1)}/${zip.length}` } });
+  });
+}
+const downloadEnvelope = (head = 'b'.repeat(40)) => Buffer.from(JSON.stringify({ files: [], head }));
+const downloadZip = (head) => makeZip([{ name: '0/fab-P-bbbbbbb.zip', data: Buffer.from('PK-fab') }, { name: '0/P-bbbbbbb-schematic.pdf', data: Buffer.from('%PDF-1.7'), deflate: true },
+  { name: '0/P-bbbbbbb-board.step', data: Buffer.from('ISO-10303') }, { name: '0/P-bbbbbbb-board.glb', data: Buffer.from('glTF') }, { name: '1/Q-bbbbbbb-schematic.pdf', data: Buffer.from('%PDF-Q') },
+  { name: '0/downloads.json', data: downloadEnvelope(head) }, { name: '1/downloads.json', data: downloadEnvelope(head) }]);  // envelopes last, so the first-entry offsets above stay valid
+
+test('download route streams attachments without sending the GitHub token to the redirected host', async () => {
+  const sealed = await signedIn(), restore = downloadFetch({ zip: downloadZip() });
+  try {
+    for (const [path, type, name, body] of [['0/fab', 'application/zip', 'fab-P-bbbbbbb.zip', 'PK-fab'], ['0/pdf', 'application/pdf', 'P-bbbbbbb-schematic.pdf', '%PDF-1.7'],
+      ['0/step', 'model/step', 'P-bbbbbbb-board.step', 'ISO-10303'], ['0/glb', 'model/gltf-binary', 'P-bbbbbbb-board.glb', 'glTF'], ['1/pdf', 'application/pdf', 'Q-bbbbbbb-schematic.pdf', '%PDF-Q']]) {
+      const response = await call(`/r/Cameronrlewis/repo/a/123/download/${path}`, { headers: { Cookie: `s=${sealed}` } });
+      assert.equal(response.status, 200, path); assert.equal(response.headers.get('Content-Type'), type);
+      assert.equal(response.headers.get('Content-Disposition'), `attachment; filename="${name}"`);
+      assert.equal(await response.text(), body);
+    }
+  } finally { restore(); }
+});
+
+test('download route answers 404 JSON for every unavailable case', async () => {
+  const sealed = await signedIn(), headers = { Cookie: `s=${sealed}` };
+  for (const [label, settings, path] of [
+    ['no bundle', { zip: downloadZip(), bundle: null }, '0/fab'], ['expired bundle', { zip: downloadZip(), bundle: { id: 124, name: 'kicad-review-downloads-bbbbbbb', expired: true, workflow_run: { id: 9 } } }, '0/fab'],
+    ['wrong bundle name', { zip: downloadZip(), bundle: { id: 124, name: 'other', expired: false } }, '0/fab'], ['no such project folder', { zip: downloadZip() }, '2/fab'],
+    ['no such kind in folder', { zip: downloadZip() }, '1/glb'], ['range ignored', { zip: downloadZip(), rangeOk: false }, '0/fab'],
+    ['mismatched range', { zip: downloadZip(), badRange: true }, '0/fab'],
+    ['wrong head only', { zip: downloadZip(), bundle: {id:125,name:'kicad-review-downloads-ccccccc',expired:false,workflow_run:{id:9}} }, '0/fab'],
+    ['another run', { zip: downloadZip(), bundle: {id:124,name:'kicad-review-downloads-bbbbbbb',expired:false,workflow_run:{id:10}} }, '0/fab'],
+    ['not a zip', { zip: Buffer.from('this is not a zip archive but is long enough') }, '0/fab'],
+    ['report is not a review', { zip: downloadZip(), report: { name: 'evil.html', workflow_run: { id: 9 } } }, '0/fab'],
+    ['report name head differs from its run head', { zip: downloadZip(), report: { name: 'kicad-review-aaaaaaa-ccccccc-pass.html', workflow_run: { id: 9, head_sha: 'b'.repeat(40) } } }, '0/fab'],
+    ['design context is not a report', { zip: downloadZip(), report: { name: 'kicad-design-bbbbbbb.context.json', workflow_run: { id: 9, head_sha: 'b'.repeat(40) } } }, '0/fab'],
+    ['envelope head differs', { zip: downloadZip('b'.repeat(39) + 'c') }, '0/fab']]) {
+    const restore = downloadFetch(settings);
+    try {
+      const response = await call(`/r/Cameronrlewis/repo/a/123/download/${path}`, { headers });
+      assert.equal(response.status, 404, label); assert.deepEqual(await response.json(), { error: 'Download unavailable' }, label);
+    } finally { restore(); }
+  }
+});
+
+test('download route matches exact head, refuses repository denial and errors short payload streams', async () => {
+  const sealed = await signedIn(), headers = { Cookie: `s=${sealed}` };
+  const exact = {id:124,name:'kicad-review-downloads-bbbbbbb',expired:false,workflow_run:{id:9,head_sha:'b'.repeat(40)}};
+  let restore = downloadFetch({zip:downloadZip(),bundles:[{...exact,id:125,name:'kicad-review-downloads-ccccccc'}, exact]});
+  try { assert.equal((await call('/r/Cameronrlewis/repo/a/123/download/0/fab',{headers})).status,200); } finally {restore();}
+  // downloadFetch asserts every upstream URL; any artifact call following denial fails this test.
+  restore = mockFetch(async url => {
+    assert.equal(url,'https://api.github.com/repos/Cameronrlewis/repo');
+    return new Response(JSON.stringify({permissions:{pull:false},owner:{login:'Cameronrlewis'}}));
+  });
+  try { const denied=await call('/r/Cameronrlewis/repo/a/123/download/0/fab',{headers}); assert.equal(denied.status,404); assert.match(await denied.text(), /Can&#39;t open this page/); } finally {restore();}
+  restore=downloadFetch({zip:downloadZip(),shortPayload:true});
+  try { const response=await call('/r/Cameronrlewis/repo/a/123/download/0/fab',{headers}); assert.equal(response.status,200); await assert.rejects(response.arrayBuffer(), /bad range length/); } finally {restore();}
+});
+
+test('download bundle is chosen exactly across pages and must match the full head', async () => {
+  const siblings = Array.from({ length: 100 }, (_, i) => ({ id: 1000 + i, name: `kicad-review-downloads-ccc${String(i).padStart(4, '0')}`, expired: false, workflow_run: { id: 9, head_sha: 'c'.repeat(40) } }));
+  const exact = { id: 124, name: 'kicad-review-downloads-bbbbbbb', expired: false, workflow_run: { id: 9, head_sha: 'b'.repeat(40) } };
+  const headers = { Cookie: `s=${await signedIn()}` };
+  // The matching bundle sits on page two behind 100 sibling artifacts.
+  let restore = downloadFetch({ zip: downloadZip(), bundles: [...siblings, exact] });
+  try { assert.equal((await call('/r/Cameronrlewis/repo/a/123/download/0/fab', { headers })).status, 200); } finally { restore(); }
+  // Two matching bundles in one run: refused rather than guessed.
+  restore = downloadFetch({ zip: downloadZip(), bundles: [exact, { ...exact, id: 125 }] });
+  try { assert.equal((await call('/r/Cameronrlewis/repo/a/123/download/0/fab', { headers })).status, 404); } finally { restore(); }
+  // The same 7-character head with a different full commit: refused.
+  restore = downloadFetch({ zip: downloadZip(), bundle: { ...exact, workflow_run: { id: 9, head_sha: 'b'.repeat(39) + 'c' } } });
+  try { assert.equal((await call('/r/Cameronrlewis/repo/a/123/download/0/fab', { headers })).status, 404); } finally { restore(); }
+  // A design snapshot selects only the design bundle family, never a review bundle with the same head7.
+  restore = downloadFetch({ zip: downloadZip(), report: { name: 'kicad-design-bbbbbbb.html', workflow_run: { id: 9, head_sha: 'b'.repeat(40) } } });
+  try { assert.equal((await call('/r/Cameronrlewis/repo/a/123/download/0/fab', { headers })).status, 404); } finally { restore(); }
+});
+
+test('download route binds the report name head to the envelope head, including manual and design runs', async () => {
+  // workflow_dispatch reviews the head given by hand; workflow_run.head_sha is the dispatch ref's tip.
+  const headers = { Cookie: `s=${await signedIn()}` }, tip = { id: 9, head_sha: 'd'.repeat(40) };
+  const report = { name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', workflow_run: tip }, bundle = { id: 124, name: 'kicad-review-downloads-bbbbbbb', expired: false, workflow_run: tip };
+  for (const [label, settings, status] of [['manual run', { zip: downloadZip(), event: 'workflow_dispatch', report, bundle }, 200],
+    ['pull request run whose envelope differs from its run head', { zip: downloadZip(), report, bundle }, 404],
+    ['manual run whose envelope head is not the report head', { zip: downloadZip('c'.repeat(40)), event: 'workflow_dispatch', report, bundle }, 404],
+    ['manual run whose bundle metadata names another head', { zip: downloadZip(), event: 'workflow_dispatch', report, bundle: { ...bundle, workflow_run: { id: 9, head_sha: 'b'.repeat(40) } } }, 404],
+    ['design snapshot', { zip: downloadZip(), report: { name: 'kicad-design-bbbbbbb.html', workflow_run: { id: 9, head_sha: 'b'.repeat(40) } }, bundle: { ...bundle, name: 'kicad-design-downloads-bbbbbbb', workflow_run: { id: 9, head_sha: 'b'.repeat(40) } } }, 200]]) {
+    const restore = downloadFetch(settings);
+    try {
+      const response = await call('/r/Cameronrlewis/repo/a/123/download/0/fab', { headers });
+      assert.equal(response.status, status, label);
+      if (status === 200) assert.equal(await response.text(), 'PK-fab', label);
+    } finally { restore(); }
+  }
+});
+
+test('download route requires sign-in and a numeric index and known kind', async () => {
+  const restore = downloadFetch({ zip: downloadZip() });
+  try {
+    const anonymous = await call('/r/Cameronrlewis/repo/a/123/download/0/fab');
+    assert.equal(anonymous.status, 302); assert.match(anonymous.headers.get('Location'), /^\/login\?next=/);
+    const sealed = await signedIn();
+    for (const path of ['0/exe', '../fab', 'x/fab', '0/fab/extra']) assert.equal((await call(`/r/Cameronrlewis/repo/a/123/download/${path}`, { headers: { Cookie: `s=${sealed}` } })).status, 404, path);
+  } finally { restore(); }
 });
