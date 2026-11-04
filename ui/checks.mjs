@@ -7715,6 +7715,12 @@ CHECKS.push(["design revisions thumbnails: every row has an image or a placehold
 
 // ---- Design report (D.mode === "single"): one revision, nothing compared ----
 // Turns the loaded comparison report into the data a design snapshot has: head side only, nothing changed, nothing new.
+// A report whose data has a board still or PcbDraw plots inlines review3d.js (inline_page has_poster; the site's
+// currentReport hasPoster). The plain dev page (ui/review.html) does not, so a check that adds that data loads it as well.
+const WITH_REVIEW3D = `
+  if (!window.Review3D) await new Promise((resolve, reject) => { const s = document.createElement('script'); s.src = 'review3d.js';
+    s.onload = resolve; s.onerror = () => reject(new Error('review3d.js did not load')); document.head.appendChild(s); });
+`;
 const TO_SINGLE = `
   D.mode = 'single'; D.base = null; D.snapshot = {ref:'main', sha:D.head, committedAt:'2026-10-24T10:00:00Z', message:'Move R16 <b>bold</b>'};
   for (const p of D.projects) {
@@ -7909,6 +7915,7 @@ CHECKS.push(
   `],
   ["design page: the poster and header fit their docks and the board still is decoded once", "", `
     ${TO_SINGLE}
+    ${WITH_REVIEW3D}
     const png = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=='), c => c.charCodeAt(0));
     const gz = new Uint8Array(await new Response(new Blob([png]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
     let decodeCount = 0;
@@ -7967,6 +7974,7 @@ CHECKS.push(
 );
 CHECKS.push(["design PcbDraw card: front plot, back toggle, note when skipped", "", `
   ${TO_SINGLE}
+  ${WITH_REVIEW3D}
   const settled = () => { const c = document.querySelector('#nav .design-pcbdraw'), st = c?.querySelector('.pcbdraw-stage'), b = c?.querySelector('button[data-face="back"]');
     return c && (!st || st.querySelector('img[data-face="front"]') && (!b || b.onclick)); };
   const setPlot = async (value) => { proj().board.pcbdraw = {head: value, base: null}; await applyState({p: 0, v: 'sheet:/'}); renderNav(); for (let n = 0; n < 60 && !settled(); n++) await new Promise(r => setTimeout(r, 50)); };
