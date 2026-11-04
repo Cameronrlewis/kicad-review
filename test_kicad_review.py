@@ -10667,6 +10667,32 @@ def test_f1_sheetfile_containment_and_hierarchy():
                 kr.sheet_pages('base/P', 'B')
                 kr.sheet_pages('head/P', 'H2')
             assert err.getvalue().count("is outside the revision; skipped") == 2, err.getvalue()
+
+            # Nested 'base' or 'head' segment in proj_dir uses the revision prefix, not the last segment.
+            assert kr.revision_root('head/hw/head/P') == os.path.realpath('head')
+            assert kr.revision_root('./head/hw/head/P') == os.path.realpath('head')
+            assert kr.revision_root('base/hw/base/P') == os.path.realpath('base')
+            write(t, {
+                'head/hw/Shared/common.kicad_sch': '(kicad_sch (symbol (uuid "s1") (property "Reference" "S1")))',
+                'head/hw/head/P/H.kicad_sch': '(kicad_sch (uuid "root") '
+                    + sheet('Shared', '../../Shared/common.kicad_sch', 'shared') + ')'
+            })
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                nested_pages = kr.sheet_pages('head/hw/head/P', 'H')
+            assert [p['name'] for p in nested_pages] == ['H', 'Shared'], nested_pages
+            assert 'outside the revision' not in err.getvalue()
+
+            # Escaping out of the revision root from a nested project directory is still blocked.
+            write(t, {
+                'head/hw/head/P/H2.kicad_sch': '(kicad_sch (uuid "root") '
+                    + sheet('Escape', '../../../../base/P/private.kicad_sch', 'esc') + ')'
+            })
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                esc_pages = kr.sheet_pages('head/hw/head/P', 'H2')
+            assert [p['name'] for p in esc_pages] == ['H2'], esc_pages
+            assert "sheet 'Escape' file '../../../../base/P/private.kicad_sch' is outside the revision; skipped" in err.getvalue()
         finally:
             os.chdir(old)
 

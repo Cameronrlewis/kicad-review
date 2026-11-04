@@ -1149,18 +1149,17 @@ def revision_root(proj_dir):
     """Return the absolute path of the revision root containing proj_dir.
 
     In production, kicad-review passes relative project directories prefixed with the
-    revision: 'base/<dir>' or 'head/<dir>' (and may have leading './' or be absolute paths).
-    Any path with a 'base' or 'head' segment is contained within that revision root,
-    preventing sheets from escaping into sibling revisions or the workspace root.
-    If no 'base' or 'head' segment exists (e.g. standalone tests), the containment root
-    is the realpath of proj_dir itself.
+    revision: 'base/<dir>' or 'head/<dir>' (and may have leading './').
+    For relative paths starting with 'base' or 'head', that first segment is the revision
+    prefix and defines the revision root, preventing sheets from escaping into sibling
+    revisions or the workspace root.
+    If no 'base' or 'head' prefix exists (e.g. standalone tests) or proj_dir is an
+    absolute path, the containment root is the realpath of proj_dir itself.
     """
-    p = pathlib.Path(proj_dir).resolve() if os.path.isabs(proj_dir) else pathlib.Path(os.path.normpath(proj_dir))
-    parts = p.parts
-    for i in range(len(parts) - 1, -1, -1):
-        if parts[i] in ("base", "head"):
-            sub = pathlib.Path(*parts[:i + 1])
-            return os.path.realpath(str(sub))
+    if not os.path.isabs(proj_dir):
+        parts = pathlib.Path(os.path.normpath(proj_dir)).parts
+        if parts and parts[0] in ("base", "head"):
+            return os.path.realpath(parts[0])
     return os.path.realpath(proj_dir)
 
 
