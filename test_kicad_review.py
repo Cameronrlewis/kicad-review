@@ -10286,6 +10286,40 @@ def test_f4_render_and_release_cache():
                 kr.cmd_render(None)
                 assert len(render_side_calls) == 2 and len(release_calls) == 3 and len(download_calls) == 2
 
+                # Direct unit test: restore_renders clears stale review/<p>/<side>/fab before copying cache
+                stale_restore_fab = pathlib.Path("review/p/head/fab/stale-restore.txt")
+                stale_restore_fab.parent.mkdir(parents=True, exist_ok=True)
+                stale_restore_fab.write_text("stale-restore", encoding="utf-8")
+                assert stale_restore_fab.is_file()
+                kr.restore_renders(None)
+                assert not stale_restore_fab.exists(), "restore_renders must remove stale review/<p>/<side>/fab"
+                assert (pathlib.Path("review/p/head/fab/P-review-jlcpcb-positions.csv")).is_file(), "restore_renders copies cached fab"
+
+                # Direct unit test: cache_renders rmtree removes stale files from an existing cache directory
+                stale_cache_file = head_cache / "stale-cache-leftover.txt"
+                stale_cache_file.write_text("stale-cache", encoding="utf-8")
+                assert stale_cache_file.is_file()
+                assert not (pathlib.Path("review/p/head") / "stale-cache-leftover.txt").exists()
+                kr.cache_renders(None)
+                assert not stale_cache_file.exists(), "cache_renders must rmtree existing cache directory so stale files are removed"
+                assert (head_cache / ".complete").is_file()
+
+                # Direct unit test: cmd_render partial-hit path clears stale fab and skips render_side
+                shutil.rmtree(head_cache / "fab")
+                assert not kr.render_cache_complete(head_cache, prj, "head", srel), "missing fab invalidates full cache"
+                assert kr.render_cache_complete(head_cache, prj, "head", srel, check_release=False), "non-release cache is complete"
+                stale_partial_fab = pathlib.Path("review/p/head/fab/stale-partial.txt")
+                stale_partial_fab.parent.mkdir(parents=True, exist_ok=True)
+                stale_partial_fab.write_text("stale-partial", encoding="utf-8")
+                render_side_calls.clear()
+                release_calls.clear()
+                download_calls.clear()
+                kr.cmd_render(None)
+                assert len(render_side_calls) == 0, f"partial-hit path must not call render_side: {render_side_calls}"
+                assert [c[0] for c in release_calls] == ["head/p/P.kicad_pro"], f"only head release was retried: {release_calls}"
+                assert not stale_partial_fab.exists(), "cmd_render partial-hit must clear stale fab directory before release rebuild"
+                assert kr.render_cache_complete(head_cache, prj, "head", srel), "head cache is complete after partial-hit release rebuild"
+
             # Finding 10: Re-running with another fabrication preset clears stale package files in fab/.
             spcbway = copy.deepcopy(srel)
             spcbway["fabrication"]["preset"] = "pcbway"
