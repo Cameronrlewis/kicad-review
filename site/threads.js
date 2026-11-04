@@ -66,10 +66,10 @@ export const threadMutation = (op) => `mutation($id:ID!){${op}ReviewThread(input
 
 // Shared bounded pagination helper for GitHub REST list endpoints (100 items/page, max 10 pages).
 // Bound hit: ok is false (callers that need a complete scan fail closed); items holds the pages read.
-export async function ghPages(ghFn, path, token, extract = x => x) {
+export async function ghPages(ghFn, path, token, extract = x => x, maxPages = 10) {
   const sep = path.includes('?') ? '&' : '?';
   const items = [];
-  for (let page = 1; page <= 10; page += 1) {
+  for (let page = 1; page <= maxPages; page += 1) {
     const suffix = page === 1 ? 'per_page=100' : `per_page=100&page=${page}`;
     const response = await ghFn(`${path}${sep}${suffix}`, token);
     if (!response.ok) return { ok: false, response };

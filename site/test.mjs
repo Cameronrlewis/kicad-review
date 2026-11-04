@@ -3510,6 +3510,27 @@ test('bench-t8 start caps calls, deduplicates repositories and joins only record
   } finally { restore(); }
 });
 
+
+test('finding 2: home stays inside the free-plan subrequest budget when every repository has thousands of artifacts', async () => {
+  const sealed = await signedIn(); const calls = [];
+  const restore = mockFetch(async url => {
+    calls.push(url);
+    if (url.endsWith('/user/installations')) return Response.json({ installations: Array.from({ length: 5 }, (_, id) => ({ id })) });
+    if (url.includes('/repositories?')) return Response.json({ repositories: Array.from({ length: 5 }, (_, i) => ({ owner: { login: 'Cameronrlewis' }, name: `repo${i}`, pushed_at: `2026-10-${10 + i}T00:00:00Z` })) });
+    // Every page is full: the listing never ends inside any page bound.
+    if (url.includes('/actions/artifacts?')) return Response.json({ artifacts: Array.from({ length: 100 }, (_, i) => ({ id: i, name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', created_at: '2026-10-16T10:00:00Z', workflow_run: { id: 77, head_sha: 'b'.repeat(40), head_branch: 'topic' } })) });
+    if (url.includes('/actions/runs?')) return Response.json({ workflow_runs: [] });
+    if (url.includes('/pulls?')) return Response.json([]);
+    throw new Error(`Unexpected ${url}`);
+  });
+  try {
+    const body = await (await call('/', { headers: { Cookie: `s=${sealed}` } })).text();
+    // 1 installations + 5 repository lists + 5 × (3 artifact pages + runs + pulls); the free plan allows 50.
+    assert.equal(calls.length, 31);
+    assert.doesNotMatch(body, /could not be loaded/);
+    assert.equal((body.match(/href="\/r\/Cameronrlewis\/repo\d\/a\/\d+"/g) || []).length >= 20, true);
+  } finally { restore(); }
+});
 test('bench-t8 retains available reports when run and PR APIs fail', async () => {
   const sealed = await signedIn();
   const restore = mockFetch(async url => {

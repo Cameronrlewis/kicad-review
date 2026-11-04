@@ -606,8 +606,8 @@ function repoPath(owner, repo) {
 }
 
 // Listing pages (here and branches, tags, pulls) show what the 10-page bound read; detection paths use ghPages directly and fail closed.
-async function artifactList(owner, repo, token) {
-  const paged = await ghPages(gh, `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/artifacts`, token, d => d?.artifacts);
+async function artifactList(owner, repo, token, maxPages = 10) {
+  const paged = await ghPages(gh, `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/artifacts`, token, d => d?.artifacts, maxPages);
   return paged.overflow ? { ok: true, items: paged.items } : paged;
 }
 
@@ -624,8 +624,9 @@ async function home(request, env) {
   }
   let repositories = [], recent = [], activity = [], limited = false;
   const errors = [];
-  // bench-t8: request-local promise cache; at most 21 GitHub calls (1 + 5 + 5×3).
-  // No per-report requests, pagination fan-out, or cross-user cached responses.
+  // bench-t8: request-local promise cache; at most 31 GitHub calls (1 + 5 + 5×(3 artifact pages + runs + pulls)),
+  // inside the free plan's 50 subrequests with a token refresh. Artifacts list newest first, so 3 pages
+  // cover recent reviews. No per-report requests, deeper pagination, or cross-user cached responses.
   const cache = new Map();
   const json = path => {
     if (!cache.has(path)) cache.set(path, (async () => {
@@ -651,7 +652,7 @@ async function home(request, env) {
       const owner = repo.owner.login;
       const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo.name)}`;
       const [artifactsPaged, runs, pulls] = await Promise.all([
-        artifactList(owner, repo.name, active.token).catch(() => null),
+        artifactList(owner, repo.name, active.token, 3).catch(() => null),
         json(`${root}/actions/runs?per_page=20`).catch(() => null),
         json(`${root}/pulls?state=all&sort=updated&direction=desc&per_page=20`).catch(() => null),
       ]);
