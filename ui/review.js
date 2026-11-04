@@ -13,7 +13,9 @@ let THREADS_ON = parent !== window && !!D.settings?.threads?.enabled;
 let ISSUES_ON = parent !== window && !!D.settings?.issues?.enabled;
 S.issues = null;
 S.units = "mm"; S.grid = true; S.imageSelection = null;
-const readyMessage = () => ({ kicadReviewReady: true, threads: THREADS_ON, issues: ISSUES_ON, blockMerge: THREADS_ON && !!D.settings?.threads?.block_merge });
+// A design report tells the hosted wrapper its recorded ref, date and subject; the wrapper checks and shows them as text.
+const readyMessage = () => ({ kicadReviewReady: true, threads: THREADS_ON, issues: ISSUES_ON, blockMerge: THREADS_ON && !!D.settings?.threads?.block_merge,
+  ...(single() ? { designSnapshot: { ref: D.snapshot?.ref, sha: D.snapshot?.sha, committedAt: D.snapshot?.committedAt, message: D.snapshot?.message } } : {}) });
 const validThread = t => t && t.id !== Object(t.id) && Object(t.id) instanceof String && (t.resolved === true || t.resolved === false) && t.anchor && t.anchor === Object(t.anchor)
   && t.anchor.v === 1 && Number.isFinite(t.anchor.x) && Number.isFinite(t.anchor.y) && Array.isArray(t.comments);
 function acceptThreads(list) {
