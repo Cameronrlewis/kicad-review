@@ -10156,6 +10156,20 @@ def test_f3_malformed_sexpr():
             (cache / ".complete").write_text("{}", encoding="utf-8")
             with patch.object(kr, "IMAGE_RENDERER", "kicad-cli-10.0.6"):
                 assert kr.image_cache_complete(cache, p, "base") is False
+
+            # Direct board_layers call on malformed PCB surfaces ValueError (finding 3) instead of IndexError
+            bad_pcb = pathlib.Path(td, "bad.kicad_pcb")
+            bad_pcb.write_text("(kicad_pcb\n  (layers\n", encoding="utf-8")
+            try:
+                kr.board_layers(str(bad_pcb))
+                raise AssertionError("malformed PCB accepted by board_layers")
+            except ValueError as exc:
+                assert "malformed S-expression" in str(exc)
+
+            # Malformed PCB does not crash render_cache calculation
+            det = {"base": "a" * 40, "head": "b" * 40, "projects": [p]}
+            rc = kr.render_cache(p, "base", det, settings)
+            assert rc is not None and rc.name
         finally:
             os.chdir(old)
 

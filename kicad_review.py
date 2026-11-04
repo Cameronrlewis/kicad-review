@@ -917,8 +917,12 @@ def glb_input_digest(p, side):
 def image_export_identity(p, side):
     """Explicit image inputs shared by host restore and the pinned renderer."""
     pcb = board_path(p, side)
+    try:
+        layers = board_layers(pcb) if os.path.isfile(pcb) else []
+    except (OSError, ValueError):
+        layers = []
     return {'renderer': IMAGE_RENDERER, 'options': IMAGE_EXPORT_OPTIONS,
-            'layers': board_layers(pcb) if os.path.isfile(pcb) else [], 'palettes': IMAGE_PALETTES}
+            'layers': layers, 'palettes': IMAGE_PALETTES}
 
 
 def image_cache_complete(cache, p, side):
