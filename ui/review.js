@@ -1741,7 +1741,7 @@ function afterDraw(view) {
           img.addEventListener("load", retry, { once: true });
           img.addEventListener("error", retry, { once: true });
         }
-        requestAnimationFrame(retry);
+        if (!pendingImages.length) requestAnimationFrame(retry);
       }
       return;
     }

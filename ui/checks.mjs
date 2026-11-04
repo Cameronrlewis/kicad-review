@@ -7050,7 +7050,7 @@ CHECKS.push(
     Object.defineProperty(img, 'naturalWidth', { get: () => complete ? 100 : 0, configurable: true });
     stage.appendChild(img);
     afterDraw(currentView());
-    await frames();
+    for (let i = 0; i < 35; i++) await frames();
     if (window.reviewViewReady !== null) { img.remove(); return 'stamped before image settled'; }
     complete = true;
     img.dispatchEvent(new Event('load'));
