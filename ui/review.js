@@ -236,7 +236,8 @@ async function fillDesignPcbDrawCard(p) {
       }
     }
     const btn = card.querySelector('button[data-face="back"]');
-    if (btn) {
+    if (btn && !stage.querySelector('img[data-face="back"]')) btn.parentElement.remove();   // no back plot decoded: no toggle to an empty card
+    else if (btn) {
       let currentFace = "front";
       btn.onclick = () => {
         currentFace = currentFace === "front" ? "back" : "front";

@@ -7151,7 +7151,9 @@ CHECKS.push(
 );
 CHECKS.push(["design PcbDraw card: front plot, back toggle, note when skipped", "", `
   ${TO_SINGLE}
-  const setPlot = async (value) => { proj().board.pcbdraw = {head: value, base: null}; await applyState({p: 0, v: 'sheet:/'}); renderNav(); await new Promise(r => setTimeout(r, 200)); };
+  const settled = () => { const c = document.querySelector('#nav .design-pcbdraw'), st = c?.querySelector('.pcbdraw-stage'), b = c?.querySelector('button[data-face="back"]');
+    return c && (!st || st.querySelector('img[data-face="front"]') && (!b || b.onclick)); };
+  const setPlot = async (value) => { proj().board.pcbdraw = {head: value, base: null}; await applyState({p: 0, v: 'sheet:/'}); renderNav(); for (let n = 0; n < 60 && !settled(); n++) await new Promise(r => setTimeout(r, 50)); };
   const svg = (fill) => new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg" width="40" height="25"><rect width="40" height="25" fill="' + fill + '"/></svg>');
   const gz = async (bytes) => btoa(String.fromCharCode(...new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer())));
   D.blobs.dppcbf = await gz(svg('#2a6')); D.blobs.dppcbb = await gz(svg('#a26'));
@@ -7164,6 +7166,8 @@ CHECKS.push(["design PcbDraw card: front plot, back toggle, note when skipped", 
   toggle.click(); await new Promise(r => setTimeout(r, 100));
   const shown = card.querySelector('img:not([hidden])');
   if (!shown || shown.dataset.face !== 'back') return 'Back toggle did not switch the plot';
+  await setPlot({front: 'dppcbf', back: 'dppcbmissing', note: ''});
+  if (document.querySelector('#nav .design-pcbdraw button[data-face="back"]')) return 'Back toggle shown without a back plot';
   await setPlot({front: null, back: null, note: 'PcbDraw skipped: no closed Edge.Cuts outline.'});
   const noted = document.querySelector('#nav .design-pcbdraw');
   if (!noted || !noted.textContent.includes('no closed Edge.Cuts outline') || noted.querySelector('img')) return 'skip note not shown alone';

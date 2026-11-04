@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
+const URL_ = URL;
 import {runInNewContext} from 'node:vm';
 
 // Exercise the production helper through the shared explicit test seam.
@@ -259,4 +260,23 @@ test('BR02 single renderer rejects a comparison fixture instead of skipping',asy
     proj:()=>({board:{parts3d:{}}}),Review3D:{state:{}},REVIEW_DATA:{mode:'comparison'}
   });
   assert.equal(result,'fixture is not single mode');
+});
+
+test('BR06 poster load aborted by a closed session does not poison the shared poster cache', async () => {
+  const png = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=='), c => c.charCodeAt(0));
+  const gz = new Uint8Array(await new Response(new Blob([png]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+  const window = {REVIEW_DATA:{blobs:{poster:Buffer.from(gz).toString('base64')}}};
+  const document = {createElement:() => ({}), head:{appendChild() {}}};
+  const module = {exports:{}};
+  let made = 0;
+  class Image { constructor() { this.dataset = {}; } decode() { return Promise.resolve(); } }
+  const URL = {createObjectURL:() => `blob:p${++made}`, revokeObjectURL() {}};
+  runInNewContext(readFileSync(new URL_('./review3d.js', import.meta.url), 'utf8'),
+    {window, document, DOMException, module, Response, Blob, DecompressionStream, Uint8Array, atob, Image, URL});
+  const dead = {dead:true, urls:new Set(), resourceCounts:{}};
+  await assert.rejects(module.exports.poster3d('head', 'poster', dead), {name:'AbortError'});
+  const image = await module.exports.poster3d('head', 'poster', null);
+  assert.ok(image, 'a later caller still gets the poster');
+  assert.equal(image.src, 'blob:p1');
+  assert.equal(made, 1, 'the blob is decoded into one shared URL');
 });

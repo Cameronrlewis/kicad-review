@@ -141,17 +141,18 @@ window.Review3D = (() => {
       return url;
     }
     if (!posterLoads.has(id)) {
+      // The shared load is session-free so one closed viewer cannot fail it for every later caller.
       const promise = (async () => {
         const b64 = window.REVIEW_DATA?.blobs?.[id];
         if (typeof b64 !== 'string') return null;
-        const bytes = await (s ? guardSession(s, gunzip(b64).arrayBuffer()) : gunzip(b64).arrayBuffer());
+        const bytes = await gunzip(b64).arrayBuffer();
         const url = URL.createObjectURL(new Blob([bytes], {type:'image/png'}));
         posterBlobUrls.set(id, url);
         return url;
-      })();
+      })().catch(error => { if (posterLoads.get(id) === promise) posterLoads.delete(id); throw error; });
       posterLoads.set(id, promise);
     }
-    const url = await posterLoads.get(id);
+    const url = await (s ? guardSession(s, posterLoads.get(id)) : posterLoads.get(id));
     if (s && url) { s.urls.add(url); s.resourceCounts.urls = s.urls.size; }
     return url;
   }
