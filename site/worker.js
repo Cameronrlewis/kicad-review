@@ -93,6 +93,7 @@ async function tokenRequest(env, fields) {
   try {
     const response = await fetch('https://github.com/login/oauth/access_token', {
       method: 'POST',
+      redirect: 'manual',  // a 3xx is not ok and fails closed; workerd rejects 'error'
       headers: { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
         client_id: env.GITHUB_CLIENT_ID,

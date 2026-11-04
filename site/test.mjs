@@ -425,6 +425,20 @@ test('a request with the old cookie arriving just after a completed rotation reu
     } finally { Date.now = realNow; }
   } finally { restore(); }
 });
+
+test('OAuth token exchanges never follow redirects, and a redirect fails closed', async () => {
+  const expired = await seal({ t: 'old-token', r: 'redirected-refresh', e: Date.now() - 1, re: Date.now() + 7_200_000, u: 'octocat' }, env);
+  const modes = [];
+  const restore = mockFetch(async (url, options = {}) => {
+    modes.push(options.redirect);
+    return new Response(null, { status: 302, headers: { Location: 'https://evil.example/token' } });
+  });
+  try {
+    const response = await call('/', { headers: { Cookie: `s=${expired}` } });
+    assert.match(await response.text(), /Sign in with GitHub/);
+    assert.deepEqual(modes, ['manual']);
+  } finally { restore(); }
+});
 test('unsafe next is ignored and login text is HTML escaped', async () => {
   const login = await call('/login?next=//evil.com');
   const state = cookieValue(login, 'st');
