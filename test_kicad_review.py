@@ -10364,6 +10364,7 @@ def test_f4_render_and_release_cache():
             # Finding 10: Re-running with another fabrication preset clears stale package files in fab/.
             spcbway = copy.deepcopy(srel)
             spcbway["fabrication"]["preset"] = "pcbway"
+            pcbway_cached_files = {}
             with patch.object(kr, "load_settings", return_value=spcbway), \
                  patch.object(kr, "render_tool_identity", return_value="KiCad 10.0.6"), \
                  patch.object(kr, "render_side"), \
@@ -10375,8 +10376,9 @@ def test_f4_render_and_release_cache():
                     paths = [f["path"] for f in summary["files"]]
                     assert paths and all("pcbway" in name and "jlcpcb" not in name for name in paths), (side, paths)
                     cached_fab = kr.render_cache(prj, side, det, spcbway) / "fab"
-                    cached_names = [f.name for f in cached_fab.iterdir()]
+                    cached_names = sorted(f.name for f in cached_fab.iterdir())
                     assert cached_names and all("pcbway" in name and "jlcpcb" not in name for name in cached_names), (side, cached_names)
+                    pcbway_cached_files[side] = cached_names
 
             # Re-running with checks.release off clears stale package files from review.
             sreloff = copy.deepcopy(spcbway)
@@ -10388,9 +10390,12 @@ def test_f4_render_and_release_cache():
                 kr.cmd_render(None)
                 for side in ("base", "head"):
                     assert not pathlib.Path(f"review/p/{side}/fab").exists(), f"stale fab/ must be removed when release check is off on {side}"
-                    # Assert on the pcbway-keyed cache dir: prior pcbway cache remains intact and uncorrupted.
+                    # Assert on the pcbway-keyed cache dir: prior pcbway cache fab directory exists and file names match earlier run.
                     cached_pcbway_fab = kr.render_cache(prj, side, det, spcbway) / "fab"
-                    assert cached_pcbway_fab.is_dir(), f"pcbway-keyed cache dir should remain intact on {side}"
+                    assert cached_pcbway_fab.is_dir(), f"pcbway-keyed cache fab directory should exist on {side}"
+                    assert sorted(f.name for f in cached_pcbway_fab.iterdir()) == pcbway_cached_files[side], (
+                        f"pcbway-keyed cache fab file names on {side} should match earlier pcbway run"
+                    )
 
             # Missing-project .kicad_pro branch: with release on and no .kicad_pro, stale fab/ is removed.
             snopro = copy.deepcopy(srel)
