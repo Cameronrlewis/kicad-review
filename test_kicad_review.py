@@ -11138,3 +11138,29 @@ for text in (_readme, _site_readme):
     assert "currently depends on a live Actions artifact" not in text, "release fallback is implemented (decision 5)"
     assert "owner-gated" not in text and "owner-approved scope reduction" not in text, "approved decisions are recorded, not gated"
 print("ok DP-S6 design setting and routes are documented")
+
+# Session E 4: the thumbnail source is the render folder's head poster (review/<project id>/head), not review/<project name>.
+with _DpTmp() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        head = "d" * 40
+        posters = {"": b"\x89PNG\r\n\x1a\nroot poster", "hw/main": b"\x89PNG\r\n\x1a\nnested poster"}
+        for folder, body in posters.items():
+            out = pathlib.Path("review", kr.project_id(folder), "head"); out.mkdir(parents=True)
+            (out / "poster.png").write_bytes(body)
+        settings = json.loads(json.dumps(kr.DEFAULT_SETTINGS)); settings["design"]["enabled"] = True
+        det = {"base": None, "head": head, "reason": kr.SNAPSHOT_REASON, "snapshot_settings": settings,
+               "snapshot": {"ref": "main", "sha": head, "committedAt": "2026-11-01T10:00:00+00:00", "message": "m"},
+               "projects": [{"dir": "", "name": "board", "status": "added"}, {"dir": "hw/main", "name": "main", "status": "added"}]}
+        write(t, {"review/detect.json": json.dumps(det)})
+        stub = lambda p, blobs, settings, waivers=None, change_offset=0, bom_sink=None, **kw: {"name": p["name"], "dir": p["dir"], "status": p["status"], "sheets": [], "board": {}, "changes": [], "checks": []}
+        with patch.dict(os.environ, {"GITHUB_OUTPUT": f"{t}/out"}, clear=True), patch("sys.stdout", new_callable=io.StringIO), patch.object(kr, "build_project", side_effect=stub):
+            kr.cmd_snapshot(None)
+        assert "thumbnails=true" in open(f"{t}/out").read()
+        plan = json.load(open("review/design/thumbnail-plan.json"))
+        assert [p["dir"] for p in plan["projects"]] == ["", "hw/main"], plan
+        assert [pathlib.Path(p["poster"]).read_bytes() for p in plan["projects"]] == [posters[""], posters["hw/main"]]
+    finally:
+        os.chdir(old_cwd)
+print("ok Session E 4 thumbnails read the render folder's head poster")

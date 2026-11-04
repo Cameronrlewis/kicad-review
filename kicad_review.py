@@ -6071,7 +6071,7 @@ def cmd_snapshot(args):
             fh.write(html)
     thumb_projects = []
     for p in selected:
-        src = pathlib.Path("review", p["name"], "head", "poster.png")
+        src = pathlib.Path("review", project_id(p["dir"]), "head", "poster.png")  # the render folder, as build_project reads it
         try:
             raw = src.read_bytes()
         except OSError:
