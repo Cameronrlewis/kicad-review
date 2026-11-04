@@ -5959,7 +5959,7 @@ with _DpTmp() as t:
 print("ok DP-S3 single-revision project skips base libraries, release and interface checks")
 
 # DP-S5: 02's still can exist without a model; all base artifacts are unreadable in single mode.
-import struct as _dpstruct, zlib as _dpzlib
+import builtins, contextlib, struct as _dpstruct, zlib as _dpzlib
 
 def _dpchunk(kind, data):
     return _dpstruct.pack('>I', len(data)) + kind + data + _dpstruct.pack('>I', _dpzlib.crc32(kind + data))
@@ -5970,50 +5970,136 @@ with _DpTmp() as t:
     old_cwd = os.getcwd()
     try:
         os.chdir(t)
-        write(t, {'head/H/H.kicad_pcb': _dp_pcb(''), 'review/H/head/drc.json': '{}', 'review/H/head/board.glb': 'head glb'})
+        head_parts = json.dumps([{'ref': 'R1', 'uuid': 'u1', 'hasModel': True}]).encode()
+        head_stats = json.dumps({'footprints': 1, 'withModel': 1, 'placeholders': 0, 'triangles': 10, 'primitives': 5, 'warnings': []}).encode()
+        head_manifest = json.dumps({
+            'hashes': {
+                'board.glb': hashlib.sha256(b'head glb').hexdigest(),
+                'parts.json': hashlib.sha256(head_parts).hexdigest(),
+                'stats.json': hashlib.sha256(head_stats).hexdigest(),
+            }
+        })
+        write(t, {
+            'head/H/H.kicad_pcb': _dp_pcb(''),
+            'review/H/head/drc.json': '{}',
+            'review/H/head/board.glb': 'head glb',
+            'review/H/head/board-processed.json': head_manifest,
+            'review/H/head/board-parts.json': head_parts.decode(),
+            'review/H/head/board-stats.json': head_stats.decode(),
+            'review/H/base/poster.png': 'poison base poster',
+            'review/H/base/board.glb': 'poison model',
+            'review/H/base/board-processed.json': '{"hashes": {}}',
+            'review/H/base/board-parts.json': '[{"ref":"U_POISON","uuid":"poison","hasModel":false}]',
+            'review/H/base/board-stats.json': '{"footprints":1,"withModel":0,"placeholders":1,"triangles":0,"primitives":0,"warnings":[]}',
+            'review/H/base/glb.log': 'poison glb log',
+            'review/H/base/poster.log': 'poison poster log',
+        })
         pathlib.Path('review/H/head/poster.png').write_bytes(_dp_png)
-        write(t, {'review/H/base/poster.png': 'poison base', 'review/H/base/board.glb': 'poison model'})
         settings = json.loads(json.dumps(kr.DEFAULT_SETTINGS))
         settings['design']['enabled'] = True
         settings['3d']['enabled'] = False
-        real_read, real_isfile, real_exists, real_osexists = pathlib.Path.read_bytes, os.path.isfile, pathlib.Path.exists, os.path.exists
+
+        real_read_bytes = pathlib.Path.read_bytes
+        real_read_text = pathlib.Path.read_text
+        real_path_open = pathlib.Path.open
+        real_open = builtins.open
+        real_exists = pathlib.Path.exists
+        real_is_file = pathlib.Path.is_file
+        real_is_dir = pathlib.Path.is_dir
+        real_isfile = os.path.isfile
+        real_isdir = os.path.isdir
+        real_osexists = os.path.exists
+        real_listdir = os.listdir
+        real_scandir = os.scandir
+
         def no_base(path):
-            assert '/base/' not in str(path), 'base filesystem probe: ' + str(path)
-        def read(path):
-            no_base(path); return real_read(path)
-        def isfile(path):
+            if isinstance(path, (str, bytes, os.PathLike)):
+                p = os.fsdecode(path).replace('\\', '/')
+                assert '/base/' not in p and not p.startswith('base/') and not p.endswith('/base'), 'base filesystem probe: ' + str(path)
+
+        def guarded_read_bytes(self, *args, **kw):
+            no_base(self); return real_read_bytes(self, *args, **kw)
+        def guarded_read_text(self, *args, **kw):
+            no_base(self); return real_read_text(self, *args, **kw)
+        def guarded_path_open(self, *args, **kw):
+            no_base(self); return real_path_open(self, *args, **kw)
+        def guarded_open(file, *args, **kw):
+            no_base(file); return real_open(file, *args, **kw)
+        def guarded_exists(self, *args, **kw):
+            no_base(self); return real_exists(self, *args, **kw)
+        def guarded_is_file(self, *args, **kw):
+            no_base(self); return real_is_file(self, *args, **kw)
+        def guarded_is_dir(self, *args, **kw):
+            no_base(self); return real_is_dir(self, *args, **kw)
+        def guarded_isfile(path):
             no_base(path); return real_isfile(path)
-        def exists(path):
-            no_base(path); return real_exists(path)
-        def osexists(path):
+        def guarded_isdir(path):
+            no_base(path); return real_isdir(path)
+        def guarded_osexists(path):
             no_base(path); return real_osexists(path)
-        with patch.object(pathlib.Path, 'read_bytes', read), patch.object(os.path, 'isfile', isfile), \
-             patch.object(pathlib.Path, 'exists', exists), patch.object(os.path, 'exists', osexists):
+        def guarded_listdir(path='.'):
+            no_base(path); return real_listdir(path)
+        def guarded_scandir(path='.'):
+            no_base(path); return real_scandir(path)
+
+        @contextlib.contextmanager
+        def poisoned_base_guard():
+            with patch.object(pathlib.Path, 'read_bytes', guarded_read_bytes), \
+                 patch.object(pathlib.Path, 'read_text', guarded_read_text), \
+                 patch.object(pathlib.Path, 'open', guarded_path_open), \
+                 patch.object(builtins, 'open', guarded_open), \
+                 patch.object(pathlib.Path, 'exists', guarded_exists), \
+                 patch.object(pathlib.Path, 'is_file', guarded_is_file), \
+                 patch.object(pathlib.Path, 'is_dir', guarded_is_dir), \
+                 patch.object(os.path, 'isfile', guarded_isfile), \
+                 patch.object(os.path, 'isdir', guarded_isdir), \
+                 patch.object(os.path, 'exists', guarded_osexists), \
+                 patch.object(os, 'listdir', guarded_listdir), \
+                 patch.object(os, 'scandir', guarded_scandir):
+                yield
+
+        with poisoned_base_guard():
             blobs = {}
             one = kr.build_project({'dir':'H','name':'H','status':'unchanged'}, blobs, settings, single=True)
-        board = one['board']
-        assert board['poster3d']['base'] is None
-        assert _dpgz.decompress(_dpb64.b64decode(blobs[board['poster3d']['head']])) == _dp_png
-        assert 'poster' not in board and not board.get('model3d', {}).get('head')
-        assert not any(b'poison' in _dpgz.decompress(_dpb64.b64decode(b)) for b in blobs.values())
+            board = one['board']
+            assert board['poster3d']['base'] is None
+            assert _dpgz.decompress(_dpb64.b64decode(blobs[board['poster3d']['head']])) == _dp_png
+            assert 'poster' not in board and not board.get('model3d', {}).get('head')
+            assert not any(b'poison' in _dpgz.decompress(_dpb64.b64decode(b)) for b in blobs.values())
 
-        # With 3d.enabled = True: still and GLB attach, but base remains completely unprobed
-        settings['3d']['enabled'] = True
-        with patch.object(pathlib.Path, 'read_bytes', read), patch.object(os.path, 'isfile', isfile), \
-             patch.object(pathlib.Path, 'exists', exists), patch.object(os.path, 'exists', osexists):
+            # Verify attachment, index and coverage reads directly under the poisoned-base guard
+            direct_board = {}
+            kr.attach3d(direct_board, 'review/H', {}, allowed_sides=('head',))
+            assert direct_board['poster3d']['head'] and direct_board['poster3d']['base'] is None
+            assert direct_board['parts3d']['head'] and direct_board['parts3d']['base'] is None
+            assert direct_board['coverage3dBySide']['head'] and direct_board['coverage3dBySide']['base'] is None
+            assert direct_board['coverage3d'] == json.loads(head_stats)
+
+            # Confirm that the guard positively catches base reads if base side were probed
+            try:
+                kr.attach3d({}, 'review/H', {}, allowed_sides=('base', 'head'))
+                raise AssertionError('poisoned base guard should have triggered on base attach3d')
+            except AssertionError as e:
+                assert 'base filesystem probe' in str(e), str(e)
+
+            # With 3d.enabled = True: still and GLB attach, but base remains completely unprobed
+            settings['3d']['enabled'] = True
             blobs3d = {}
             one3d = kr.build_project({'dir':'H','name':'H','status':'unchanged'}, blobs3d, settings, single=True)
-        board3d = one3d['board']
-        assert board3d['poster3d']['base'] is None
-        assert _dpgz.decompress(_dpb64.b64decode(blobs3d[board3d['poster3d']['head']])) == _dp_png
-        assert board3d['model3d']['base'] is None
-        assert _dpgz.decompress(_dpb64.b64decode(blobs3d[board3d['model3d']['head']])) == b'head glb'
-        assert not any(b'poison' in _dpgz.decompress(_dpb64.b64decode(b)) for b in blobs3d.values())
+            board3d = one3d['board']
+            assert board3d['poster3d']['base'] is None
+            assert _dpgz.decompress(_dpb64.b64decode(blobs3d[board3d['poster3d']['head']])) == _dp_png
+            assert board3d['model3d']['base'] is None
+            assert _dpgz.decompress(_dpb64.b64decode(blobs3d[board3d['model3d']['head']])) == b'head glb'
+            assert board3d['parts3d']['base'] is None and board3d['parts3d']['head']
+            assert board3d['coverage3dBySide']['base'] is None and board3d['coverage3dBySide']['head']
+            assert not any(b'poison' in _dpgz.decompress(_dpb64.b64decode(b)) for b in blobs3d.values())
     finally:
         os.chdir(old_cwd)
 
 # Cache regression: restore a revision first rendered as base as a later head;
 # delete only its poster and require a cache miss plus one still export, not repeated SVG/GLB exports.
+# Assert exactly one still render per eligible revision with 3d.enabled false then true.
 with _DpTmp() as t:
     old_cwd = os.getcwd()
     try:
@@ -6064,9 +6150,66 @@ with _DpTmp() as t:
             assert len(head_render_side) == 0, 'no repeated SVG exports for cached head'
             assert (base_cache / 'poster.png').is_file(), 'poster restored in cache'
 
+            # Warm cache: no repeated exports
+            calls.clear()
+            rs.reset_mock()
+            kr.cmd_render(None)
+            head_calls_warm = [c for c in calls if c[-1].startswith('head/')]
+            assert len(head_calls_warm) == 0, f'no repeated still or model exports when warm (3d off): {head_calls_warm}'
+
             blobs = {}
             one = kr.build_project(pr, blobs, settings, single=True)
             assert one['board']['poster3d']['head'] and one['board']['poster3d']['base'] is None
+
+            # --- 3d.enabled = True case: assert exactly one still plus one model export, no repeated export ---
+            settings_3d = copy.deepcopy(kr.DEFAULT_SETTINGS)
+            settings_3d['design']['enabled'] = True
+            settings_3d['3d']['enabled'] = True
+
+            det_3d = {'base': 'd'*40, 'head': 'e'*40, 'projects': [pr]}
+            pathlib.Path('review/detect.json').write_text(json.dumps(det_3d))
+            pathlib.Path('base/P/P.kicad_pcb').write_text('(kicad_pcb d_base)')
+            pathlib.Path('head/P/P.kicad_pcb').write_text('(kicad_pcb e_head)')
+            calls.clear()
+            rs.reset_mock()
+            with patch.object(kr, 'load_settings', return_value=settings_3d):
+                kr.cmd_render(None)
+                base_cache_3d = kr.render_cache(pr, 'base', det_3d, settings_3d)
+                assert kr.render_cache_complete(base_cache_3d, pr, 'base', settings_3d)
+
+                # Revision 'd'*40 becomes head in a later run
+                det_3d_head = {'base': 'f'*40, 'head': 'd'*40, 'projects': [pr]}
+                pathlib.Path('review/detect.json').write_text(json.dumps(det_3d_head))
+                pathlib.Path('base/P/P.kicad_pcb').write_text('(kicad_pcb f_base)')
+                pathlib.Path('head/P/P.kicad_pcb').write_text('(kicad_pcb d_base)')
+
+                # Delete only its poster
+                (base_cache_3d / 'poster.png').unlink()
+                assert not kr.render_cache_complete(base_cache_3d, pr, 'head', settings_3d), 'cache miss on deleted poster with 3d on'
+                calls.clear()
+                rs.reset_mock()
+
+                kr.cmd_render(None)
+                head_calls_3d = [c for c in calls if c[-1].startswith('head/')]
+                head_still_renders = [c for c in head_calls_3d if c[1:3] == ['pcb', 'render']]
+                head_glb_exports = [c for c in head_calls_3d if 'glb' in c]
+                assert len(head_still_renders) == 1, f'exactly one still render per revision: {head_still_renders}'
+                assert len(head_glb_exports) == 1, f'exactly one model export when 3d is on: {head_glb_exports}'
+                head_render_side_3d = [call for call in rs.call_args_list if call[0][0].startswith('head/')]
+                assert len(head_render_side_3d) == 0, 'no repeated SVG exports for cached head with 3d on'
+                assert (base_cache_3d / 'poster.png').is_file(), 'poster restored in cache'
+
+                # Verify warm cache does not repeat export
+                calls.clear()
+                rs.reset_mock()
+                kr.cmd_render(None)
+                head_calls_warm_3d = [c for c in calls if c[-1].startswith('head/')]
+                assert len(head_calls_warm_3d) == 0, f'no repeated still or model exports when warm (3d on): {head_calls_warm_3d}'
+
+                blobs_3d = {}
+                one_3d = kr.build_project(pr, blobs_3d, settings_3d, single=True)
+                assert one_3d['board']['poster3d']['head'] and one_3d['board']['poster3d']['base'] is None
+                assert one_3d['board']['model3d']['head'] and one_3d['board']['model3d']['base'] is None
     finally:
         os.chdir(old_cwd)
 

@@ -3234,14 +3234,12 @@ def artifact3d(raw, suffix, root=pathlib.Path('review/3d')):
     (root / name).write_bytes(packed)
     return {'digest': digest, 'artifactName': name, 'bytes': len(packed)}
 
-def attach3d(board, out, blobs, sides=("base", "head"), *, allowed_sides=None):
-    if allowed_sides is not None:
-        sides = allowed_sides
+def attach3d(board, out, blobs, allowed_sides=("base", "head")):
     """Attach stills independently, and coverage/index/assets only for verified processed sets."""
     board.pop('coverage3d', None)
     board.update({key:{side:None for side in ('base','head')}
                   for key in ('parts3d','poster3d','coverage3dBySide','assets3d')})
-    for side in sides:
+    for side in allowed_sides:
         folder = pathlib.Path(out,side)
         poster = folder / 'poster.png'
         try:
@@ -3343,7 +3341,7 @@ def read_optional_json(path, default=None):
 def build_project(p, blobs, settings, waivers=None, change_offset=0, *, single=False, context=None):
     """single=True: the design as it is at head. The base side may still be on disk; it is not read."""
     out = f"review/{project_id(p['dir'])}"
-    sides = [s for s in ("base", "head") if os.path.isdir(f"{out}/{s}") and not (single and s == "base")]
+    sides = [s for s in (("head",) if single else ("base", "head")) if os.path.isdir(f"{out}/{s}")]
     theme_paths = {side: read_optional_json(f'{out}/{side}/sheet-images.json', {}) for side in sides}
     pages_by_side = {side: sheet_pages(posixpath.join(side, p['dir']), p['name']) for side in sides}
     hotspot_ids = image_pair(None, None)
