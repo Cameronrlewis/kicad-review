@@ -91,6 +91,7 @@ Cloudflare Workers' free plan has 100,000 requests a day and costs $0. Reports a
 - A review whose artifact expired shows “expired — rerun”.
 - The report page's Copy link may be limited inside the sandbox.
 - Sign-in tokens last 8 hours and are refreshed for up to 6 months.
+- GitHub refresh tokens are one-use. Concurrent refreshes share one exchange through the `RefreshCoordinator` Durable Object (SQLite-backed, available on the free plan; it stores nothing). Without the `REFRESH` binding, refreshes are shared only within one isolate.
 
 ### Optional private-asset browser checks
 
