@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-const URL_ = URL;
 import {runInNewContext} from 'node:vm';
+const URL_ = URL;
 
 // Exercise the production helper through the shared explicit test seam.
 function cache() {

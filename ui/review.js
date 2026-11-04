@@ -160,30 +160,9 @@ async function fillDesignCard(p) {   // called by renderNav once the card is in 
     if (card.isConnected) card.remove();
   }
 }
-// designPoster wraps the public boundary already defined in 02 Task 6; verify its committed exports before wiring:
-//   Review3D.session()                  -> the live renderer session created by show(), or null after dispose()
-//   Review3D.poster3d(side, blobId, s)  -> Promise<HTMLImageElement|null>, owned by that session
-// Reuse those exact exports; report any committed-implementation mismatch as an integration finding.
-// 06 adds no decoder, blob-URL cache or session of its own.
-function designPoster(id) {
-  if (!window.Review3D?.poster3d) return Promise.resolve(null);
-  const session = window.Review3D.session();
-  return window.Review3D.poster3d("head", id, session);
-}
-const pcbdrawBlobUrls = new Map();
-addEventListener('pagehide', () => {
-  for (const url of pcbdrawBlobUrls.values()) URL.revokeObjectURL(url);
-  pcbdrawBlobUrls.clear();
-});
-async function pcbDrawBlobUrl(id) {
-  if (!id || !D.blobs?.[id]) return null;
-  if (pcbdrawBlobUrls.has(id)) return pcbdrawBlobUrls.get(id);
-  const bin = Uint8Array.from(atob(D.blobs[id]), c => c.charCodeAt(0));
-  const text = await new Response(new Blob([bin]).stream().pipeThrough(new DecompressionStream("gzip"))).text();
-  const url = URL.createObjectURL(new Blob([text], { type: "image/svg+xml" }));
-  pcbdrawBlobUrls.set(id, url);
-  return url;
-}
+// The still is a page-lifetime image from Review3D.poster3d with no session, so it works in sheet view and survives a viewer closing.
+const designPoster = id => window.Review3D?.poster3d ? window.Review3D.poster3d("head", id) : Promise.resolve(null);
+const pcbDrawBlobUrl = async id => (await ensureReview3D())?.blobUrl(id, "image/svg+xml") ?? null;   // 02's shared gunzip + blob-URL cache
 function designPcbDrawCard(p) {
   const head = p.board?.pcbdraw?.head;
   if (!head) return "";
@@ -212,7 +191,7 @@ async function fillDesignPcbDrawCard(p) {
       let img = stage.querySelector('img[data-face="front"]');
       if (!img) {
         img = document.createElement("img");
-        img.className = "design-poster design-pcbdraw-plot";
+        img.className = "design-pcbdraw-plot";
         img.dataset.face = "front";
         img.alt = `${p.name} front plot (PcbDraw)`;
         stage.appendChild(img);
@@ -226,7 +205,7 @@ async function fillDesignPcbDrawCard(p) {
         let img = stage.querySelector('img[data-face="back"]');
         if (!img) {
           img = document.createElement("img");
-          img.className = "design-poster design-pcbdraw-plot";
+          img.className = "design-pcbdraw-plot";
           img.dataset.face = "back";
           img.alt = `${p.name} back plot (PcbDraw)`;
           img.hidden = true;

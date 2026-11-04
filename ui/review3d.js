@@ -18,12 +18,7 @@ window.Review3D = (() => {
     s.dead = true; s.abort.abort(); settleFrame(s);
     for (const {reject} of s.pending.values()) reject(new DOMException('Viewer closed', 'AbortError'));
     s.pending.clear(); s.worker?.terminate(); s.worker = null;
-    for (const url of s.urls) {
-      URL.revokeObjectURL(url);
-      for (const [id, cachedUrl] of posterBlobUrls) {
-        if (cachedUrl === url) { posterBlobUrls.delete(id); posterLoads.delete(id); }
-      }
-    }
+    for (const url of s.urls) URL.revokeObjectURL(url);
     s.urls.clear(); clearTimeout(s.idleTimer); cancelAnimationFrame(s.raf); s.raf = 0;
     s.policy?.dispose();
     for (const remove of s.motionPreferences || []) remove();
@@ -131,34 +126,28 @@ window.Review3D = (() => {
       });
     } catch (error) { return Promise.reject(error); }
   }
-  const posterLoads = new Map();
-  const posterBlobUrls = new Map();
-  async function posterUrl(id, s) {
+  // One page-lifetime blob-URL cache for gzip blobs (posters, PcbDraw plots); revoked on pagehide, never by a viewer closing.
+  const blobLoads = new Map();
+  const blobUrls = new Map();
+  async function blobUrl(id, type, s = null) {
     if (!id) return null;
-    if (posterBlobUrls.has(id)) {
-      const url = posterBlobUrls.get(id);
-      if (s) { s.urls.add(url); s.resourceCounts.urls = s.urls.size; }
-      return url;
-    }
-    if (!posterLoads.has(id)) {
+    if (blobUrls.has(id)) return blobUrls.get(id);
+    if (!blobLoads.has(id)) {
       // The shared load is session-free so one closed viewer cannot fail it for every later caller.
       const promise = (async () => {
         const b64 = window.REVIEW_DATA?.blobs?.[id];
         if (typeof b64 !== 'string') return null;
         const bytes = await gunzip(b64).arrayBuffer();
-        const url = URL.createObjectURL(new Blob([bytes], {type:'image/png'}));
-        posterBlobUrls.set(id, url);
+        const url = URL.createObjectURL(new Blob([bytes], {type}));
+        blobUrls.set(id, url);
         return url;
-      })().catch(error => { if (posterLoads.get(id) === promise) posterLoads.delete(id); throw error; });
-      posterLoads.set(id, promise);
+      })().then(url => { if (!url) blobLoads.delete(id); return url; }, error => { blobLoads.delete(id); throw error; });
+      blobLoads.set(id, promise);
     }
-    const url = await (s ? guardSession(s, posterLoads.get(id)) : posterLoads.get(id));
-    if (s && url) { s.urls.add(url); s.resourceCounts.urls = s.urls.size; }
-    return url;
+    return s ? guardSession(s, blobLoads.get(id)) : blobLoads.get(id);
   }
-  async function poster3d(side, id, s = active) {
-    if (!id) return null;
-    const url = await posterUrl(id, s);
+  async function poster3d(side, id, s = null) {
+    const url = await blobUrl(id, 'image/png', s);
     if (!url) return null;
     const image = new Image(); image.dataset.poster = side; image.alt = side + ' revision 3D preview';
     image.src = url;
@@ -167,9 +156,9 @@ window.Review3D = (() => {
   }
   if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
     window.addEventListener('pagehide', () => {
-      for (const url of posterBlobUrls.values()) URL.revokeObjectURL(url);
-      posterBlobUrls.clear();
-      posterLoads.clear();
+      for (const url of blobUrls.values()) URL.revokeObjectURL(url);
+      blobUrls.clear();
+      blobLoads.clear();
     });
   }
   const loadThree = async s => {
@@ -840,8 +829,7 @@ window.Review3D = (() => {
     mesh.name='parts:missing';mesh.raycast=()=>{};return mesh;
   }
 
-  async function show(stage, project, appState, options = {}) {
-    const single = options.single !== undefined ? options.single : (window.REVIEW_DATA?.mode === "single");
+  async function show(stage, project, appState, {single = false} = {}) {
     window.Review3D.onStateChange?.({partSelection:null});
     dispose();
     const model = project.board.model3d || {}, sides = single ? ['head'] : ['base', 'head'], mode = appState.m;
@@ -1060,5 +1048,5 @@ window.Review3D = (() => {
   // Node and headless browser contracts share one explicit test seam.
   const testSeam = {sampleFrame, session:()=>active, poster3d, parseByDigest, releaseGpu};
   if (typeof module !== 'undefined') module.exports = testSeam;
-  return {show,dispose,cameraBar,frame,focus,focusPart,changeForPart,setHidden,setLighting,setAssembled,normalizeLighting,cameraState,setCameraState,setBlend,toggleBlend,resize,setRevision,session:()=>active,poster3d,gunzip,state:null,testSeam};
+  return {show,dispose,cameraBar,frame,focus,focusPart,changeForPart,setHidden,setLighting,setAssembled,normalizeLighting,cameraState,setCameraState,setBlend,toggleBlend,resize,setRevision,session:()=>active,poster3d,blobUrl,state:null,testSeam};
 })();

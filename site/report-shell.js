@@ -101,7 +101,7 @@ export function currentReport(stored, { lazyAssets = false, lazy3d = false, stor
   }
   // 3D: reuse the stored three.js bundle (vendored library, same for every report).
   const bundle = data.includes('"model3d"') ? stored.match(BUNDLE)?.[0] : null;
-  const hasPoster = data.includes('"poster3d"');
+  const hasPoster = data.includes('"poster3d"') || data.includes('"pcbdraw"');
   let html = put(page, '<link rel="stylesheet" href="tokens.css">\n<link rel="stylesheet" href="review.css">', `<style>\n${tokens}</style>\n<style>\n${review}</style>`);
   html = put(html, '<script src="sample/review-data.js"></script>', `<script>${data}</script>`);
   html = put(html, '<!-- KR_ICONS -->', sprite);

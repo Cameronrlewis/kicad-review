@@ -7166,6 +7166,8 @@ CHECKS.push(["design PcbDraw card: front plot, back toggle, note when skipped", 
   toggle.click(); await new Promise(r => setTimeout(r, 100));
   const shown = card.querySelector('img:not([hidden])');
   if (!shown || shown.dataset.face !== 'back') return 'Back toggle did not switch the plot';
+  const vis = [...card.querySelectorAll('img')].filter(i => getComputedStyle(i).display !== 'none');
+  if (vis.length !== 1 || vis[0].dataset.face !== 'back') return 'visible plots: ' + vis.map(i => i.dataset.face);
   await setPlot({front: 'dppcbf', back: 'dppcbmissing', note: ''});
   if (document.querySelector('#nav .design-pcbdraw button[data-face="back"]')) return 'Back toggle shown without a back plot';
   await setPlot({front: null, back: null, note: 'PcbDraw skipped: no closed Edge.Cuts outline.'});
