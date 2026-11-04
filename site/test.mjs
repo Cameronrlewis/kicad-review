@@ -5871,8 +5871,9 @@ test('finding 8: downloads are selected by manifest record, rejecting unlisted, 
     assert.deepEqual(await res.json(), { error: 'Download unavailable' });
   } finally { restore(); }
 
-  // 4. Manifest path with path traversal or unsafe characters -> must 404.
+  // 4. Manifest path with path traversal or unsafe characters -> must 404 even if matching entry exists in zip.
   const traversalZip = makeZip([
+    { name: '0/../evil.pdf', data: Buffer.from('%PDF-evil!') },
     { name: '0/downloads.json', data: Buffer.from(JSON.stringify({ files: [{ kind: 'pdf', path: '0/../evil.pdf', bytes: 10 }], head })) },
   ]);
   restore = downloadFetch({ zip: traversalZip });
@@ -5882,7 +5883,19 @@ test('finding 8: downloads are selected by manifest record, rejecting unlisted, 
     assert.deepEqual(await res.json(), { error: 'Download unavailable' });
   } finally { restore(); }
 
-  // 5. Multiple successful manifest records for the requested kind -> must 404 (ambiguous).
+  // 5. Unprefixed manifest path must fail closed with 404 even if entry exists in zip.
+  const unprefixedZip = makeZip([
+    { name: '0/board.pdf', data: Buffer.from('%PDF-board') },
+    { name: '0/downloads.json', data: Buffer.from(JSON.stringify({ files: [{ kind: 'pdf', path: 'board.pdf', bytes: 10 }], head })) },
+  ]);
+  restore = downloadFetch({ zip: unprefixedZip });
+  try {
+    const res = await call('/r/Cameronrlewis/repo/a/123/download/0/pdf', { headers });
+    assert.equal(res.status, 404, 'unprefixed manifest path must return 404');
+    assert.deepEqual(await res.json(), { error: 'Download unavailable' });
+  } finally { restore(); }
+
+  // 6. Multiple successful manifest records for the requested kind -> must 404 (ambiguous).
   const duplicateRecordZip = makeZip([
     { name: '0/one.pdf', data: Buffer.from('%PDF-1') },
     { name: '0/two.pdf', data: Buffer.from('%PDF-2') },
@@ -5961,5 +5974,4 @@ test('finding 9: malformed compare body and OAuth callback /user errors keep coo
     assert.match(await res.text(), /Sign-in didn&#39;t complete/);
   } finally { restore(); }
 });
-
 

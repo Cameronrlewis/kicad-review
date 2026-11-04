@@ -304,11 +304,11 @@ async function downloadFile(owner, repo, id, index, kind, active) {
     const record = records[0];
     const prefix = `${index}/`;
     const recordPath = String(record.path || '');
-    const entryPath = recordPath.startsWith(prefix) ? recordPath : `${prefix}${recordPath}`;
-    const filename = entryPath.slice(prefix.length);
-    if (!/^[A-Za-z0-9_.-]{1,200}$/.test(filename) || entryPath !== `${prefix}${filename}` || !suffix.test(filename)) return downloadError(active);
+    if (!recordPath.startsWith(prefix)) return downloadError(active);
+    const filename = recordPath.slice(prefix.length);
+    if (!/^[A-Za-z0-9_.-]{1,200}$/.test(filename) || !suffix.test(filename)) return downloadError(active);
     if (!Number.isSafeInteger(record.bytes) || record.bytes <= 0) return downloadError(active);
-    const entry = entries.find((e) => e.name === entryPath);
+    const entry = entries.find((e) => e.name === recordPath);
     if (!entry || entry.bytes !== record.bytes) return downloadError(active);
     // Errors after this point (truncation, CRC, length) error the stream; they cannot become a 404.
     return sessionResponse(await zipEntryStream(range, entry), { headers: { 'Content-Type': type, 'Content-Disposition': `attachment; filename="${filename}"` } }, active);
@@ -923,16 +923,17 @@ async function callback(request, env) {
   const code = url.searchParams.get('code');
   if (!code) return errorPage(400, "Sign-in didn't complete", "GitHub didn't send a sign-in code. You may have cancelled.", [{ href: '/login', label: 'Try again' }, { href: '/', label: 'Back to the start' }], null, { headers: { 'Set-Cookie': clear('st', secure) } }, [], false);
   const token = await tokenRequest(env, { code });
-  if (!token) return errorPage(502, "Sign-in didn't complete", "GitHub didn't accept the sign-in. Try again.", [{ href: '/login', label: 'Try again' }, { href: '/', label: 'Back to the start' }], null, { headers: { 'Set-Cookie': clear('st', secure) } }, [], false);
+  const signinError = () => errorPage(502, "Sign-in didn't complete", "GitHub didn't accept the sign-in. Try again.", [{ href: '/login', label: 'Try again' }, { href: '/', label: 'Back to the start' }], null, { headers: { 'Set-Cookie': clear('st', secure) } }, [], false);
+  if (!token) return signinError();
   let user;
   try {
     const userResponse = await gh('/user', token.access_token);
-    if (!userResponse.ok) return errorPage(502, "Sign-in didn't complete", "GitHub didn't accept the sign-in. Try again.", [{ href: '/login', label: 'Try again' }, { href: '/', label: 'Back to the start' }], null, { headers: { 'Set-Cookie': clear('st', secure) } }, [], false);
+    if (!userResponse.ok) throw new Error();
     user = await userResponse.json();
+    if (!user?.login) throw new Error();
   } catch {
-    return errorPage(502, "Sign-in didn't complete", "GitHub didn't accept the sign-in. Try again.", [{ href: '/login', label: 'Try again' }, { href: '/', label: 'Back to the start' }], null, { headers: { 'Set-Cookie': clear('st', secure) } }, [], false);
+    return signinError();
   }
-  if (!user?.login) return errorPage(502, "Sign-in didn't complete", "GitHub didn't accept the sign-in. Try again.", [{ href: '/login', label: 'Try again' }, { href: '/', label: 'Back to the start' }], null, { headers: { 'Set-Cookie': clear('st', secure) } }, [], false);
   const value = {
     t: token.access_token,
     r: token.refresh_token,
