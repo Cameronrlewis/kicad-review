@@ -351,10 +351,12 @@ def render_side(src_dir, name, out, netlist=False):
         os.environ['KICAD_CONFIG_HOME'] = cfg
         mapping = {}
         layers = None
+        board_error = None
         if os.path.exists(pcb):
             try:
                 layers = board_layers(pcb)
-            except (OSError, ValueError) as exc:  # Incomplete evidence is recorded later; keep rendering the rest.
+            except (OSError, ValueError) as exc:  # Skip every board export below; keep rendering the rest.
+                board_error = f"malformed board file: {exc}".replace('\n', ' ')[:1000]
                 print("::warning::" + workflow_command_escape(
                     f"{pcb}: malformed board file; board drawing not rendered: {exc}"), file=sys.stderr)
         try:
@@ -382,7 +384,7 @@ def render_side(src_dir, name, out, netlist=False):
                               '-o', f'{out}/pcb{suffix}', pcb)
             pathlib.Path(out).mkdir(parents=True, exist_ok=True)
             pathlib.Path(out, 'sheet-images.json').write_text(json.dumps(mapping, sort_keys=True), encoding='utf-8')
-            if os.path.exists(pcb):
+            if os.path.exists(pcb) and board_error is None:
                 export_board_stats(pcb, out)  # Shared optional facts, once per revision, outside the theme loop.
         finally:
             if previous is None:
@@ -393,7 +395,12 @@ def render_side(src_dir, name, out, netlist=False):
         kicad_cli("sch", "erc", "--format", "json", "--severity-all", "-o", f"{out}/erc.json", sch)
         if netlist:
             export_netlist(sch, out)
-    if os.path.exists(pcb):
+    if board_error is not None:
+        # Incomplete evidence: no DRC report for this side, only the reason.
+        pathlib.Path(out, 'drc.json').unlink(missing_ok=True)
+        pathlib.Path(out, 'drc.json.error').write_text('board DRC not run: ' + board_error, encoding='utf-8')
+    elif os.path.exists(pcb):
+        pathlib.Path(out, 'drc.json.error').unlink(missing_ok=True)
         parity = ["--schematic-parity"] if os.path.exists(sch) else []
         kicad_cli("pcb", "drc", "--format", "json", "--severity-all", *parity, "-o", f"{out}/drc.json", pcb)
 

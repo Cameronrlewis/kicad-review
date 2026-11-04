@@ -10195,10 +10195,26 @@ def test_f3_malformed_sexpr():
                  contextlib.redirect_stderr(err):
                 kr.render_side("head/p_bad", "bad", str(pathlib.Path(td, "render_bad")))
             calls = [c.args for c in cli.call_args_list]
-            assert not any(c[:3] == ("pcb", "export", "svg") for c in calls), calls
-            assert any(c[:2] == ("pcb", "drc") for c in calls), calls
+            assert not any(c[0] == "pcb" for c in calls), calls
             assert "::warning::head/p_bad/bad.kicad_pcb: malformed board file; board drawing not rendered" in err.getvalue(), err.getvalue()
             assert all(line.startswith("::warning::") for line in err.getvalue().splitlines()), err.getvalue()
+            assert "malformed board file" in pathlib.Path(td, "render_bad", "drc.json.error").read_text(encoding="utf-8")
+            assert not pathlib.Path(td, "render_bad", "drc.json").exists()
+
+            # A failing kicad-cli (real kicad_cli exit path) must not end rendering for a malformed board.
+            pcb_runs = []
+            def failing_run(cmd, *a, **kw):
+                if cmd[:2] == ["kicad-cli", "pcb"]:
+                    pcb_runs.append(cmd)
+                return subprocess.CompletedProcess(cmd, 1, "", "parse error")
+            err = io.StringIO()
+            with patch.object(kr.subprocess, "run", side_effect=failing_run), contextlib.redirect_stderr(err):
+                try:
+                    kr.render_side("head/p_bad", "bad", str(pathlib.Path(td, "render_bad_cli")))
+                except SystemExit as exc:
+                    raise AssertionError(f"malformed board ended rendering: {exc}")
+            assert pcb_runs == [], pcb_runs
+            assert pathlib.Path(td, "render_bad_cli", "drc.json.error").is_file()
 
             # cache_renders does not persist incomplete identity for malformed PCB
             write("review", {"detect.json": json.dumps(det_bad)})
