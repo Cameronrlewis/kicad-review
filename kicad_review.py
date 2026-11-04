@@ -1196,6 +1196,7 @@ def revision_root(proj_dir):
 def sheet_pages(proj_dir, name):
     """Schematic pages in hierarchy order, with instance page numbers and UUID paths."""
     root_file = posixpath.join(proj_dir, f"{name}.kicad_sch")
+    _sheet_collisions.pop(os.path.realpath(proj_dir), None)
     if not os.path.exists(root_file):
         return []
     with open(root_file, encoding="utf-8") as fh:
@@ -1227,15 +1228,11 @@ def sheet_pages(proj_dir, name):
             return
         with open(full, encoding="utf-8") as fh:
             node = parse_sexpr(fh.read())
-        names = set()
+        children = []
         for s in findall(node, "sheet"):
             props = properties(s)
             child = props.get("Sheetname", "?")
             safe = re.sub(r"[\\/]", "_", child)
-            if safe in names:  # kicad-cli names SVGs after the sanitized name, so A/B and A_B collide too
-                warn(f"{full}: sheet {child!r} collides with another sheet using sanitized name {safe!r}; skipped")
-                continue
-            names.add(safe)
             uid, sheetfile = val(s, "uuid"), props.get("Sheetfile") or ""
             if not uid or not sheetfile:
                 warn(f"{full}: sheet {child!r} has no uuid or Sheetfile; skipped")
@@ -1254,15 +1251,28 @@ def sheet_pages(proj_dir, name):
             elif child_file in ancestors:
                 warn(f"{full}: sheet {child!r} includes {sheetfile!r}, which contains it; recursive hierarchy skipped")
             else:
-                parent_uuid_path = f'/{root_uuid}{path.rstrip("/")}'
-                walk(child_file, f"{path}{uid}/", child, path, depth + 1, f"{stem}-{safe}",
-                     ancestors | {child_file}, sheet_instance_page(s, name, parent_uuid_path))
+                children.append((s, uid, child, safe, child_file))
+        # kicad-cli names SVGs after the sanitized name, so A/B and A_B write one file and
+        # neither drawing can be shown: drop every colliding sibling and mark the review incomplete.
+        names = {}
+        for *_, safe, _ in children:
+            names[safe] = names.get(safe, 0) + 1
+        for s, uid, child, safe, child_file in children:
+            if names[safe] > 1:
+                message = f"{full}: sheet {child!r} collides with another sheet using sanitized name {safe!r}; both skipped"
+                warn(message)
+                _sheet_collisions.setdefault(os.path.realpath(proj_dir), set()).add(message)
+                continue
+            parent_uuid_path = f'/{root_uuid}{path.rstrip("/")}'
+            walk(child_file, f"{path}{uid}/", child, path, depth + 1, f"{stem}-{safe}",
+                 ancestors | {child_file}, sheet_instance_page(s, name, parent_uuid_path))
 
     walk(f"{name}.kicad_sch", "/", name, None, 0, name, {f"{name}.kicad_sch"})
     return pages
 
 
 _sheet_warnings = set()
+_sheet_collisions = {}  # realpath(proj_dir) -> collision messages; the schematic review there is incomplete
 
 
 # ---- Object model: every reviewable object as {kind, ref, props, pos, box, where}, keyed by UUID. ----
@@ -2428,6 +2438,9 @@ def project_objects(proj_dir, name, issues=None):
     if not os.path.isdir(proj_dir):
         return {}
     objs = sch_objects(proj_dir, name)
+    if issues is not None and _sheet_collisions.get(os.path.realpath(proj_dir)):
+        reason = "Sibling sheets share one drawing name; colliding sheets left out"
+        issues += [{"channel": c, "document": "schematic", "reason": reason} for c in ("components", "visual")]
     pcb = posixpath.join(proj_dir, f"{name}.kicad_pcb")
     if os.path.exists(pcb):
         objs.update(pcb_objects(pcb))

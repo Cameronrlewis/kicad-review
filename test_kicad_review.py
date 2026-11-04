@@ -809,8 +809,8 @@ import io, contextlib
 err = io.StringIO()
 with contextlib.redirect_stderr(err):
     dup_pages = sheet_pages(f"{t}/p", "H")
-assert [p["name"] for p in dup_pages] == ["H", "A", "Power"], dup_pages
-assert "collides with another sheet using sanitized name 'A'; skipped" in err.getvalue()
+assert [p["name"] for p in dup_pages] == ["H"], dup_pages
+assert "collides with another sheet using sanitized name 'A'; both skipped" in err.getvalue()
 print("ok")
 
 # SCH6: page numbers belong to the project and parent instance, not the shared file.
@@ -10707,13 +10707,33 @@ def test_f1_sheetfile_containment_and_hierarchy():
             for needle in ("'Up'", "'Abs'", "'Link'", "'NoFile'", "'NoUuid'", "'Again'", 'head/P/dir'):
                 assert needle in text, (needle, text)
             assert all(line.startswith('::warning::') for line in text.splitlines()), text
-            # Sibling names that sanitize to one SVG stem warn and skip the later sibling.
-            write(t, {'head/P/H.kicad_sch': '(kicad_sch ' + sheet('A/B', 'a.kicad_sch', 'u1') + sheet('A_B', 'b.kicad_sch', 'u2') + ')'})
+            # Sibling names that sanitize to one SVG stem: kicad-cli writes one SVG for both, so
+            # neither drawing is trustworthy. Both are dropped and the schematic review is incomplete.
+            write(t, {'head/P/H.kicad_sch': '(kicad_sch ' + sheet('A/B', 'a.kicad_sch', 'u1') + sheet('A_B', 'b.kicad_sch', 'u2') + ')',
+                      'head/P/a.kicad_sch': '(kicad_sch (symbol (uuid "ra") (property "Reference" "RA") (property "Value" "1k")))',
+                      'head/P/b.kicad_sch': '(kicad_sch (symbol (uuid "rb") (property "Reference" "RB") (property "Value" "2k")))'})
+            kr._sheet_warnings.clear()
             err = io.StringIO()
             with contextlib.redirect_stderr(err):
                 collide_pages = kr.sheet_pages('head/P', 'H')
-            assert [p['name'] for p in collide_pages] == ['H', 'A/B'], collide_pages
-            assert "sheet 'A_B' collides with another sheet using sanitized name 'A_B'; skipped" in err.getvalue()
+                issues = []
+                kr.project_objects('head/P', 'H', issues)
+            assert [p['name'] for p in collide_pages] == ['H'], collide_pages
+            assert "sheet 'A_B' collides with another sheet using sanitized name 'A_B'; both skipped" in err.getvalue(), err.getvalue()
+            assert all(line.startswith('::warning::') for line in err.getvalue().splitlines()), err.getvalue()
+            reasons = {(i['document'], i['channel']) for i in issues}
+            assert {('schematic', 'components'), ('schematic', 'visual')} <= reasons, issues
+            # A malformed sibling (no uuid) does not claim the name, so a valid sibling named A still renders.
+            write(t, {'head/P/H.kicad_sch': '(kicad_sch (sheet (property "Sheetname" "A") (property "Sheetfile" "a.kicad_sch"))'
+                      + sheet('A', 'b.kicad_sch', 'u2') + ')'})
+            kr._sheet_warnings.clear()
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                lone_pages = kr.sheet_pages('head/P', 'H')
+                issues = []
+                kr.project_objects('head/P', 'H', issues)
+            assert [(p['name'], p['file']) for p in lone_pages] == [('H', 'H.kicad_sch'), ('A', 'b.kicad_sch')], lone_pages
+            assert 'collides' not in err.getvalue() and not issues, (err.getvalue(), issues)
 
             # Relative proj_dir with leading './' still bounds containment to the revision root.
             write(t, {'head/P/H.kicad_sch': '(kicad_sch (uuid "root") '
