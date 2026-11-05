@@ -5826,8 +5826,8 @@ test('the release fallback opens the tag asset through the same wrapper, and its
   const releases = { 'v1.0': { assets: [{ id: 901, name: 'design-snapshot.html' }] } };
   const routes = [['/commits?', () => json([{ sha: tipSha }])], ['/actions/artifacts?name=', () => json({ artifacts: [] })],
     ['/releases/tags/v1.0', () => json(releases['v1.0'])],
-    ['/releases/assets/901', () => new Response(null, { status: 302, headers: { Location: 'https://asset.example/design-snapshot.html?sig=x' } })],
-    ['asset.example', () => new Response('<!doctype html><script>window.REVIEW_DATA = ' + JSON.stringify(payload(tipSha)) + ';</script>')]];
+    ['/releases/assets/901', () => new Response(null, { status: 302, headers: { Location: 'https://release-assets.githubusercontent.com/design-snapshot.html?sig=x' } })],
+    ['release-assets.githubusercontent.com', () => new Response('<!doctype html><script>window.REVIEW_DATA = ' + JSON.stringify(payload(tipSha)) + ';</script>')]];
   const opened = await designGet('/r/Cameronrlewis/repo/p/A/design/v1.0', routes);
   assert.equal(opened.status, 302);
   assert.equal(opened.headers.get('Location'), '/r/Cameronrlewis/repo/design-release/v1.0?design=v1.0&tip=ccccccc&p=0&folder=A');
@@ -5842,6 +5842,17 @@ test('the release fallback opens the tag asset through the same wrapper, and its
   const wrapper = await (await designGet('/r/Cameronrlewis/repo/design-release/v1.0', routes)).text();
   assert.ok(!wrapper.includes('/a/undefined'), 'release wrapper derives threadsClient link from rawPath instead of /a/undefined');
   assert.match(wrapper, /"link":"[^"]*\/design-release\/v1\.0"/);
+});
+
+test('release design redirects refuse storage hosts outside the download allowlist', async () => {
+  let offHostFetches = 0;
+  const routes = [['/commits?', () => json([{ sha: tipSha }])],
+    ['/releases/tags/v1.0', () => json({ assets: [{ id: 901, name: 'design-snapshot.html' }] })],
+    ['/releases/assets/901', () => new Response(null, { status: 302, headers: { Location: 'https://evil.example/design-snapshot.html' } })],
+    ['evil.example', () => { offHostFetches += 1; return new Response('<!doctype html><script>window.REVIEW_DATA = ' + JSON.stringify(payload(tipSha)) + ';</script>'); }]];
+  const response = await designGet('/r/Cameronrlewis/repo/design-release/v1.0/raw', routes);
+  assert.equal(response.status, 502);
+  assert.equal(offHostFetches, 0);
 });
 
 test('a snapshot-only run opens its design, and the report wrapper names the design instead of a comparison', async () => {
@@ -6363,8 +6374,8 @@ test('list thumbnails cost at most three GitHub requests, however many rows ther
     const restore = mockFetch(async (url, options = {}) => {
       seen.push({ url, auth: options.headers?.Authorization || null });
       if (url.endsWith('/releases/tags/design-thumbs')) return json({ assets: [{ id: 555, name: 'thumbs.json' }] });
-      if (url.endsWith('/releases/assets/555')) return new Response(null, { status: 302, headers: { Location: 'https://thumbs.example/t.json?sig=1' } });
-      if (url === 'https://thumbs.example/t.json?sig=1') return json(index);
+      if (url.endsWith('/releases/assets/555')) return new Response(null, { status: 302, headers: { Location: 'https://release-assets.githubusercontent.com/t.json?sig=1' } });
+      if (url === 'https://release-assets.githubusercontent.com/t.json?sig=1') return json(index);
       return new Response('{}', { status: 404 });
     });
     try {
@@ -6391,8 +6402,8 @@ test('thumbnails at the shared size limit are shown; one character over is a pla
   const index = { v: 1, projects: { A: [{ sha: sha40(1), date: '', png: at }, { sha: sha40(2), date: '', png: over }] } };
   const restore = mockFetch(async (url) => {
     if (url.endsWith('/releases/tags/design-thumbs')) return json({ assets: [{ id: 555, name: 'thumbs.json' }] });
-    if (url.endsWith('/releases/assets/555')) return new Response(null, { status: 302, headers: { Location: 'https://thumbs.example/t.json' } });
-    if (url === 'https://thumbs.example/t.json') return json(index);
+    if (url.endsWith('/releases/assets/555')) return new Response(null, { status: 302, headers: { Location: 'https://release-assets.githubusercontent.com/t.json' } });
+    if (url === 'https://release-assets.githubusercontent.com/t.json') return json(index);
     return new Response('{}', { status: 404 });
   });
   try {

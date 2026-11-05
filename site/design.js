@@ -13,12 +13,15 @@ export const refOk = (ref) => typeof ref === 'string' && ref.length > 0 && ref.l
 const live = (a) => a && !a.expired && /^\d{1,20}$/.test(String(a.id)) && designName.test(a.name || '');
 const byNewest = (a, b) => String(b.created_at || '').localeCompare(String(a.created_at || ''));
 
-// The signed storage URL GitHub redirects to. The token is never sent to it. Artifact downloads use the site's
-// storage host policy (downloadUrl); every body is read within the report byte bound, never buffered whole first.
-async function signedBody(response, what, artifactHost = false) {
+// GitHub's release asset storage hosts.
+const releaseHosts = new Set(['release-assets.githubusercontent.com', 'objects.githubusercontent.com']);
+// The signed storage URL GitHub redirects to. The token is never sent to it. Every download uses the site's storage
+// host policy (downloadUrl), and a release asset may also use GitHub's release storage; any other host is refused.
+// Every body is read within the report byte bound, never buffered whole first.
+async function signedBody(response, what) {
   const location = new URL(response.headers.get('Location'));
   if (location.protocol !== 'https:' || location.username || location.password) throw new Error('invalid artifact URL');
-  const href = artifactHost ? downloadUrl(location.href) : location.href;
+  const href = downloadUrl(location.href) ?? (what === 'release' && !location.port && releaseHosts.has(location.hostname) ? location.href : null);
   if (!href) throw new Error('invalid artifact URL');
   const body = await fetch(href, { redirect: 'manual' });
   if (!body.ok) throw new Error(`${what} body unavailable`);
@@ -41,7 +44,7 @@ export async function readSnapshot(gh, token, root, artifact) {
   const response = await gh(`${root}/actions/artifacts/${artifact.id}/zip`, token, { redirect: 'manual' });
   if (response.status === 410) return null;
   if (response.status !== 302) throw new Error('snapshot download unavailable');
-  return snapshotPayload(await signedBody(response, 'snapshot', true));
+  return snapshotPayload(await signedBody(response, 'snapshot'));
 }
 // The release asset's body as text.
 export async function releaseText(gh, token, root, asset) {
