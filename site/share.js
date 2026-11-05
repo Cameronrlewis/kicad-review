@@ -1,4 +1,4 @@
-import { currentBody } from './report-shell.js';
+import { currentBody, MAX_REPORT_BYTES } from './report-shell.js';
 import { reviewListName } from './report-kind.js';
 import { encode as b64url, decode as unb64url } from './b64.js';
 // Read-only, artifact-bound capabilities. No GitHub credential enters a URL or page.
@@ -77,6 +77,7 @@ export async function shareGeneration(gh, token, owner, repo) {
 }
 function validArtifact(artifact, now = Date.now()) {
   return artifact && artifact.expired === false && typeof artifact.name === 'string' && reviewListName.test(artifact.name)
+    && (artifact.size_in_bytes == null || (Number.isSafeInteger(artifact.size_in_bytes) && artifact.size_in_bytes >= 0 && artifact.size_in_bytes <= MAX_REPORT_BYTES))
     && typeof artifact.expires_at === 'string' && Number.isFinite(Date.parse(artifact.expires_at)) && Date.parse(artifact.expires_at) > now;
 }
 function json(deps, body, status = 200, active) {
