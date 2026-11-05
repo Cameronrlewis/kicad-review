@@ -10978,7 +10978,7 @@ with tempfile.TemporaryDirectory() as d:
                 # 06 (design page) embeds its own UI bytes in every report, design.enabled off included, and fe2206c
                 # predates it. Measure 06's growth the same way (its pre-merge tip against its base) and bound only 07's bytes.
                 design_sizes = {}
-                for design_commit in ("10ffebe", "5103ce2"):
+                for design_commit in ("10ffebe", "b88d357"):
                     if subprocess.run(["git", "-C", str(repo_dir), "cat-file", "-e", f"{design_commit}^{{commit}}"], capture_output=True).returncode:
                         break
                     with tempfile.TemporaryDirectory(prefix="downloads-design-") as design_root:
@@ -10991,9 +10991,9 @@ with tempfile.TemporaryDirectory() as d:
                             design_mod.cmd_report(None)
                         design_sizes[design_commit] = len(pathlib.Path("review/kicad-review.html").read_bytes())
                 if len(design_sizes) == 2:
-                    ui_overhead -= design_sizes["5103ce2"] - design_sizes["10ffebe"]
+                    ui_overhead -= design_sizes["b88d357"] - design_sizes["10ffebe"]
                 else:
-                    print("skip 06 design-page byte subtraction: 10ffebe or 5103ce2 not present in this checkout")
+                    print("skip 06 design-page byte subtraction: 10ffebe or b88d357 not present in this checkout")
                 with patch("kicad_review.load_settings", return_value=copy.deepcopy(DEFAULT_SETTINGS)):
                     kr.cmd_report(None)  # restore the current report for the checks below
                 assert 0 < ui_overhead < 12000, f"always-on Download UI must add less than 12 KB uncompressed (overhead: {ui_overhead})"
