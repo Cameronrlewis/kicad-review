@@ -1,5 +1,12 @@
 import { readFileSync } from 'node:fs';
-const BR03_HOTSPOT_CONTRACT=JSON.parse(readFileSync(new URL('./fixtures/br03-hotspot-contract.json',import.meta.url),'utf8'));
+import { gzipSync, gunzipSync } from 'node:zlib';
+// The fixture is raw sheet_hotspots() output; the report build fills each viewBox from the page SVG
+// (A4 here) before the blob ships, and the viewer accepts only that validated report-stage manifest.
+const BR03_HOTSPOT_CONTRACT=(c=>({...c,blobs:Object.fromEntries(Object.entries(c.blobs).map(([id,blob])=>{
+  const m=JSON.parse(gunzipSync(Buffer.from(blob,'base64')));
+  for(const v of m.views) v.viewBox??=[0,0,297,210];
+  return [id,gzipSync(JSON.stringify(m)).toString('base64')];
+}))}))(JSON.parse(readFileSync(new URL('./fixtures/br03-hotspot-contract.json',import.meta.url),'utf8')));
 // These dependency-free browser functions are shared by CDP and Safari WebDriver
 // calibration. Compare actual composited screenshots, not a second SVG renderer.
 export async function softnessProbe(phase, scale) {
@@ -660,6 +667,20 @@ export const CHECKS = [
         if(Appearance.get().netColors['12']?.[0]!==1)return 'net highlight missing';
         clearImageSelection();await draw();
         if(JSON.stringify(Appearance.get().netColors)!==JSON.stringify(look.netColors))return 'net colour not restored';
+        if(Appearance.get().nets['12']?.color)return 'net colour not restored in nets: '+JSON.stringify(Appearance.get().nets['12'].color);
+        const viewerKey=JSON.stringify([D.repo||location.pathname,proj().dir]);
+        const envelope=JSON.parse(localStorage.getItem('kr.appearance.v1')||'{}');
+        const persisted=envelope.viewers?.[viewerKey];
+        if(!persisted)return 'persisted viewer state missing for key: '+viewerKey;
+        if(persisted.nets?.['12']?.color||persisted.netColors?.['12'])return 'net colour persisted after selection cleared: '+JSON.stringify(persisted?.nets?.['12']||persisted?.netColors?.['12']);
+        const floatColor=[.5,.2,.1,1];
+        Appearance.patch({netColors:{'12':floatColor}});
+        selectImageNet('12');
+        if(Appearance.get().netColors['12']?.[0]!==1)return 'net highlight missing on pre-coloured net';
+        clearImageSelection();
+        if(JSON.stringify(Appearance.get().netColors['12'])!==JSON.stringify(floatColor))
+          return 'restoring net colour lost float precision: expected '+JSON.stringify(floatColor)+' got '+JSON.stringify(Appearance.get().netColors['12']);
+        Appearance.patch({nets:{'12':{color:null}}});
         if(!click([...document.querySelectorAll('#stage .vp')].at(-1),[5,8])||S.imageSelection.kind!=='pad'||S.imageSelection.pin!=='2'||inspectorProperties().head.pin!=='2')return 'pad number missing from inspection';
         await draw();
         if(!boardDiff&&!document.querySelector('#stage .image-selection g rect'))return 'exact fallback pad geometry overlay missing';
@@ -2313,6 +2334,26 @@ return true;
     const u = window.Review3D.state.roots[1]?.getObjectByName('U4'), m=[];
     u?.traverse(n=>{if(n.isMesh)m.push(...[n.material].flat());});const faded=m.length&&m.every(m=>m.opacity===.12);
     return !!faded && document.querySelector('[data-mode="wipe"]').getAttribute("aria-disabled") === "true";`],
+  ["3D normalizes wipe mode to side", "v=3d&m=wipe", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
+    await new Promise(r => setTimeout(r, 1000));
+    const wipeBtn = document.querySelector('[data-mode="wipe"]');
+    const sideBtn = document.querySelector('[data-mode="side"]');
+    if (S.m !== "side") return "mode was " + S.m + " instead of side";
+    if (wipeBtn?.getAttribute("aria-disabled") !== "true") return "wipe button was not disabled";
+    if (wipeBtn?.getAttribute("aria-checked") === "true") return "wipe button was aria-checked";
+    if (wipeBtn?.getAttribute("tabindex") === "0") return "wipe button had tabindex 0";
+    if (sideBtn?.getAttribute("aria-checked") !== "true") return "side button was not aria-checked";
+    if (window.Review3D?.state?.mode !== "side") return "Review3D mode was " + window.Review3D?.state?.mode;
+    sideBtn.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    if (S.m !== "overlay") return "keyboard navigation did not advance from side to overlay: " + S.m;
+    sideBtn.click();
+    select('board');
+    S.m = 'wipe';
+    renderModes();
+    select('3d');
+    if (S.m !== "side") return "select(3d) from wipe did not normalize to side: " + S.m;
+    return true;`],
   ["loads sample", "", `return REVIEW_DATA.version === 1 && document.querySelector("#nav") !== null;`],
   ["header shows repo, revisions, review link and verdict", "", `
     // Bench: breadcrumb in the header, revisions and PR link in the review bar, verdict in the header readout.
@@ -2524,7 +2565,13 @@ return true;
   ["modified card shows every changed property old and new", "p=1", `
     const r = REVIEW_DATA.projects[1].changes.find(r => r.action === "modified");
     // Bench: the old → new values live in the bottom inspector for the selected card.
-    document.querySelector('#panel .card[data-id="' + r.id + '"]')?.click?.(); await new Promise(res => setTimeout(res, 1500));
+    document.querySelector('#panel .card[data-id="' + r.id + '"]')?.click?.();
+    // goTo awaits draw() before markSelected() renders the inspector; wait for that render, not a fixed delay.
+    const head = () => document.querySelector('#inspector .insp-head'), selected = () => document.querySelector('#panel .card[data-id="' + r.id + '"]')?.getAttribute("aria-selected");
+    const ready = () => S.s === r.id && selected() === "true"
+      && head()?.querySelector("strong")?.textContent === (r.ref || r.type || r.kind) && head()?.querySelector(".badge.modified") !== null, until = performance.now() + 10000;
+    while (!ready() && performance.now() < until) await new Promise(res => setTimeout(res, 50));
+    if (!ready()) return 'inspector did not show the selected modified row within 10 s: ' + JSON.stringify({selected: S.s, want: r.id, card: selected(), head: head()?.textContent});
     const text = document.querySelector('#inspector')?.textContent || "";
     return r.changes.every(([k, a, b]) => text.includes(k) && text.includes(String(a ?? "—")) && text.includes(String(b ?? "—")));`],
   ["selecting a row zooms to it and highlights it", "p=1", `
@@ -2642,8 +2689,10 @@ return true;
   ["clicking a located violation selects it and moves the drawing", "p=1&t=checks", `
     S.v = "board"; await draw(); S.checks.scope = "all"; renderPanel();
     const v = REVIEW_DATA.projects[1].checks.flatMap(c => c.violations).find(v => v.where?.board && v.pos), el = document.querySelector('#panel .viol[data-id="' + v.id + '"]'); el.click();
-    await new Promise(r => setTimeout(r, 1200));
-    return S.s === v.id && Math.abs(S.x - (v.box ? (v.box[0] + v.box[2]) / 2 : v.pos[0])) < .01 && document.querySelector('#panel .viol[data-id="' + v.id + '"]').getAttribute("aria-selected") === "true";`],
+    // goTo awaits draw() before zoomTo() and markSelected(); wait for that selection to land, not a fixed delay.
+    const ready = () => S.s === v.id && S.x != null && Math.abs(S.x - (v.box ? (v.box[0] + v.box[2]) / 2 : v.pos[0])) < .01 && document.querySelector('#panel .viol[data-id="' + v.id + '"]')?.getAttribute("aria-selected") === "true", until = performance.now() + 10000;
+    while (!ready() && performance.now() < until) await new Promise(r => setTimeout(r, 50));
+    return ready() || 'violation click did not select and centre it within 10 s: ' + JSON.stringify({selected: S.s, want: v.id, x: S.x, pos: v.pos, box: v.box, card: document.querySelector('#panel .viol[data-id="' + v.id + '"]')?.getAttribute("aria-selected")});`],
   ["j steps through rendered checks violations", "p=1&t=checks", `
     S.v = "board"; await draw(); S.checks.scope = "all"; renderPanel(); S.s = null;
     const ids = [...document.querySelectorAll('#panel .viol[data-id]:not([aria-disabled])')].map(v => v.dataset.id);
@@ -2762,9 +2811,15 @@ return true;
       if(!next)return 'added footprint card missing from Changes pages';
       next.click();
     }
-    card.click(); await new Promise(res => setTimeout(res, 1500));
+    card.click();
+    // goTo awaits draw() before markSelected() renders the inspector; wait for that render, not a fixed delay.
+    const head = () => document.querySelector('#inspector .insp-head'), selected = () => document.querySelector('#panel .card[data-id="' + r.id + '"]')?.getAttribute("aria-selected");
+    const ready = () => S.s === r.id && selected() === "true"
+      && head()?.querySelector("strong")?.textContent === r.ref && head()?.querySelector(".badge.added") !== null, until = performance.now() + 10000;
+    while (!ready() && performance.now() < until) await new Promise(res => setTimeout(res, 50));
+    if (!ready()) return 'inspector did not show the selected added footprint within 10 s: ' + JSON.stringify({selected: S.s, want: r.id, card: selected(), head: head()?.textContent});
     const t = document.querySelector('#inspector').textContent;
-    return t.includes(r.props.footprint) && t.includes(r.props.layer);`],
+    return (t.includes(r.props.footprint) && t.includes(r.props.layer)) || JSON.stringify({footprint: r.props.footprint, layer: r.props.layer, inspector: t.slice(0, 400)});`],
   ["address with selection and position keeps the position", "p=1&v=board&x=150&y=100&z=8&s=c600", `
     await new Promise(r => setTimeout(r, 1200));
     return (S.x === 150 && S.y === 100 && S.z === 8 && S.s === "c600" && document.querySelector("#stage .marker.sel") !== null) || JSON.stringify([S.x, S.z, S.s]);`],
@@ -4724,8 +4779,10 @@ return true;
     const p=proj(), sheets=p.sheets, row={...r,id:'c906',detail:{kind:'members'}};
     const id='__br03_manifest';
     // svgText's cache stores decoded-asset promises ({text}); provide the same revision-wide envelope as spec 01.
-    const previous=cache[id]; cache[id]=Promise.resolve({text:JSON.stringify({version:1,units:'mm',views:[
-      {sheet:'/a/',elements:manifest.elements},{sheet:'/b/',elements:manifest.elements}]})});
+    // A complete envelope: electricalManifest() now accepts only what validateImageManifest() accepts.
+    const sheetView=sheet=>({sheet,file:'a.svg',viewBox:[0,0,297,210],labels:[],noConnects:[],wires:[],
+      elements:manifest.elements.map(e=>({...e,bbox:[0,0,20,30]}))});
+    const previous=cache[id]; cache[id]=Promise.resolve({text:JSON.stringify({version:1,units:'mm',warnings:[],views:[sheetView('/a/'),sheetView('/b/')]})});
     try {
       p.sheets=[{path:'/a/',hotspots:{head:id}},{path:'/b/',hotspots:{head:id}}];
       const view=await electricalManifest('/a/','head');
@@ -8008,13 +8065,15 @@ CHECKS.push(['Download dialog lists GitHub zips, exported files and safe command
     D.links = { ...D.links, head: sha('b'), base: sha('a') }; D.run_id = '77'; D.repo = 'o/r';
     proj().downloads = [
       { kind: 'fab', label: 'For fabrication', bytes: 261000, sha256: '0'.repeat(64), path: '0/fab-P-bbbbbbb.zip', artifact: 'kicad-review-downloads-bbbbbbb' },
-      { kind: 'step', label: '3D model (STEP)', error: 'skipped: export took longer than 120 s' }];
+      { kind: 'step', label: '3D model (STEP)', error: 'skipped: export took longer than 120 s' },
+      { kind: 'pdf', label: 'Schematic PDF', error: 'not stored: this run could not upload its download files' }];
     let dlg = open();
     if (!dlg.open) return 'dialog did not open';
     const hrefs = [...dlg.querySelectorAll('a')].map(a => a.getAttribute('href'));
     if (hrefs.join() !== ['b', 'a'].map(c => 'https://github.com/o/r/archive/' + c.repeat(40) + '.zip').join()) return 'archive links ' + hrefs;
     const copy = dlg.querySelector('[data-copy]');
     if (copy?.dataset.copy !== 'gh run download 77 -R o/r -n kicad-review-downloads-bbbbbbb -D kicad-review-downloads') return 'offline command ' + copy?.dataset.copy;
+    if (dlg.querySelectorAll('[data-copy]').length !== 1 || !dlg.textContent.includes('not stored: this run could not upload')) return 'error rows must show their reason with no command';
     if (!dlg.textContent.includes('skipped: export took longer than 120 s') || !dlg.textContent.includes('255 KB')) return 'step reason or size missing';
     dlg.close();
     window.hostedBase = () => 'https://site.example/r/o/r/a/9';

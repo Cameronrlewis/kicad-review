@@ -3,7 +3,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
-import { accessSync, constants, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { accessSync, constants, mkdtempSync, readFileSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -141,6 +142,8 @@ test('BOM downloads save through real report sandbox and CSP', { timeout: 60000 
     chrome.kill();
     await exited;
     await new Promise(r => server.close(r));
-    rmSync(root, { recursive: true, force: true });
+    // Chrome's helper processes can still flush the profile just after the browser exits. The async
+    // rm retries ENOTEMPTY with backoff on every platform; the sync form only sleeps on Windows.
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });

@@ -6219,6 +6219,48 @@ def cmd_snapshot(args):
          downloads_name=f"kicad-design-downloads-{det['head'][:7]}")  # the bundle the review site's download route looks up
 
 
+DOWNLOADS_NOT_STORED = "not stored: this run could not upload its download files"
+
+
+def cmd_drop_downloads(args):
+    """A downloads upload failed: keep each download row, but as an error with no link or command.
+    The comparison report by default; with --design, the design snapshot (both of its HTML names), which has its own bundle."""
+    def drop(projects):
+        for project in projects:
+            if project.get("downloads"):
+                project["downloads"] = [{"kind": d["kind"], "label": d["label"], "error": DOWNLOADS_NOT_STORED} for d in project["downloads"]]
+
+    def drop_page(path):
+        marker = "<script>window.REVIEW_DATA = "
+        with open(path, encoding="utf-8") as fh:
+            html = fh.read()
+        start = html.find(marker)
+        end = html.find("</script>", start) if start >= 0 else -1
+        if end < 0:
+            raise RuntimeError(f"{path} has no window.REVIEW_DATA payload")
+        start += len(marker)
+        data = json.loads(html[start:end].strip().removesuffix(";"))
+        drop(data["projects"])
+        # Same encoding as finalize_report: < stays escaped, so the payload can never close its script.
+        payload = json.dumps(data, separators=(',', ':')).replace('<', '\\u003c')
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(f"{html[:start]}{payload};{html[end:]}")
+    if getattr(args, "design", False):
+        with open("review/detect.json", encoding="utf-8") as fh:
+            head = json.load(fh)["head"]
+        for file in (f"kicad-design-{head[:7]}.html", "design-snapshot.html"):  # the names cmd_snapshot writes
+            drop_page(f"{DESIGN_DIR}/{file}")
+        print("::warning::" + workflow_command_escape("Design download files were not stored; the design page lists them as unavailable."))
+        return
+    drop_page("review/kicad-review.html")
+    with open("review/data.json", encoding="utf-8") as fh:
+        side = json.load(fh)
+    drop(side["projects"])
+    with open("review/data.json", "w", encoding="utf-8") as fh:
+        json.dump(side, fh)
+    print("::warning::" + workflow_command_escape("Download files were not stored; the report lists them as unavailable."))
+
+
 STATUS_ICON = {"pass": "✅", "fail": "❌", "warn": "⚠️", "not_run": "—"}
 MARKER = "<!-- kicad-review -->"
 TABLE_KINDS = ("title block", "design rules", "symbol", "footprint", "sheet", "label", "global label",
@@ -6930,6 +6972,9 @@ def main():
     p.add_argument("--stage")
     p.add_argument("--pending")
     p.set_defaults(func=cmd_thumbs)
+    p = sub.add_parser("drop-downloads", help="mark the report's (or, with --design, the design snapshot's) download files unavailable after a failed upload")
+    p.add_argument("--design", action="store_true", help="the design snapshot and its design downloads bundle")
+    p.set_defaults(func=cmd_drop_downloads)
     args = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")  # comment text has → and —, whatever the locale
     args.func(args)

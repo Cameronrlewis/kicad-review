@@ -1992,20 +1992,25 @@ assert "google-chrome" in test_wf and "CHROME" in test_wf and 'python3 ui/build-
 assert "node --import ./site/css-loader.mjs --test ui/*.test.mjs" in test_wf, "CI must run sandbox downloads"
 with tempfile.TemporaryDirectory() as output:
     subprocess.run([sys.executable, "ui/build-fixtures.py", output], check=True)
-    assert {p.name for p in pathlib.Path(output).iterdir()} == {"3d.html", "two.html", "parts.html", "multiboard.html"}
+    assert {p.name for p in pathlib.Path(output).iterdir()} == {
+        "3d.html", "two.html", "parts.html", "images.html", "processed.html",
+        "single.html", "multiboard.html", "fab.html",
+    }
     text = pathlib.Path(output, "multiboard.html").read_text(encoding="utf-8")
     data = json.loads(text.split("window.REVIEW_DATA = ", 1)[1].split(";</script>", 1)[0])
     assert data["bom"]["summary"]["components"] == 7 and data["bom"]["boards"] == ["Alpha", "Beta"]
-assert "google-chrome" in test_wf and "CHROME" in test_wf and "inline_page" in test_wf, "TS-S1 CI browser setup"
+assert "google-chrome" in test_wf and "CHROME" in test_wf, "TS-S1 CI browser setup"
+build_fixtures_src = pathlib.Path("ui/build-fixtures.py").read_text(encoding="utf-8")
+assert "inline_page" in build_fixtures_src, "TS-S1 fixture generation uses inline_page"
 for command in ('node ui/check.mjs --no-skip "Download dialog"', 'node ui/check.mjs --no-skip "Multi-board BOM" --page "$PAGES/multiboard.html"', 'node ui/check.mjs --no-skip "Fab limits"', 'node ui/check.mjs --no-skip "Fab limits" --dark', 'node ui/check.mjs --no-skip "Fabrication producer contract" --page "$PAGES/fab.html"', 'node ui/check.mjs --no-skip "Fabrication producer contract" --dark --page "$PAGES/fab.html"', 'node ui/check.mjs --no-skip "Waivers"', 'node ui/check.mjs', 'node ui/check.mjs --dark', 'node ui/check.mjs --no-skip "selection-only address"', 'node ui/check.mjs --no-skip "pasted selection address preserves an explicit position"', 'node ui/check.mjs --no-skip "passing checks with baseline findings"', 'node ui/check.mjs --no-skip 3D --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip "unchanged sheet" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "unchanged project" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "Parts fixture" --page "$PAGES/parts.html"', 'node ui/check.mjs --no-skip "Parts fixture" --dark --page "$PAGES/parts.html"', 'node ui/check.mjs --no-skip "design page"', 'node ui/check.mjs --no-skip "design page" --dark', 'node ui/check.mjs --no-skip "design 3D" --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip "design empty project" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "design PcbDraw card"', 'node ui/check.mjs --no-skip "design revisions thumbnails" --page "$PAGES/design-history.html"', 'node ui/check.mjs --no-skip "design readiness"', 'node ui/check.mjs --no-skip "design Parts" --page "$PAGES/parts.html"', 'node ui/check.mjs --no-skip "design Parts" --dark --page "$PAGES/parts.html"'):
     assert "      - run: " + command in test_wf.splitlines(), "TS-S1 CI missing " + command
 assert test_wf.count("    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n") == test_wf.count("timeout-minutes:") == test_wf.count("runs-on:") == 2, "TS-S1 each CI job (test, dark) has one timeout"
 assert "apt-get" not in test_wf and test_wf.count("npm install") == 1, "TS-S1 only pinned 3D integration dependencies"
 for suffix in ('', ' --dark'):
     assert '      - run: node ui/check.mjs --no-skip "BR02 single renderer head only"' + suffix + ' --page "$PAGES/single.html"' in test_wf
-assert "data['mode'] = 'single'" in test_wf and 'review-data-3d-processed.js' in test_wf
+assert "data['mode'] = 'single'" in build_fixtures_src and 'review-data-3d-processed.js' in build_fixtures_src
 # BR02 processed fixture: CI builds it with inline_page and runs every processed check light and dark.
-assert '("processed", "review-data-3d-processed.js")' in test_wf, 'TS-S1 processed fixture missing'
+assert '("processed", "review-data-3d-processed.js")' in build_fixtures_src, 'TS-S1 processed fixture missing'
 runner = pathlib.Path('ui/check.mjs').read_text()
 for command in (
     'node ui/check.mjs --no-skip "BR02 processed" --page "$PAGES/processed.html"',
@@ -2035,10 +2040,11 @@ for command in (
     'node ui/check.mjs --no-skip "design revisions thumbnails" --page "$PAGES/design-history.html"',
 ):
     assert "      - run: " + command in test_wf.splitlines(), "TS-S1 CI missing " + command
-assert '("images", "review-data-images.js")' in test_wf, "TS-S1 image fixture missing"
+assert '("images", "review-data-images.js")' in build_fixtures_src, "TS-S1 image fixture missing"
 fixture_block = test_wf.split("      - name: Build browser fixtures\n        run: |\n", 1)[1].split("\n      - ", 1)[0]
-assert '          FAB_REPORT_FIXTURE="$PAGES/fab.html" python3 test_kicad_review.py' in fixture_block.splitlines(), "TS-S1 fab producer must run inside fixture-generation block"
-assert fixture_block.index('export PAGES=') < fixture_block.index('FAB_REPORT_FIXTURE='), "TS-S1 fab producer needs PAGES"
+assert 'test_kicad_review.py' not in fixture_block, "CI finding 4: fixture generation must not rerun the Python suite"
+assert '          python3 ui/build-fixtures.py "$PAGES"' in fixture_block.splitlines(), "TS-S1 fixture generation uses build-fixtures.py"
+assert fixture_block.index('export PAGES=') < fixture_block.index('python3 ui/build-fixtures.py "$PAGES"'), "TS-S1 build-fixtures needs PAGES"
 print("ok TS-S1 CI browser matrix")
 print("ok")
 
@@ -5882,10 +5888,13 @@ assert 'PROCESS3D_INTEGRATION=1' in step and 'node --test ui/compress3d.test.mjs
 assert 'continue-on-error: true' not in step, 'self-test integration gate must block failures'
 assert 'INPUT_ARCHIVE=false' in wf and 'INPUT_RETENTION-DAYS=90' in wf
 assert '_actions/actions/upload-artifact/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/dist/upload/index.js' in wf
-for name in ('Install 3D compression dependencies', 'Compress 3D board models', 'Upload digest-keyed 3D assets'):
+for name in ('Install 3D compression dependencies', 'Compress 3D board models'):
     block = wf.split('name: ' + name, 1)[1].split('\n      - name:', 1)[0]
-    assert 'continue-on-error: true' in block, 'optional 3D must not fail consumer reviews'
-    assert 'hashFiles(' in block.split('run:', 1)[0], '3D steps need actual assets'
+    assert 'continue-on-error: true' in block, f'{name} must be best-effort'
+    assert 'hashFiles(' in block.split('run:', 1)[0], f'{name} needs actual assets'
+upload_3d_block = wf.split('name: Upload digest-keyed 3D assets', 1)[1].split('\n      - name:', 1)[0]
+assert 'continue-on-error: true' not in upload_3d_block, 'CI finding 1: digest-keyed asset upload must become fatal so failure-comment path replaces review'
+assert 'hashFiles(' in upload_3d_block.split('uses:', 1)[0], '3D asset upload needs actual assets'
 assert wf.count("'tools/ui/compress3d.cjs', 'base/kicad-review.toml'") == 2
 cache = wf.split('name: Cache 3D compression dependencies', 1)[1].split('\n      - name:', 1)[0]
 assert '.processed-3d-cache' in cache and 'hashFiles(' in cache
@@ -5896,6 +5905,121 @@ assert 'using: node24' in pathlib.Path('.github/actions/upload-3d-assets/action.
 assert wf.index('name: Upload report\n') < wf.index('name: Upload digest-keyed 3D assets') < wf.index('name: Screenshots of changed drawings')
 assert 'INPUT_OVERWRITE=true INPUT_INCLUDE-HIDDEN-FILES=false' in wf
 print('ok BR02 pair-specific processing workflow, required integration gate and immutable assets')
+
+
+def ci_finding_3_npm_cache_completion_marker_contract():
+    wf_text = pathlib.Path('.github/workflows/review.yml').read_text()
+    install_block = wf_text.split('name: Install 3D compression dependencies', 1)[1].split('\n      - name:', 1)[0]
+    assert '.complete' in install_block, 'CI finding 3: reuse must be gated on completion marker'
+    assert 'node_modules/meshoptimizer' not in install_block.split('if [')[1].split(']; then')[0], 'CI finding 3: do not gate on single meshoptimizer directory'
+    assert 'rm -rf "$DEPS"' in install_block, 'CI finding 3: partial dependency directory must be removed on failure'
+    assert 'node -e' in install_block, 'CI finding 3: dependencies must be verified via require'
+    for pkg in ('@gltf-transform/core', '@gltf-transform/extensions', '@gltf-transform/functions', 'meshoptimizer'):
+        assert pkg in install_block, f'CI finding 3: verification must require {pkg}'
+    assert 'workflow_command_escape' in install_block, 'Warning branch must route through workflow_command_escape'
+    assert 'echo "::warning::' not in install_block, 'Warning branch must not print ::warning:: directly without workflow_command_escape'
+
+    raw_script = install_block.split('run: |\n', 1)[1]
+    with tempfile.TemporaryDirectory() as td:
+        deps_dir = pathlib.Path(td) / "deps"
+        bin_dir = pathlib.Path(td) / "bin"
+        bin_dir.mkdir()
+        adapted_script = re.sub(r'DEPS="\$HOME/\.cache/kicad-review-meshopt"', f'DEPS="{deps_dir}"', raw_script)
+
+        npm_mock = bin_dir / "npm"
+        npm_log = pathlib.Path(td) / "npm.log"
+        npm_mock.write_text(f"""#!/bin/bash
+echo "$@" >> "{npm_log}"
+if [ "${{FAIL_NPM:-0}}" = "1" ]; then
+  mkdir -p "{deps_dir}/node_modules/meshoptimizer"
+  exit 1
+fi
+mkdir -p "{deps_dir}/node_modules/meshoptimizer"
+mkdir -p "{deps_dir}/node_modules/@gltf-transform/core"
+mkdir -p "{deps_dir}/node_modules/@gltf-transform/extensions"
+mkdir -p "{deps_dir}/node_modules/@gltf-transform/functions"
+echo 'module.exports = {{}};' > "{deps_dir}/node_modules/meshoptimizer/index.js"
+echo '{{"main": "index.js"}}' > "{deps_dir}/node_modules/meshoptimizer/package.json"
+for p in core extensions functions; do
+  echo 'module.exports = {{}};' > "{deps_dir}/node_modules/@gltf-transform/$p/index.js"
+  echo '{{"main": "index.js"}}' > "{deps_dir}/node_modules/@gltf-transform/$p/package.json"
+done
+exit 0
+""")
+        npm_mock.chmod(0o755)
+        env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+
+        # Case 1: Failure scenario - installation fails mid-way
+        r_fail = subprocess.run(["bash", "-c", adapted_script], env={**env, "FAIL_NPM": "1"}, capture_output=True, text=True)
+        assert r_fail.returncode == 0, f"failure should be caught as warning: {r_fail.stderr}"
+        assert "::warning::3D compression dependencies unavailable" in r_fail.stdout or "::warning::3D compression dependencies unavailable" in r_fail.stderr
+        assert not deps_dir.exists() or not any(deps_dir.iterdir()), "partial dependency directory must be deleted on failure"
+        assert not (deps_dir / ".complete").exists(), "completion marker must not be written on failure"
+
+        # Case 2: Poisoned cache scenario
+        (deps_dir / "node_modules/meshoptimizer").mkdir(parents=True)
+        npm_log.unlink(missing_ok=True)
+        r_poison = subprocess.run(["bash", "-c", adapted_script], env=env, capture_output=True, text=True)
+        assert r_poison.returncode == 0, r_poison.stderr
+        assert npm_log.exists(), "npm install must run when .complete is missing, even if meshoptimizer exists"
+        assert (deps_dir / ".complete").exists(), "completion marker must be created after full install"
+
+        # Case 3: Reuse scenario
+        npm_log.unlink()
+        r_reuse = subprocess.run(["bash", "-c", adapted_script], env=env, capture_output=True, text=True)
+        assert r_reuse.returncode == 0, r_reuse.stderr
+        assert not npm_log.exists(), "reuse must skip npm install when .complete exists"
+
+
+ci_finding_3_npm_cache_completion_marker_contract()
+
+
+def ci_review_1_workflow_commands_escaped_contract():
+    # Every ::warning:: / ::error:: in every workflow goes through workflow_command_escape;
+    # in particular no echo interpolates a $VAR straight into a workflow command.
+    for wf in sorted(pathlib.Path('.github/workflows').glob('*.yml')):
+        for n, line in enumerate(wf.read_text().splitlines(), 1):
+            if '::warning::' not in line and '::error::' not in line:
+                continue
+            assert not re.search(r'echo\s+["\']?::(warning|error)::[^\n]*\$', line), f'{wf}:{n}: workflow command interpolates a variable unescaped'
+            assert 'workflow_command_escape' in line, f'{wf}:{n}: workflow command must go through workflow_command_escape'
+    # The per-model 3D warning carries a pull-request-controlled directory name.
+    wf_text = pathlib.Path('.github/workflows/review.yml').read_text()
+    # The workflow imports the checked-out tool from ./tools.
+    with tempfile.TemporaryDirectory() as tools_root:
+        os.symlink(os.path.abspath('.'), os.path.join(tools_root, 'tools'))
+        line = next(l.strip() for l in wf_text.splitlines() if '3D processing failed for' in l)
+        evil = 'review/a%0Ab\n::stop-commands::x'
+        r = subprocess.run(['bash', '-c', f'dir="$1"; {line}', 'sh', evil], capture_output=True, text=True, cwd=tools_root)
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.count('\n') == 1 and r.stdout.startswith('::warning::3D processing failed for review/a%250Ab%0A::stop-commands::x'), r.stdout
+        # Required-check errors carry project names.
+        for var in ('FAILED', 'THREADS'):
+            line = next(l.strip() for l in wf_text.splitlines() if '::error::' in l and f'${var}' in l)
+            r = subprocess.run(['bash', '-c', line], capture_output=True, text=True, env={**os.environ, var: 'p\n::error::forged'},
+                               cwd=tools_root)
+            assert r.returncode == 0, r.stderr
+            assert r.stdout.count('\n') == 1 and r.stdout.startswith('::error::') and 'p%0A::error::forged' in r.stdout, r.stdout
+        # Permission hints keep their original wording; only the escaping changed.
+        for start, message in (
+                ('|| { rm -f review/issues.json', "Could not read issues. Add 'issues: read' to the caller's permissions."),
+                ('[ -f review/check-runs.json ]', 'review/check-runs.json missing; no check runs published.'),
+                ('|| { python3', "Could not publish check runs. Add 'checks: write' to the permissions of .github/workflows/kicad-review.yml.")):
+            hits = [l for l in wf_text.splitlines() if 'workflow_command_escape' in l and message.split()[1] in l
+                    and l.strip().startswith(start)]
+            assert len(hits) == 1, (start, hits)
+            command = re.search(r'python3 -c "(?:[^"\\]|\\.)*"', hits[0]).group(0)
+            r = subprocess.run(['bash', '-c', command], capture_output=True, text=True, cwd=tools_root)
+            assert r.returncode == 0 and r.stdout == '::warning::' + message + '\n', (r.stdout, r.stderr)
+
+
+with tempfile.TemporaryDirectory() as _ci_scratch:
+    _ci_prev_tempdir, tempfile.tempdir = tempfile.tempdir, _ci_scratch
+    try:
+        ci_review_1_workflow_commands_escaped_contract()
+    finally:
+        tempfile.tempdir = _ci_prev_tempdir
+    assert os.listdir(_ci_scratch) == [], f'workflow command contract leaves temp dirs behind: {os.listdir(_ci_scratch)}'
 
 
 def br02_processed_sample_contract():
@@ -9505,18 +9629,6 @@ assert kr.run_check('fab_limits',cfg,[copy.deepcopy(raw_v)],None,wrong)['waived'
 right = {'active':{('fab_limits',key):wrong['active'][('drc',key)]}}
 assert kr.run_check('fab_limits',cfg,[copy.deepcopy(raw_v)],None,right)['waived']==1
 
-# Optional integration fixture is built by CI after its PAGES directory exists.
-if os.environ.get('FAB_REPORT_FIXTURE'):
-    sample = pathlib.Path('ui/sample/review-data.js').read_text()
-    data = json.loads(sample.split('=',1)[1].strip().rstrip(';'))
-    project = next(p for p in data['projects'] if p.get('board',{}).get('layers'))
-    data['fabProducerFixture'] = True
-    project['checks'] = [*project['checks'],*(copy.deepcopy(c) for c in produced_fabs.values())]
-    data.setdefault('settings',{}).setdefault('checks',{})['fab_limits']='required'
-    kr.assign_ids(data['projects'])
-    payload = 'window.REVIEW_DATA = '+json.dumps(data).replace('<','\\u003c')+';'
-    pathlib.Path(os.environ['FAB_REPORT_FIXTURE']).write_text(kr.inline_page(payload),encoding='utf-8')
-
 with tempfile.TemporaryDirectory() as td:
     cwd=os.getcwd()
     try:
@@ -10952,6 +11064,48 @@ with tempfile.TemporaryDirectory() as d:
         with patch("kicad_review.load_settings", return_value=on), patch("kicad_review.build_project", return_value=dict(shown)), patch.dict(os.environ, {"GITHUB_OUTPUT": "gh-out.txt"}):
             kr.cmd_report(None)
         assert json.loads(pathlib.Path("review/data.json").read_text())["projects"][0]["downloads"] == mixed_entries
+
+        # A failed downloads upload turns every download row into an error row, in the HTML payload and data.json.
+        kr.write_download_manifest(src, [{"kind": "fab", "label": "For fabrication", "file": "fab-b-bbbbbbb.zip", "error": None},
+                   {"kind": "step", "label": "3D model (STEP)", "file": None, "error": "skipped: export took longer than 120 s"}])
+        pathlib.Path("review/detect.json").write_text(json.dumps({"base": "a" * 40, "head": "b" * 40, "reason": "t", "projects": [
+            {"dir": "p", "name": "b", "status": "modified"}, {"dir": "q", "name": "q", "status": "modified"}, {"dir": "missing", "name": "m", "status": "modified"}]}))
+        named = lambda p, *rest: {**shown, "name": p["name"] + " </script><b>", "dir": p["dir"]}
+        with patch("kicad_review.load_settings", return_value=on), patch("kicad_review.build_project", side_effect=named), patch.dict(os.environ, {"GITHUB_OUTPUT": "gh-out.txt"}):
+            kr.cmd_report(None)
+        marker = "<script>window.REVIEW_DATA = "
+        def split_payload(page):
+            start = page.index(marker) + len(marker)
+            end = page.index("</script>", start)
+            return page[:start], page[start:end], page[end:]
+        before = pathlib.Path("review/kicad-review.html").read_text(encoding="utf-8")
+        before_head, before_payload, before_tail = split_payload(before)
+        assert [len(p.get("downloads", [])) for p in json.loads(before_payload.removesuffix(";"))["projects"]] == [2, 1, 0]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            kr.cmd_drop_downloads(None)
+        assert out.getvalue().startswith("::warning::"), out.getvalue()
+        after = pathlib.Path("review/kicad-review.html").read_text(encoding="utf-8")
+        head, payload, tail = split_payload(after)
+        assert (head, tail) == (before_head, before_tail), "only the embedded data may change"
+        assert "<" not in payload and "\\u003c/script>\\u003cb>" in payload, "the payload must keep < escaped"
+        not_stored = "not stored: this run could not upload its download files"
+        expected = [[{"kind": "fab", "label": "For fabrication", "error": not_stored}, {"kind": "step", "label": "3D model (STEP)", "error": not_stored}],
+                    [{"kind": "pdf", "label": "Schematic PDF", "error": not_stored}], None]
+        for data in (json.loads(payload.removesuffix(";")), json.loads(pathlib.Path("review/data.json").read_text(encoding="utf-8"))):
+            assert [p.get("downloads") for p in data["projects"]] == expected, data["projects"]
+            assert data["projects"][0]["name"] == "b </script><b>"
+        old = json.loads(before_payload.removesuffix(";"))
+        for p in old["projects"]:
+            if p.get("downloads"):
+                p["downloads"] = [{"kind": d["kind"], "label": d["label"], "error": not_stored} for d in p["downloads"]]
+        assert payload == json.dumps(old, separators=(",", ":")).replace("<", "\\u003c") + ";", "nothing else in the payload changes"
+        pathlib.Path("review/kicad-review.html").write_text(before.replace(marker, "<script>window.OTHER = "), encoding="utf-8")
+        try:
+            kr.cmd_drop_downloads(None)
+            raise AssertionError("a report without the data marker must fail loudly")
+        except RuntimeError:
+            pass
     finally:
         os.chdir(cwd)
 print("ok report manifest, artifact folder, outputs and opt-out byte identity")
@@ -10959,12 +11113,19 @@ print("ok report manifest, artifact folder, outputs and opt-out byte identity")
 wf = pathlib.Path(".github/workflows/review.yml").read_text(encoding="utf-8")
 upload = wf[wf.index("- name: Upload downloads"):]
 upload = upload[:upload.index("\n      - name:", 10)]
-for needle in ("if: steps.report.outputs.downloads == 'true'", "continue-on-error: true",
+for needle in ("id: downloads", "if: steps.report.outputs.downloads == 'true'", "continue-on-error: true",
                "uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1",
                "name: ${{ steps.report.outputs.downloads_name }}", "path: review/downloads", "compression-level: 0", "retention-days: 90"):
     assert needle in upload, needle
 assert "archive: false" not in upload, "several files need an archived artifact"
-assert wf.index("- name: Upload report") < wf.index("- name: Upload downloads") < wf.index("- name: Screenshots of changed drawings")
+# Downloads upload before the report is copied, uploaded or published; a failed upload rewrites its rows first.
+assert (wf.index("- name: Build comparison report and checks") < wf.index("- name: Upload downloads")
+        < wf.index("- name: Drop unstored downloads from the report") < wf.index("- name: Collect review threads")
+        < wf.index("- name: Copy named report") < wf.index("- name: Upload report"))
+drop = wf[wf.index("- name: Drop unstored downloads from the report"):]
+drop = drop[:drop.index("\n      - name:")]
+assert "if: steps.downloads.outcome == 'failure'" in drop and "run: python3 tools/kicad_review.py drop-downloads" in drop, drop
+assert "continue-on-error" not in drop, "a report that cannot be corrected must fail the job"
 print("ok review.yml uploads the downloads artifact")
 
 readme = pathlib.Path("README.md").read_text(encoding="utf-8"); example = pathlib.Path("examples/kicad-review.toml").read_text(encoding="utf-8")
@@ -11051,6 +11212,30 @@ with _DpTmp() as t:
         assert pathlib.Path("review/downloads/0/fab-H-ccccccc.zip").read_bytes() == b"comparison zip"
         assert pathlib.Path("review/design-downloads/0/fab-H-ccccccc.zip").read_bytes() == b"snapshot zip"
         assert _dp_no_context()
+        # A failed design downloads upload: drop-downloads --design rewrites both snapshot names and nothing of the comparison's.
+        not_stored = kr.DOWNLOADS_NOT_STORED
+        design_pages = ("review/design/kicad-design-ccccccc.html", "review/design/design-snapshot.html")
+        before_design = {path: pathlib.Path(path).read_text(encoding="utf-8") for path in design_pages}
+        comparison = {path: pathlib.Path(path).read_bytes() for path in ("review/kicad-review.html", "review/data.json")}
+        assert all(_dp_report_data(path)["projects"][0]["downloads"][0].get("path") for path in design_pages)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            kr.cmd_drop_downloads(argparse.Namespace(design=True))
+        assert out.getvalue().startswith("::warning::Design download files were not stored"), out.getvalue()
+        for path in design_pages:
+            data = _dp_report_data(path)
+            assert data["projects"][0]["downloads"] == [{"kind": "fab", "label": "For fabrication", "error": not_stored}], data["projects"][0]["downloads"]
+            assert data["report"]["kind"] == "design" and data["snapshot"] == det["snapshot"], "only the download rows change"
+            marker = "<script>window.REVIEW_DATA = "
+            old, new = before_design[path], pathlib.Path(path).read_text(encoding="utf-8")
+            assert old[:old.index(marker)] == new[:new.index(marker)] and old[old.index("</script>", old.index(marker)):] == new[new.index("</script>", new.index(marker)):], path
+        assert {path: pathlib.Path(path).read_bytes() for path in comparison} == comparison, "the comparison report keeps its downloads"
+        # And the comparison's own drop leaves the design page alone.
+        dropped_design = {path: pathlib.Path(path).read_bytes() for path in design_pages}
+        with contextlib.redirect_stdout(io.StringIO()):
+            kr.cmd_drop_downloads(argparse.Namespace(design=False))
+        assert json.loads(pathlib.Path("review/data.json").read_text())["projects"][0]["downloads"] == [{"kind": "fab", "label": "For fabrication", "error": not_stored}]
+        assert {path: pathlib.Path(path).read_bytes() for path in design_pages} == dropped_design
         # The render's trusted downloads-snapshot manifest carries the key cmd_snapshot verifies, even when the comparison's step differs.
         historical = json.loads(json.dumps(kr.DEFAULT_SETTINGS)); historical["downloads"]["step"] = False
         with patch.object(kr, "load_settings", return_value=historical):
@@ -11100,6 +11285,12 @@ for line in ("        if: steps.snapshot.outputs.downloads == 'true'", "        
              "          path: review/design-downloads", "          compression-level: 0", "          retention-days: ${{ vars.KICAD_REVIEW_SNAPSHOT_DAYS || 90 }}"):
     assert line in _dl, line
 assert _wf.index("- name: Build design snapshot") < _wf.index("- name: Upload design downloads") < _wf.index("- name: Upload digest-keyed 3D assets")
+# Like the comparison's downloads: uploaded before the snapshot it is listed in, and dropped from it when the upload fails.
+assert _wf.index("- name: Build design snapshot") < _wf.index("- name: Upload design downloads") < _wf.index("- name: Drop unstored design downloads from the snapshot") < _wf.index("- name: Upload design snapshot\n")
+assert "        id: design_downloads\n" in _dl and "        continue-on-error: true\n" in _dl, _dl
+_drop_design = _wf[_wf.index("- name: Drop unstored design downloads from the snapshot"):].split("\n      - name:")[0]
+assert "        if: steps.design_downloads.outcome == 'failure'\n" in _drop_design and "        run: python3 tools/kicad_review.py drop-downloads --design" in _drop_design, _drop_design
+assert "continue-on-error" not in _drop_design, "a failed rewrite must not leave a snapshot that links files that were never stored"
 print("ok DP-S7 workflow wiring")
 
 # A tag whose fabrication outputs fail still attaches its design snapshot; the fabrication attachment keeps its own gate.
@@ -11245,12 +11436,15 @@ print("ok Session E 16 PcbDraw failures are retried on a revision-cache hit")
 _pcb_wf = pathlib.Path(".github/workflows/review.yml").read_text(encoding="utf-8")
 _pcb_step = _pcb_wf[_pcb_wf.index("- name: Install PcbDraw\n"):].split("\n      - name:")[0]
 assert "        continue-on-error: true" in _pcb_step, _pcb_step
-assert "::warning::PcbDraw could not be installed" in _pcb_step and "rm -rf .pydeps" in _pcb_step.split("::warning::")[0].split("||")[-1], _pcb_step
+assert "'::warning::' + kr.workflow_command_escape('PcbDraw could not be installed" in _pcb_step and "rm -rf .pydeps" in _pcb_step.split("::warning::")[0].split("||")[-1], _pcb_step
 print("ok Session E 9 a failed PcbDraw install only warns")
 
 # Session E 11: a snapshot whose review job later fails (say on a required ERC check) still gets its thumbnail.
 _thumb_head = pathlib.Path(".github/workflows/review.yml").read_text(encoding="utf-8").split("\n  design-thumbnails:\n")[1].split("steps:")[0]
 assert "    if: ${{ !cancelled() && needs.review.outputs.thumbnails == 'true' }}\n" in _thumb_head, _thumb_head
+_thumb_wf = pathlib.Path(".github/workflows/review.yml").read_text(encoding="utf-8")
+# The input is uploaded before any later step that can fail the job, such as the digest-keyed 3D upload.
+assert _thumb_wf.index("- name: Upload design snapshot context") < _thumb_wf.index("- name: Upload thumbnail input") < _thumb_wf.index("- name: Upload digest-keyed 3D assets"), "thumbnail input must precede later failing steps"
 print("ok Session E 11 thumbnails follow a failed review job")
 
 # Session E 12: each run stages its own thumbnails under a unique name; one serialized fold merges every staged file,

@@ -336,3 +336,232 @@ test('BR06 entering the back/forward cache keeps the shared poster URLs; a real 
   for (const fn of listeners.pagehide) fn({persisted:false});
   assert.deepEqual(revoked, [first.src], 'a real unload releases the URL');
 });
+
+test('BR02 3D view normalizes wipe mode to side in valid and select', () => {
+  const reviewSource = readFileSync(new URL('./review.js', import.meta.url), 'utf8');
+  const validFn = reviewSource.slice(reviewSource.indexOf('function valid(st) {'), reviewSource.indexOf('function applyState('));
+  const selectFn = reviewSource.slice(reviewSource.indexOf('function select(view) {'), reviewSource.indexOf('function decodeState('));
+  const modeFn = reviewSource.slice(reviewSource.indexOf('function modeFor('), reviewSource.indexOf('function valid(st) {'));
+
+  const validCtx = {
+    D: { projects: [{ board: { layers: [], model3d: { head: 'head-id' } }, sheets: [], changes: [], checks: [] }] },
+    boardAvailable: () => true,
+    modelAvailable: () => true,
+    MODES: { side: true, overlay: true, wipe: true, blend: true, semantic: true },
+    GROUPS3D: [],
+    LIGHT_RIGS3D: [],
+    single: () => false,
+    window: { ThreeStudio: { normalizeLighting: x => x } }
+  };
+  runInNewContext(modeFn + validFn, validCtx);
+  const normalized = validCtx.valid({ v: '3d', m: 'wipe' });
+  assert.equal(normalized.v, '3d');
+  assert.equal(normalized.m, 'side');
+  // A design (single-revision) report takes no mode from a link at all, wipe included.
+  validCtx.single = () => true;
+  for (const v of ['3d', 'board']) assert.equal(Object.hasOwn(validCtx.valid({ v, m: 'wipe' }), 'm'), false, v);
+
+  const S = { v: 'board', m: 'wipe' };
+  const selectCtx = {
+    S,
+    clearImageSelection: () => {},
+    renderInspector: () => {},
+    tabsChange: () => false,
+    stopPlacing: () => {},
+    renderModes: () => {},
+    renderNav: () => {},
+    renderPanel: () => {},
+    renderZoombar: () => {},
+    draw: () => {},
+    saveHash: () => {}
+  };
+  runInNewContext(modeFn + selectFn, selectCtx);
+  selectCtx.select('3d');
+  assert.equal(S.v, '3d');
+  assert.equal(S.m, 'side');
+});
+
+class V3 {
+  constructor(x=0,y=0,z=0){this.x=x;this.y=y;this.z=z;}
+  clone(){return new V3(this.x,this.y,this.z);} copy(v){this.x=v.x;this.y=v.y;this.z=v.z;return this;}
+  sub(v){this.x-=v.x;this.y-=v.y;this.z-=v.z;return this;}
+  normalize(){const l=Math.hypot(this.x,this.y,this.z)||1;this.x/=l;this.y/=l;this.z/=l;return this;}
+  addScaledVector(v,s){this.x+=v.x*s;this.y+=v.y*s;this.z+=v.z*s;return this;}
+  lerpVectors(a,b,t){this.x=a.x+(b.x-a.x)*t;this.y=a.y+(b.y-a.y)*t;this.z=a.z+(b.z-a.z)*t;return this;}
+}
+function cameraHarness(reducedMotion) {
+  const window = {THREE3D:{THREE:{MathUtils:{degToRad:d=>d*Math.PI/180}}}};
+  const source = readFileSync(new URL('./review3d.js', import.meta.url), 'utf8')
+    .replace('let active = null, bundle;', 'let active = null, bundle; window.setTestSession = s => active = s;')
+    .replace('const testSeam = {', 'const testSeam = {setCamera,');
+  runInNewContext(source, {window, document:{createElement:() => ({}), head:{appendChild() {}}}, performance, matchMedia:() => ({matches:reducedMotion})});
+  const frames = [], ends = [];
+  const s = {dead:false, animationFrames:{add:fn => frames.push(fn)}, invalidate() {}};
+  window.setTestSession(s);
+  window.Review3D.onCameraEnd = () => ends.push(window.Review3D.testSeam);
+  const v = {camera:{position:new V3(0,0,1), fov:45, aspect:1, near:1, far:2, updateProjectionMatrix() {}}, controls:{target:new V3(), update() {}}};
+  return {setCamera:window.Review3D.testSeam.setCamera, v, frames, ends};
+}
+
+test('U5: animated 3D focus sets near/far for the destination before animating and reports the final camera', () => {
+  const {setCamera, v, frames, ends} = cameraHarness(false);
+  setCamera(v, new V3(), .001, true);
+  const distance = .02;   // the minimum focus distance for a tiny part
+  assert.ok(Math.abs(v.camera.near - distance / 100) < 1e-12, `near ${v.camera.near} would clip the focused part`);
+  assert.ok(Math.abs(v.camera.far - distance * 100) < 1e-12);
+  assert.equal(frames.length, 1); assert.equal(ends.length, 0);
+  frames[0](performance.now() + 1000);
+  assert.ok(Math.abs(v.camera.position.z - distance) < 1e-12);
+  assert.equal(ends.length, 1, 'the URL must record the post-focus camera');
+});
+
+test('U5: an immediate 3D focus also reports the final camera once', () => {
+  const {setCamera, v, frames, ends} = cameraHarness(true);
+  setCamera(v, new V3(), .001, true);
+  assert.equal(frames.length, 0); assert.equal(ends.length, 1);
+  assert.ok(Math.abs(v.camera.near - .0002) < 1e-12);
+});
+
+test('U5: Review3D.clearSelection drops the outline and tooltips without a new session', () => {
+  const {api, s} = viewer();
+  let detached = 0, tips = 0;
+  s.selected.push({removeFromParent() { detached++; }, traverse(free) { free({}); }});
+  s.state.selected = s.selected; s.invalidate = () => {};
+  s.views[0].host.querySelector = () => ({remove() { tips++; }});
+  assert.equal(typeof api.clearSelection, 'function');
+  api.clearSelection();
+  assert.equal(detached, 1); assert.equal(tips, 1);
+  assert.equal(s.selected.length, 0); assert.equal(s.state.selected, s.selected);
+});
+
+function escapeHarness(S, selected = []) {
+  const source = readFileSync(new URL('./review.js', import.meta.url), 'utf8');
+  const from = source.indexOf('document.addEventListener("keydown", e => {\n  if (e.key === "Escape" && $("#shortcuts").open)');
+  const handler = source.slice(from, source.indexOf('\nfunction positionLink(', from));
+  const calls = [];
+  let listener;
+  const ctx = {S, THREADS_ON:false, $:() => ({open:false}), boardKey:() => false,
+    document:{addEventListener:(_, fn) => listener = fn},
+    stopPlacing:() => calls.push('stopPlacing'), markSelected:() => { S.part3d = null; calls.push('markSelected'); },
+    draw:() => calls.push('draw'), saveHash:() => calls.push('saveHash'),
+    window:{Review3D:{state:{selected}, clearSelection:() => calls.push('clearSelection')}}};
+  runInNewContext(handler, ctx);
+  listener({key:'Escape', target:{closest:() => null}, preventDefault() {}, ctrlKey:false, metaKey:false, altKey:false, shiftKey:false});
+  return calls;
+}
+
+test('U5: Escape in 3D with nothing selected does not rebuild the 3D session', () => {
+  assert.deepEqual(escapeHarness({v:'3d', s:null, part3d:null, placing:false}), []);
+});
+
+test('U5: Escape in 3D clears a real selection without draw()', () => {
+  for (const [S, selected] of [[{v:'3d', s:'c1', part3d:null}, [{}]], [{v:'3d', s:null, part3d:{ref:'R1'}}, [{}]]]) {
+    const calls = escapeHarness(S, selected);
+    assert.ok(!calls.includes('draw'), calls.join());
+    assert.ok(calls.includes('clearSelection') && calls.includes('saveHash'), calls.join());
+    assert.equal(S.s, null); assert.equal(S.part3d, null);
+  }
+  assert.ok(escapeHarness({v:'board', s:'c1'}).includes('draw'), '2D Escape keeps its redraw');
+});
+
+class Node3 {
+  constructor(name, parent) { this.name=name; this.children=[]; this.userData={}; this.visible=true; this.parent=null; if(parent)parent.add(this); }
+  add(c) { c.parent=this; this.children.push(c); return this; }
+  getObjectByName(n) { if(this.name===n)return this; for(const c of this.children){const r=c.getObjectByName(n);if(r)return r;} }
+  traverse(fn) { fn(this); this.children.forEach(c=>c.traverse(fn)); }
+}
+function fallbackHarness() {
+  const window = {outlined:[]}, picks = [];
+  const source = readFileSync(new URL('./review3d.js', import.meta.url), 'utf8')
+    .replace('let active = null, bundle;', 'let active = null, bundle; window.setTestSession = s => active = s;')
+    .replace('function outline(scene, node, colour) {', 'function outline(scene, node, colour) { window.outlined.push(node); return {node}; ')
+    .replace('const testSeam = {', 'const testSeam = {pick,');
+  const sceneBase = new Node3('scene-base'), sceneHead = new Node3('scene-head');
+  const base = new Node3('base', sceneBase), head = new Node3('head', sceneHead);
+  const j1 = new Node3('J1', base), mesh = new Node3('', j1); new Node3('J12', head);
+  window.THREE3D = {THREE:{Raycaster:class { setFromCamera() {} intersectObjects(roots) { return roots.includes(base) ? [{object:mesh}] : []; } }, Vector2:class {},
+    Box3:class { setFromObject() { return this; } getCenter(v) { return v; } getBoundingSphere(s) { return s; } }, Vector3:class {}, Sphere:class { radius=1; }}};
+  runInNewContext(readFileSync(new URL('./three-parts.js', import.meta.url), 'utf8'), {window});
+  runInNewContext(source, {window, THREE3D:window.THREE3D, ThreeParts:window.ThreeParts, document:{createElement:() => ({}), head:{appendChild() {}}, documentElement:{}},
+    getComputedStyle:() => ({getPropertyValue:() => ''}), clearTimeout});
+  const change = {id:'c1', action:'modified', ref:'J12', uuid:'u', changes:[['reference','J1','J12']]};
+  const host = {getBoundingClientRect:() => ({left:0, top:0, width:1, height:1}), querySelector:() => null};
+  const views = [{side:'base', scene:sceneBase, host, visible:true}, {side:'head', scene:sceneHead, host, visible:true}];
+  const s = {roots:[base, head], allowedSides:['base','head'], indexedSides:new Set(), changes:[change], views, selected:[], groups:[],
+    hiddenGroups:new Set(), assembled:true, mode:'side', invalidate() {},
+    state:{visibleSides:['base','head'], parts:{base:[], head:[]}, blocks:[], ghosts:[], highlights:[], selected:[]}};
+  window.setTestSession(s); window.Review3D.state = s.state;
+  window.Review3D.onPick = id => picks.push(id);
+  return {api:window.Review3D, views, picks, window, s, change, j1};
+}
+
+test('U6: fallback picking finds a renamed footprint in base by its base reference', () => {
+  const {api, views, picks} = fallbackHarness();
+  api.testSeam.pick(views[0], {clientX:0, clientY:0});
+  assert.deepEqual(picks, ['c1'], 'clicking J1 in base must select the J1 -> J12 change');
+});
+
+test('U6: fallback focus outlines the renamed footprint in the base view too', () => {
+  const {api, window, change, j1, s} = fallbackHarness();
+  api.focus(change, false);
+  assert.ok(window.outlined.includes(j1), 'base view must outline J1');
+  assert.ok(s.selected.some(l => l.side === 'base'), 'the base outline is attributed to the base revision');
+});
+
+test('BR02 applyState normalizes a retained wipe mode to side when the link has no m', () => {
+  const reviewSource = readFileSync(new URL('./review.js', import.meta.url), 'utf8');
+  const applySource = reviewSource.slice(reviewSource.indexOf('function modeFor('), reviewSource.indexOf('const PX = 4;'));
+  const S = {p: 0, v: 'board', m: 'wipe', s: null, t: 'changes', layers: null};
+  const ctx = {
+    S,
+    D: {projects: [{board: {layers: [], model3d: {head: 'head-id'}}, sheets: [], changes: [], checks: []}]},
+    GROUPS3D: [],
+    LIGHT_RIGS3D: [],
+    MODES: {side: true, overlay: true, wipe: true, blend: true, semantic: true},
+    boardAvailable: () => true,
+    modelAvailable: () => true,
+    firstChangedView: () => 'board',
+    clearImageSelection: () => {},
+    renderModes: () => {},
+    renderNav: () => {},
+    renderPanel: () => {},
+    renderInspector: () => {},
+    renderZoombar: () => {},
+    draw: () => Promise.resolve(),
+    goTo: () => {},
+    Appearance: {patch: () => {}, configure: () => {}},
+    viewerIdFor: () => 'viewer',
+    proj: () => ctx.D.projects[0],
+    canon: x => x,
+    single: () => false,
+    window: {ThreeStudio: {normalizeLighting: x => x, PRESETS: {bench: {}}}}
+  };
+  runInNewContext(applySource, ctx);
+  ctx.applyState({v: '3d'});
+  assert.equal(S.v, '3d');
+  assert.equal(S.m, 'side');
+});
+
+test('BR02 a design report link to 3D with wipe opens side by side', () => {
+  const reviewSource = readFileSync(new URL('./review.js', import.meta.url), 'utf8');
+  const applySource = reviewSource.slice(reviewSource.indexOf('function modeFor('), reviewSource.indexOf('const PX = 4;'));
+  for (const retained of ['wipe', 'side']) {
+    const S = {p: 0, v: 'board', m: retained, s: null, t: 'checks', layers: null};
+    const ctx = {
+      S,
+      D: {mode: 'single', projects: [{board: {layers: [], model3d: {head: 'head-id'}}, sheets: [], changes: [], checks: []}]},
+      GROUPS3D: [], LIGHT_RIGS3D: [],
+      MODES: {side: true, overlay: true, wipe: true, blend: true, semantic: true},
+      boardAvailable: () => true, modelAvailable: () => true, firstChangedView: () => 'board',
+      clearImageSelection: () => {}, renderModes: () => {}, renderNav: () => {}, renderPanel: () => {},
+      renderInspector: () => {}, renderZoombar: () => {}, draw: () => Promise.resolve(), goTo: () => {},
+      Appearance: {patch: () => {}, configure: () => {}}, viewerIdFor: () => 'viewer',
+      proj: () => ctx.D.projects[0], canon: x => x, single: () => true,
+      window: {ThreeStudio: {normalizeLighting: x => x, PRESETS: {bench: {}}}}
+    };
+    runInNewContext(applySource, ctx);
+    ctx.applyState({v: '3d', m: 'wipe'});
+    assert.equal(S.v, '3d');
+    assert.equal(S.m, 'side', `retained ${retained}`);
+  }
+});
