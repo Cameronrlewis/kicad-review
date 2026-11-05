@@ -11,9 +11,14 @@ window.ThreeParts=(()=>{
       ids.add(p.uuid);refs.add(p.ref);return {...p,box:p.box.slice()};
     });
   }
+  // Without a part-index UUID match, a renamed footprint's base reference is the Reference change's old value.
+  function revisionRef(change,revision) {
+    const t=revision==='base'&&change.changes?.find(c=>Array.isArray(c)&&String(c[0]).toLowerCase()==='reference');
+    return t&&typeof t[1]==='string'&&t[1]?t[1]:change.ref;
+  }
   function reference(change,revision,rows) {
     const uuid=revision==='base'?(change.uuid_before||change.uuid):change.uuid;
-    return rows.find(p=>p.uuid===uuid)?.ref||change.ref;
+    return rows.find(p=>p.uuid===uuid)?.ref||revisionRef(change,revision);
   }
-  return {validate,reference};
+  return {validate,reference,revisionRef};
 })();

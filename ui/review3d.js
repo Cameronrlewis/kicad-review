@@ -412,7 +412,7 @@ window.Review3D = (() => {
     session.intersectionObserver.observe(session.stage);
   }
   function setCamera(v, centre, radius, animate) { const { THREE } = window.THREE3D, dir = v.camera.position.clone().sub(v.controls.target).normalize(), vfov = THREE.MathUtils.degToRad(v.camera.fov), hfov = 2 * Math.atan(Math.tan(vfov / 2) * v.camera.aspect), distance = Math.max(radius / Math.sin(Math.min(vfov, hfov) / 2) * 1.25, .02), target = centre.clone(), position = centre.clone().addScaledVector(dir, distance);
-    const owner=active, startP=v.camera.position.clone(), startT=v.controls.target.clone(), start=performance.now(), length=animate&&!matchMedia("(prefers-reduced-motion: reduce)").matches?400:0; const tick=now=>{ if(owner.dead)return; const t=length?Math.min(1,(now-start)/length):1, e=1-(1-t)*(1-t); v.camera.position.lerpVectors(startP,position,e); v.controls.target.lerpVectors(startT,target,e); if(!length){v.camera.near=distance/100;v.camera.far=distance*100;} v.camera.updateProjectionMatrix(); v.controls.update(); if(length)render(); if(t<1) animateFrame(owner,tick); }; if(length)animateFrame(owner,tick);else tick(start);
+    const owner=active, startP=v.camera.position.clone(), startT=v.controls.target.clone(), start=performance.now(), length=animate&&!matchMedia("(prefers-reduced-motion: reduce)").matches?400:0; v.camera.near=distance/100; v.camera.far=distance*100; const tick=now=>{ if(owner.dead)return; const t=length?Math.min(1,(now-start)/length):1, e=1-(1-t)*(1-t); v.camera.position.lerpVectors(startP,position,e); v.controls.target.lerpVectors(startT,target,e); v.camera.updateProjectionMatrix(); v.controls.update(); if(length)render(); if(t<1) animateFrame(owner,tick); else window.Review3D.onCameraEnd?.(); }; if(length)animateFrame(owner,tick);else tick(start);
   }
   function frame(direction = "3d") { if (!active?.box) return; const { THREE } = window.THREE3D, b = active.box, c = b.getCenter(new THREE.Vector3()), dirs = { top:[0,1,0], bottom:[0,-1,0], front:[0,0,-1], back:[0,0,1], left:[-1,0,0], right:[1,0,0], "3d":[1,.99,-1], reset:[1,.99,-1] }, d = new THREE.Vector3(...dirs[direction]).normalize(), radius = b.getBoundingSphere(new THREE.Sphere()).radius;
     active.views.forEach(v => { const vfov = THREE.MathUtils.degToRad(v.camera.fov), hfov = 2 * Math.atan(Math.tan(vfov / 2) * v.camera.aspect), distance = radius / Math.sin(Math.min(vfov, hfov) / 2) * 1.08; v.camera.up.set(...((direction === "top" || direction === "bottom") ? [0,0,-1] : [0,1,0])); v.controls._quat.setFromUnitVectors(v.camera.up, new THREE.Vector3(0,1,0)); v.controls._quatInverse.copy(v.controls._quat).invert(); v.camera.position.copy(c).addScaledVector(d, distance); v.controls.target.copy(c); v.camera.near = distance / 100; v.camera.far = distance * 100; v.camera.updateProjectionMatrix(); v.controls.update(); }); render(); }
@@ -594,11 +594,12 @@ window.Review3D = (() => {
   function hit(v,e) {
     const {THREE}=THREE3D, r=v.host.getBoundingClientRect(), ray=new THREE.Raycaster();
     ray.setFromCamera(new THREE.Vector2((e.clientX-r.left)/r.width*2-1,-(e.clientY-r.top)/r.height*2+1),v.camera);
-    const roots=active.allowedSides.filter(side=>!active.indexedSides.has(side)&&(!v.side||v.side===side))
-      .map(side=>sideRoot(active,side)).filter(root=>root?.parent===v.scene);
-    const h=ray.intersectObjects(roots,true).find(x=>visibleNode(x.object));
-    let n=h?.object;while(n&&!n.userData.noModel&&!active.changes.some(c=>c.ref===n.name))n=n.parent;
-    return n;
+    const sides=active.allowedSides.filter(side=>!active.indexedSides.has(side)&&(!v.side||v.side===side)&&sideRoot(active,side)?.parent===v.scene);
+    const h=ray.intersectObjects(sides.map(side=>sideRoot(active,side)),true).find(x=>visibleNode(x.object));
+    let side=null;for(let o=h?.object;o&&!side;o=o.parent)side=sides.find(sd=>sideRoot(active,sd)===o)||null;
+    let n=h?.object,change=null;
+    while(n&&!n.userData.noModel&&!(change=active.changes.find(c=>ThreeParts.revisionRef(c,side)===n.name)))n=n.parent;
+    return n&&{node:n,change};
   }
   function pick(v,e) {
     if(!active)return;
@@ -611,12 +612,12 @@ window.Review3D = (() => {
       tooltip(v,p.ref+(p.hasModel?'':' · no 3D model'),e.clientX-b.left,e.clientY-b.top,1200);
       return;
     }
-    const n=hit(v,e);if(!n)return;const c=active.changes.find(x=>x.ref===n.name);
+    const c=hit(v,e)?.change;
     if(c)window.Review3D.onPick?.(c.id);else hover(v,e);
   }
   function hover(v,e) {
     if(!active)return;
-    const p=indexedHit(v,e), n=p?null:hit(v,e), r=v.host.getBoundingClientRect();
+    const p=indexedHit(v,e), n=p?null:hit(v,e)?.node, r=v.host.getBoundingClientRect();
     if(p)tooltip(v,p.ref+(p.hasModel?'':' · no 3D model'),e.clientX-r.left,e.clientY-r.top,1200);
     else if(n?.userData.noModel)tooltip(v,`${n.name} · no 3D model`,e.clientX-r.left,e.clientY-r.top,1200);
     else v.host.querySelector('.tip3d')?.remove();
@@ -647,6 +648,8 @@ window.Review3D = (() => {
     active.selected.forEach(o=>{o.removeFromParent();o.traverse(free);});
     active.selected=[];active.state.selected=active.selected;
   }
+  // Escape: drop the outline and tooltips in place; the session, models and renderer stay.
+  function clearSelection() { if(!active)return; clearPartSelection(); clearPartTooltips(); render(); }
   function appendPartOutline(ref,side) {
     const s=active,p=s.state.parts[side]?.find(p=>p.ref===ref);
     if(!p||!visiblePart(p))return;
@@ -691,7 +694,7 @@ window.Review3D = (() => {
     render();
   }
   function tooltip(v,text,x,y,ms){ let el=v.host.querySelector(".tip3d");if(!el){el=document.createElement("span");el.className="tip3d";v.host.appendChild(el);}el.textContent=text;el.style.left=`${x}px`;el.style.top=`${y}px`;clearTimeout(v.tip);if(ms)v.tip=setTimeout(()=>el.remove(),ms); }
-  function focus(change, moveCamera=true) { if(!active)return; if(active.indexedSides.size)return focusIndexedChange(change,moveCamera); const side=change.action === "removed" ? "base" : "head", root=sideRoot(active,side), n=root?.getObjectByName(change.ref); if(!n)return; const {THREE}=window.THREE3D,b=new THREE.Box3().setFromObject(n), c=b.getCenter(new THREE.Vector3()), radius=b.getBoundingSphere(new THREE.Sphere()).radius; if(moveCamera)active.views.forEach(v=>setCamera(v,c,radius,true)); active.selected.forEach(x=>{x.removeFromParent();x.traverse(free);}); active.views.forEach(v=>{v.host.querySelector(".tip3d")?.remove();if(n.userData.noModel)tooltip(v,`${n.name} · no 3D model`,v.host.clientWidth/2,v.host.clientHeight/2,0);}); active.selected=active.views.filter(v=>v.visible).flatMap(v=>{const own=[root,sideRoot(active,side === "head" ? "base" : "head")].map(r=>r?.parent===v.scene&&r?.getObjectByName(change.ref)).find(Boolean);if(!own)return [];const line=outline(v.scene,own,css("--accent"));line.ref=change.ref;line.side=active.allowedSides.find(side=>sideRoot(active,side)?.getObjectByName(change.ref)===own);return [line];}); window.Review3D.state.selected=active.selected; applyVisibility(); render(); }
+  function focus(change, moveCamera=true) { if(!active)return; if(active.indexedSides.size)return focusIndexedChange(change,moveCamera); const side=change.action === "removed" ? "base" : "head", root=sideRoot(active,side), n=root?.getObjectByName(change.ref); if(!n)return; const {THREE}=window.THREE3D,b=new THREE.Box3().setFromObject(n), c=b.getCenter(new THREE.Vector3()), radius=b.getBoundingSphere(new THREE.Sphere()).radius; if(moveCamera)active.views.forEach(v=>setCamera(v,c,radius,true)); active.selected.forEach(x=>{x.removeFromParent();x.traverse(free);}); active.views.forEach(v=>{v.host.querySelector(".tip3d")?.remove();if(n.userData.noModel)tooltip(v,`${n.name} · no 3D model`,v.host.clientWidth/2,v.host.clientHeight/2,0);}); active.selected=active.views.filter(v=>v.visible).flatMap(v=>{const own=[side,side === "head" ? "base" : "head"].map(sd=>{const r=sideRoot(active,sd);return r?.parent===v.scene&&r.getObjectByName(ThreeParts.revisionRef(change,sd));}).find(Boolean);if(!own)return [];const line=outline(v.scene,own,css("--accent"));line.side=active.allowedSides.find(sd=>sideRoot(active,sd)?.getObjectByName(ThreeParts.revisionRef(change,sd))===own);line.ref=ThreeParts.revisionRef(change,line.side);return [line];}); window.Review3D.state.selected=active.selected; applyVisibility(); render(); }
   function setBlend(value) {
     if(!active?.blend)return;
     value=Number.isFinite(value)?Math.max(0,Math.min(1,value)):.5;
@@ -806,7 +809,7 @@ window.Review3D = (() => {
   async function show(stage, project, appState, {single = false} = {}) {
     window.Review3D.onStateChange?.({partSelection:null});
     dispose();
-    const model = project.board.model3d || {}, sides = single ? ['head'] : ['base', 'head'], mode = appState.m;
+    const model = project.board.model3d || {}, sides = single ? ['head'] : ['base', 'head'], mode = appState.m === 'wipe' ? 'side' : appState.m;
     const session = active = {
       views:[], roots:[], changes:project.changes.filter(c => c.kind === 'footprint'),
       refs:new Set(), changesByRef:{}, indexedSides:new Set(), hiddenGroups:new Set(), groups:[], selected:[], dead:false, mode, single, allowedSides:sides,
@@ -820,7 +823,7 @@ window.Review3D = (() => {
       assembled:appState.assembled3d !== false, hidden:[], lighting:normalizeLighting(appState.lighting3d), hiddenBodies:false, visible:true, hostsBySide:{}, stage, project, appState
     };
     const state = window.Review3D.state = session.state = {
-      roots:session.roots, views:session.views, decodedScenes:session.decodedScenes, disposed:false, firstFrame:false, loading:false,
+      roots:session.roots, views:session.views, mode:session.mode, decodedScenes:session.decodedScenes, disposed:false, firstFrame:false, loading:false,
       revision:session.revision, assembled:session.assembled, lighting:session.lighting, modelDigests:{},
       readyBySide:{base:{frame:false},head:{frame:false}},
       loadingBySide:{base:false, head:false}, posterBySide:{base:null, head:null}, errorsBySide:{}, posterErrorsBySide:{},
@@ -1021,5 +1024,5 @@ window.Review3D = (() => {
   // Node and headless browser contracts share one explicit test seam.
   const testSeam = {sampleFrame, session:()=>active, poster3d, parseByDigest, releaseGpu};
   if (typeof module !== 'undefined') module.exports = testSeam;
-  return {show,dispose,cameraBar,frame,focus,focusPart,changeForPart,setHidden,setLighting,setAssembled,normalizeLighting,cameraState,setCameraState,setBlend,toggleBlend,resize,setRevision,state:null,testSeam};
+  return {show,dispose,cameraBar,frame,focus,focusPart,clearSelection,changeForPart,setHidden,setLighting,setAssembled,normalizeLighting,cameraState,setCameraState,setBlend,toggleBlend,resize,setRevision,state:null,testSeam};
 })();

@@ -777,3 +777,28 @@ test('asset client drains a bounded FIFO without rejecting multi-project bursts'
 test('image owners expose only explicit disposal, not a global disposal registry', () => {
   assert.equal('disposeAll' in ctx.ImageView, false);
 });
+
+test('U4: electrical pin lookups use only validated sheet manifests and never re-read the raw asset', async () => {
+  const api = manifestHarness();
+  const fn = reviewSource.slice(reviewSource.indexOf('async function electricalManifest('), reviewSource.indexOf('function electricalPins('));
+  const bad = structuredClone(sheetManifest); bad.views[1].elements[0].pins[0].x = 'oops';
+  const path = sheetManifest.views[1].sheet;
+  const run = async (asset, cached) => {
+    const reads = [];
+    const context = vm.createContext({
+      proj: () => ({sheets: [{path, hotspots: {head: 'h'}}]}),
+      decodedSheetHotspots: new Map(cached ? [['h', cached]] : []), validateImageManifest: api.validateImageManifest,
+      svgText: async id => { reads.push('svgText'); return JSON.stringify(asset); },
+      jsonAsset: async id => { reads.push('jsonAsset'); return structuredClone(asset); },
+    });
+    vm.runInContext(fn, context);
+    return {view: await context.electricalManifest(path, 'head'), reads};
+  };
+  const rejected = await run(bad);
+  assert.equal(rejected.view, null, 'a manifest validateImageManifest rejects must not reach zoomTo');
+  assert.ok(!rejected.reads.includes('svgText'), 'JSON assets are decoded once through jsonAsset');
+  const valid = await run(sheetManifest);
+  assert.equal(valid.view?.sheet, path);
+  const cached = await run(bad, sheetManifest);
+  assert.equal(cached.view?.sheet, path); assert.deepEqual(cached.reads, []);
+});

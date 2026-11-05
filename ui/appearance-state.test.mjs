@@ -250,6 +250,34 @@ test('patch validates and merges partial maps, notifies once with separate snaps
   assert.deepEqual(plain(store.get()),before); assert.equal(writes,2);
 });
 
+test('restoring net colour via patch nets null removes both netColors and nets representations and cleans storage', () => {
+  const disk = memory(), store = A.createStore({viewerId: 'A', storage: () => disk});
+  store.patch({netColors: {GND: [1, .8, 0, 1]}});
+  assert.deepEqual(plain(store.get().netColors.GND), [1, .8, 0, 1]);
+  assert.deepEqual(plain(store.get().nets.GND.color), [255, 204, 0, 1]);
+
+  store.patch({nets: {GND: {color: null}}});
+  assert.equal(store.get().netColors.GND, undefined);
+  assert.equal(store.get().nets.GND.color, undefined);
+  assert.deepEqual(plain(store.get().nets.GND), {});
+  const envelope = JSON.parse(disk.getItem(storageKey));
+  assert.equal(envelope.viewers.A.netColors.GND, undefined);
+  assert.equal(envelope.viewers.A.nets.GND?.color, undefined);
+  assert.deepEqual(plain(envelope.viewers.A.nets.GND), {});
+
+  // Preserves existing non-colour fields such as visibility
+  store.patch({nets: {VCC: {visible: false, color: [100, 200, 50, 1]}}});
+  assert.equal(store.get().nets.VCC.visible, false);
+  assert.deepEqual(plain(store.get().nets.VCC.color), [100, 200, 50, 1]);
+  store.patch({nets: {VCC: {color: null}}});
+  assert.equal(store.get().netColors.VCC, undefined);
+  assert.equal(store.get().nets.VCC.color, undefined);
+  assert.deepEqual(plain(store.get().nets.VCC), {visible: false});
+  const env2 = JSON.parse(disk.getItem(storageKey));
+  assert.equal(env2.viewers.A.netColors.VCC, undefined);
+  assert.deepEqual(plain(env2.viewers.A.nets.VCC), {visible: false});
+});
+
 test('special viewer names are own keys; writes preserve other viewers and exclude unrelated fields', () => {
   const disk=memory(); disk.setItem('kr.theme','light');
   for(const viewerId of ['__proto__','constructor','repo/A']) {
