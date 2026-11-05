@@ -405,6 +405,7 @@ test('a request with the old cookie arriving just after a completed rotation reu
     if (url !== 'https://github.com/login/oauth/access_token') return new Response('{}', { status: 500 });
     refreshes += 1;
     // One-use refresh tokens: a second exchange of the consumed token is refused.
+    if (refreshes === 3) return tokenResponse({ error: 'incorrect_client_credentials' });
     return refreshes === 1 ? tokenResponse({ access_token: 'new-token', refresh_token: 'new-refresh' }) : tokenResponse({ error: 'bad_refresh_token' });
   });
   try {
@@ -416,14 +417,174 @@ test('a request with the old cookie arriving just after a completed rotation reu
     assert.match(await late.text(), /Signed in as octocat/);
     assert.equal((await open(cookieValue(late, 's'), env)).r, 'new-refresh');
     // After the grace window the consumed token is exchanged again and its refusal signs out.
+    // bad_refresh_token keeps the cookie (another response may have just set a fresh one); other errors clear it.
     const realNow = Date.now, later = realNow() + 31_000;
     Date.now = () => later;
     try {
       const expired = await call('/', { headers: { Cookie: `s=${expiring}` } });
       assert.equal(refreshes, 2);
       assert.match(await expired.text(), /Sign in with GitHub/);
+      assert.deepEqual(cookies(expired), []);
+      const refused = await call('/', { headers: { Cookie: `s=${expiring}` } });
+      assert.equal(refreshes, 3);
+      assert.match(await refused.text(), /Sign in with GitHub/);
+      assert.match(cookies(refused).join('\n'), /s=;.*Max-Age=0/);
     } finally { Date.now = realNow; }
   } finally { restore(); }
+});
+
+// A second module instance has its own isolate-local refresh maps, standing in for a second isolate.
+const otherIsolate = async () => (await import('./worker.js?isolate=2')).default;
+function oneUseTokens() {
+  const state = { refreshes: 0 };
+  state.restore = mockFetch(async (url) => {
+    if (url !== 'https://github.com/login/oauth/access_token') return new Response('{}', { status: 500 });
+    state.refreshes += 1;
+    const first = state.refreshes === 1;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    return first ? tokenResponse({ access_token: 'new-token', refresh_token: 'new-refresh' }) : tokenResponse({ error: 'bad_refresh_token' });
+  });
+  return state;
+}
+async function bothIsolates(r, environment) {
+  const expiring = await seal({ t: 'old-token', r, e: Date.now() + 60_000, re: Date.now() + 7_200_000, u: 'octocat' }, env);
+  const other = await otherIsolate();
+  const responses = await Promise.all([worker, other].map((instance) => instance.fetch(request('/', { headers: { Cookie: `s=${expiring}` } }), environment)));
+  responses.forEach(checkSecurity);
+  return responses;
+}
+
+test('two isolates share one refresh token rotation through the refresh coordinator', async () => {
+  const { RefreshCoordinator } = await import('./worker.js');
+  const coordinator = new RefreshCoordinator({}, env);
+  const names = [];
+  const shared = { ...env, REFRESH: {
+    idFromName: (name) => { names.push(name); return name; },
+    get: () => ({ fetch: (url, init) => coordinator.fetch(new Request(url, init)) }),
+  } };
+  const tokens = oneUseTokens();
+  try {
+    const responses = await bothIsolates('coordinated-refresh', shared);
+    assert.equal(tokens.refreshes, 1);
+    for (const response of responses) {
+      assert.match(await response.text(), /Signed in as octocat/);
+      assert.equal((await open(cookieValue(response, 's'), env)).r, 'new-refresh');
+    }
+    assert.equal(names.length, 2);
+    assert.equal(names[0], names[1]);
+    // Named by the SHA-256 of the old refresh token, never the token itself.
+    assert.equal(names[0], createHash('sha256').update('coordinated-refresh').digest('base64url'));
+  } finally { tokens.restore(); }
+});
+
+test('without the refresh coordinator, the second isolate loses the one-use refresh race', async () => {
+  const tokens = oneUseTokens();
+  try {
+    const responses = await bothIsolates('uncoordinated-refresh', env);
+    assert.equal(tokens.refreshes, 2);
+    const pages = await Promise.all(responses.map((response) => response.text()));
+    assert.equal(pages.filter((page) => /Signed in as octocat/.test(page)).length, 1);
+    assert.equal(pages.filter((page) => /Sign in with GitHub/.test(page)).length, 1);
+  } finally { tokens.restore(); }
+});
+
+// Ways the coordinator's answer can be lost on its way back to the Worker.
+const lostAnswers = [
+  ['throws', async () => { throw new Error('object unavailable'); }],
+  ['fails', async () => new Response('{}', { status: 500 })],
+  ['malformed', async () => new Response('not json')],
+];
+
+test('a lost refresh coordinator answer is retried on the coordinator, never replayed directly', async () => {
+  const { RefreshCoordinator } = await import('./worker.js');
+  for (const [name, lose] of lostAnswers) {
+    const coordinator = new RefreshCoordinator({}, env);
+    const names = [];
+    let calls = 0;
+    const flaky = { ...env, REFRESH: {
+      idFromName: (id) => { names.push(id); return id; },
+      // The first call completes GitHub's exchange inside the object, then its answer is lost.
+      get: () => ({ fetch: async (url, init) => {
+        calls += 1;
+        const answer = await coordinator.fetch(new Request(url, init));
+        return calls === 1 ? lose() : answer;
+      } }),
+    } };
+    const expired = await seal({ t: 'old-token', r: `retry-${name}`, e: Date.now() - 1, re: Date.now() + 7_200_000, u: 'octocat' }, env);
+    let refreshes = 0;
+    const restore = mockFetch(async (url) => {
+      if (url !== 'https://github.com/login/oauth/access_token') return new Response('{}', { status: 500 });
+      refreshes += 1;
+      return refreshes === 1 ? tokenResponse({ access_token: 'new-token', refresh_token: 'new-refresh' }) : tokenResponse({ error: 'bad_refresh_token' });
+    });
+    try {
+      const response = await worker.fetch(request('/', { headers: { Cookie: `s=${expired}` } }), flaky);
+      assert.equal(refreshes, 1, name);
+      assert.equal(calls, 2, name);
+      assert.equal(new Set(names).size, 1, name);
+      assert.match(await response.text(), /Signed in as octocat/, name);
+      assert.equal((await open(cookieValue(response, 's'), env)).r, 'new-refresh', name);
+    } finally { restore(); }
+  }
+});
+
+test('an unavailable refresh coordinator keeps the session cookie and never refreshes directly', async () => {
+  for (const [name, lose] of lostAnswers) {
+    let calls = 0;
+    const unavailable = { ...env, REFRESH: { idFromName: (id) => id, get: () => ({ fetch: async () => { calls += 1; return lose(); } }) } };
+    const expired = await seal({ t: 'old-token', r: `unavailable-${name}`, e: Date.now() - 1, re: Date.now() + 7_200_000, u: 'octocat' }, env);
+    let refreshes = 0;
+    const restore = mockFetch(async (url) => {
+      if (url === 'https://github.com/login/oauth/access_token') refreshes += 1;
+      return new Response('{}', { status: 500 });
+    });
+    const warn = console.warn, warnings = [];
+    console.warn = (...args) => { warnings.push(args.map(String).join(' ')); };
+    try {
+      const response = await worker.fetch(request('/', { headers: { Cookie: `s=${expired}` } }), unavailable);
+      checkSecurity(response);
+      assert.equal(calls, 2, name);
+      assert.equal(refreshes, 0, name);
+      assert.match(await response.text(), /Sign in with GitHub/, name);
+      assert.deepEqual(cookies(response), [], name);
+    } finally { console.warn = warn; restore(); }
+    assert.equal(warnings.length, 1, name);
+    assert.doesNotMatch(warnings[0], /old-token|unavailable-|s=/, name);
+  }
+});
+
+test('without the refresh coordinator, an expired session refreshes directly', async () => {
+  const expired = await seal({ t: 'old-token', r: 'direct-refresh', e: Date.now() - 1, re: Date.now() + 7_200_000, u: 'octocat' }, env);
+  assert.equal(env.REFRESH, undefined);
+  let refreshes = 0;
+  const restore = mockFetch(async (url) => {
+    if (url !== 'https://github.com/login/oauth/access_token') return new Response('{}', { status: 500 });
+    refreshes += 1;
+    return tokenResponse({ access_token: 'new-token', refresh_token: 'new-refresh' });
+  });
+  try {
+    const response = await call('/', { headers: { Cookie: `s=${expired}` } });
+    assert.equal(refreshes, 1);
+    assert.match(await response.text(), /Signed in as octocat/);
+    assert.equal((await open(cookieValue(response, 's'), env)).r, 'new-refresh');
+  } finally { restore(); }
+});
+
+test('home keeps the session cookie when its refresh token was already used, and logs only the error code', async () => {
+  const expired = await seal({ t: 'old-token', r: 'used-refresh', e: Date.now() - 1, re: Date.now() + 7_200_000, u: 'octocat' }, env);
+  const restore = mockFetch(async () => tokenResponse({ error: 'bad_refresh_token' }));
+  const warn = console.warn, warnings = [];
+  console.warn = (...args) => { warnings.push(args.map(String).join(' ')); };
+  try {
+    const response = await call('/', { headers: { Cookie: `s=${expired}` } });
+    assert.match(await response.text(), /Sign in with GitHub/);
+    assert.deepEqual(cookies(response), []);
+  } finally { console.warn = warn; restore(); }
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /bad_refresh_token/);
+  for (const secret of ['old-token', 'used-refresh', expired, 'octocat', env.GITHUB_CLIENT_SECRET, env.SESSION_KEY]) {
+    assert.ok(!warnings[0].includes(secret), 'warning must not include tokens, cookies or user identity');
+  }
 });
 
 test('OAuth token exchanges never follow redirects, and a redirect fails closed', async () => {

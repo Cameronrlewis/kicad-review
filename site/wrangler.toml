@@ -12,3 +12,12 @@ globs = ["**/*.css", "**/ui/*.js", "**/ui/review.html", "**/ui/icons/sprite.svg"
 # npx wrangler secret put NAME; never commit those secrets.
 [vars]
 ALLOWED_OWNERS = "Cameronrlewis"
+
+# Shares one-use GitHub refresh token rotations across isolates; keeps nothing in storage.
+[[durable_objects.bindings]]
+name = "REFRESH"
+class_name = "RefreshCoordinator"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RefreshCoordinator"]
