@@ -2773,6 +2773,15 @@ test('worker main named exports are functions or handlers, never CSP strings', a
   }
 });
 
+test('wrangler main module exports every Durable Object class bound in wrangler.toml', async () => {
+  const toml = readFileSync('site/wrangler.toml', 'utf8');
+  const main = toml.match(/^main = "([^"]+)"$/m)[1];
+  const classes = [...toml.matchAll(/^class_name = "([^"]+)"$/gm)].map(m => m[1]);
+  assert.ok(classes.length, 'no durable_objects bindings found');
+  const exports = await import(`./${main}`);
+  for (const name of classes) assert.equal(typeof exports[name], 'function', `${main} does not export ${name}`);
+});
+
 test('serialized thread client has no bundler name helpers and notice is in review bar', () => {
   assert.doesNotMatch(threadsClient.toString(), /__name/);
   assert.match(readFileSync('site/wrangler.toml', 'utf8'), /^keep_names = false$/m);

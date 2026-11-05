@@ -4,6 +4,8 @@ import { loadContext } from './ask.js';
 import { consentRoute, oauthFetch } from './mcp-auth.js';
 import { mcpResponse, TOOLS, validateTool } from './mcp.js';
 import { runTool } from './mcp-data.js';
+// Wrangler finds Durable Object classes only on the entry module.
+export { RefreshCoordinator } from './worker.js';
 
 // Wrangler entry point: OAuth provider around POST /mcp; every other route falls through to the existing site.
 // Overrides are test-only code injection, never request parameters.
