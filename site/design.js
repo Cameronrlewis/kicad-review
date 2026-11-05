@@ -1,6 +1,7 @@
 // The design page: the newest design snapshot for a branch, tag or commit, found through GitHub. No store.
 import { reportCsp, frameCsp } from './csp.js';
-import { currentReport } from './report-shell.js';
+import { currentReport, readReportText, MAX_REPORT_BYTES } from './report-shell.js';
+import { downloadUrl } from './share.js';
 
 export const designName = /^kicad-design-([0-9a-f]{7})\.html$/;
 const hex40 = /^[0-9a-f]{40}$/;
@@ -12,14 +13,19 @@ export const refOk = (ref) => typeof ref === 'string' && ref.length > 0 && ref.l
 const live = (a) => a && !a.expired && /^\d{1,20}$/.test(String(a.id)) && designName.test(a.name || '');
 const byNewest = (a, b) => String(b.created_at || '').localeCompare(String(a.created_at || ''));
 
-// The signed storage URL GitHub redirects to. The token is never sent to it.
-async function signedBody(response, what) {
+// The signed storage URL GitHub redirects to. The token is never sent to it. Artifact downloads use the site's
+// storage host policy (downloadUrl); every body is read within the report byte bound, never buffered whole first.
+async function signedBody(response, what, artifactHost = false) {
   const location = new URL(response.headers.get('Location'));
   if (location.protocol !== 'https:' || location.username || location.password) throw new Error('invalid artifact URL');
-  const body = await fetch(location.href, { redirect: 'manual' });
+  const href = artifactHost ? downloadUrl(location.href) : location.href;
+  if (!href) throw new Error('invalid artifact URL');
+  const body = await fetch(href, { redirect: 'manual' });
   if (!body.ok) throw new Error(`${what} body unavailable`);
-  return body.text();
+  return readReportText(body);
 }
+// A declared size outside the report bound is refused before any download.
+const sizeOk = (bytes) => bytes == null || (Number.isSafeInteger(bytes) && bytes > 0 && bytes <= MAX_REPORT_BYTES);
 // The report's payload: a single-revision report that names its own commit. Anything else is refused.
 export function snapshotPayload(text) {
   // ponytail: the existing non-archived HTML artifact format only; no arbitrary script execution.
@@ -31,13 +37,15 @@ export function snapshotPayload(text) {
 }
 // Download only through the authenticated GitHub artifact endpoint. Never expose its signed URL.
 export async function readSnapshot(gh, token, root, artifact) {
+  if (!sizeOk(artifact.size_in_bytes)) return null;
   const response = await gh(`${root}/actions/artifacts/${artifact.id}/zip`, token, { redirect: 'manual' });
   if (response.status === 410) return null;
   if (response.status !== 302) throw new Error('snapshot download unavailable');
-  return snapshotPayload(await signedBody(response, 'snapshot'));
+  return snapshotPayload(await signedBody(response, 'snapshot', true));
 }
 // The release asset's body as text.
 export async function releaseText(gh, token, root, asset) {
+  if (!sizeOk(asset.size)) throw new Error('release asset too large');
   const response = await gh(`${root}/releases/assets/${enc(String(asset.id))}`, token, { headers: { Accept: 'application/octet-stream' }, redirect: 'manual' });
   if (response.status !== 302) throw new Error('release asset unavailable');
   return signedBody(response, 'release');
@@ -100,22 +108,29 @@ async function commitDetails(gh, token, root, sha, budget) {
 }
 // A pull request's run (a fork's above all) can upload a file with any name, so a snapshot counts only from this
 // repository's own push or manual run. A fork run is refused from the listing alone; the others cost one run lookup each.
+// As on the report routes, the run must be kicad-review.yml and, unless manual, its head must be the named commit.
+const workflowPath = '.github/workflows/kicad-review.yml';   // worker.js workflowFile
 const ownRun = (a) => /^\d{1,20}$/.test(String(a.workflow_run?.id)) && Number.isSafeInteger(a.workflow_run?.repository_id)
   && a.workflow_run.head_repository_id === a.workflow_run.repository_id;
 async function snapshotRun(gh, token, root, artifact) {
   const response = await gh(`${root}/actions/runs/${enc(String(artifact.workflow_run.id))}`, token);
   if (!response.ok) throw new Error('run unavailable');
   const run = await response.json();
+  const head7 = designName.exec(artifact.name || '')?.[1];
   return (run.event === 'push' || run.event === 'workflow_dispatch') && run.repository?.id === artifact.workflow_run.repository_id
-    && run.head_repository?.id === run.repository?.id;
+    && run.head_repository?.id === run.repository?.id && run.path === workflowPath
+    && (run.event === 'workflow_dispatch' || (hex40.test(run.head_sha || '') && Boolean(head7) && run.head_sha.startsWith(head7)));
 }
 // ponytail: at most SNAPSHOT_CANDIDATES same-named artifacts are examined per commit (newest first); older ones are not read.
 const SNAPSHOT_CANDIDATES = 3;
+// ponytail: at most SNAPSHOT_LIST_PAGES name-filtered listing pages per lookup; more fails closed (an error, never a guess).
+const SNAPSHOT_LIST_PAGES = 2;
 // Newest live artifact named for this sha7, from this repository's push or manual run, whose payload names this exact sha.
 // An expired artifact is never read.
 async function artifactAt(gh, token, root, sha, read) {
   let examined = 0;
   for (let page = 1; ; page += 1) {
+    if (page > SNAPSHOT_LIST_PAGES) throw new Error('artifacts unpaged');
     const response = await gh(`${root}/actions/artifacts?name=${enc(`kicad-design-${sha.slice(0, 7)}.html`)}&per_page=100&page=${page}`, token);
     if (!response.ok) throw new Error('artifacts unavailable');
     for (const artifact of ((await response.json()).artifacts || []).filter(live).filter(ownRun).sort(byNewest)) {
@@ -143,9 +158,10 @@ async function releaseAt(gh, token, root, ref, tip, readRelease) {
   const snapshot = await readRelease(gh, token, root, asset);
   return snapshot.head === tip && snapshot.snapshot?.sha === tip ? { source: 'release', asset, snapshot } : null;
 }
-// ponytail: at most DESIGN_WALK_MAX commit-detail requests (pages included) per lookup, within a Worker's subrequest budget.
+// ponytail: at most DESIGN_WALK_MAX commit-detail requests (pages included) per lookup, within a Worker's 50-subrequest budget:
+// access 2 + tip 1 + exact lookup (2 list pages + 3 candidates x 3) + release 3 + walk 20 + nearest lookup 11 = 48.
 // A folder whose nearest change lies further back reads as missing (a render is offered), never as an older stand-in.
-export const DESIGN_WALK_MAX = 40;
+export const DESIGN_WALK_MAX = 20;
 // state: found {source, artifact|asset, snapshot, tip, exact, index} | missing {tip, reason?} | unknown | error.
 // reason 'project' means the snapshot exists but has no such folder. A ref that is a full or short sha is never walked.
 // Otherwise walk first-parent history (a merge's files describe its difference from its first parent) and stop at the
@@ -281,9 +297,10 @@ export class CursorNotFoundError extends Error {
 // include a KiCad input of the folder, renames and deletions included. 25 rows a page. A filtered page cannot be found by
 // page number, so each page resumes from the last commit examined (the cursor). At most MAX_SCAN commit-detail requests are
 // examined per view, and at most MAX_LIST_PAGES list pages are fetched.
-const MAX_SCAN = 60; // ponytail: 60 detail requests per view; the Older link resumes the scan, so no commit is skipped
+// Inside a Worker's 50-subrequest budget: access 2 + tip 1 + list 10 + details 30 + thumbnails 3 = 46.
+export const MAX_SCAN = 30; // ponytail: 30 detail requests per view; the Older link resumes the scan, so no commit is skipped
 const PAGE_ROWS = 25;
-const MAX_LIST_PAGES = 50; // ponytail: at most 50 commit-list requests (up to 5000 path-matching commits) per view
+const MAX_LIST_PAGES = 10; // ponytail: at most 10 commit-list requests (up to 1000 path-matching commits) per view
 export async function scanHistory(gh, token, root, ref, dir, cursor) {
   const rows = [], pathQuery = dir ? `&path=${enc(dir)}` : '', budget = { used: 0, max: MAX_SCAN };
   let skipping = Boolean(cursor), last = cursor || '', progressed = false, listPages = 0;
@@ -310,7 +327,7 @@ export async function scanHistory(gh, token, root, ref, dir, cursor) {
         if (changesProject(commit.files, dir)) {
           rows.push({ sha: item.sha, message: String(item.commit?.message || '').split('\n', 1)[0], author: item.author?.login || item.commit?.author?.name || '?', date: item.commit?.author?.date || '' });
         }
-        // ponytail: a commit with >6000 files that exhausts MAX_SCAN on its first examination is judged on its first 6000 files and advanced (next: item.sha) to prevent an infinite cursor loop; if KiCad files were only beyond file 6000, it is omitted.
+        // ponytail: a commit with >3000 files that exhausts MAX_SCAN on its first examination is judged on its first 3000 files and advanced (next: item.sha) to prevent an infinite cursor loop; if KiCad files were only beyond file 3000, it is omitted.
         return { rows, next: item.sha, truncated: true };
       }
       last = item.sha; progressed = true;
@@ -389,7 +406,8 @@ export async function renderRoute(request, env, { owner, repo }, { access, gh, e
   if (request.headers.get('Origin') !== new URL(request.url).origin) return errorPage(403, 'Forbidden', 'This request cannot be completed.', [{ href: `${path}/projects`, label: 'Projects' }]);
   const allowed = await access(request, env, owner, repo);
   if (allowed instanceof Response) return allowed;
-  const form = await request.formData();
+  let form;
+  try { form = await request.formData(); } catch { form = new FormData(); }   // a malformed body is refused below, as on compare
   const sha = String(form.get('sha') || ''), key = String(form.get('key') || '');
   // The folder's history when the form names a valid folder key (letters, digits and the encodeURIComponent set); the picker otherwise.
   const canonical = key && /^[A-Za-z0-9._~%!*'()-]{1,400}$/.test(key) ? canonicalFolder(key) : null;

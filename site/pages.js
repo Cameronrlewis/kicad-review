@@ -5,7 +5,7 @@ import site from './site.css';
 import { readinessClient } from './readiness-client.js';
 import { threadsClient } from './threads-client.js';
 import { threeClient } from './three-client.js';
-import { designName, projectKey, canonicalFolder } from './design.js';
+import { designName, projectKey, canonicalFolder, MAX_SCAN } from './design.js';
 
 export function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
@@ -149,7 +149,7 @@ export function designsPage({ user, owner, repo, key, ref, rows, tip, next, trun
   const path = repoPath(owner, repo), base = safeKey ? `${path}/p/${safeKey}` : `${path}/projects`;
   const list = (cursor) => `${base}/designs?ref=${encodeURIComponent(ref)}${cursor ? `&cursor=${cursor}` : ''}`;
   const body = rows.map((r) => `<tr><td class="design-thumb">${thumbs?.has(r.sha) ? `<img alt="" width="200" height="125" src="data:image/png;base64,${thumbs.get(r.sha)}">` : '<span class="design-thumb-missing" aria-hidden="true"></span>'}</td><td><code>${e(r.sha.slice(0, 7))}</code></td><td title="${e(r.message)}">${e(r.message)}</td><td>${e(r.author)}</td><td class="mono" title="${e(r.date)}">${e(relativeTime(r.date))}</td><td class="design-actions">${link(safeKey ? `${base}/design/${r.sha}` : `${path}/projects`, 'View', 'btn')}${tip && r.sha !== tip ? `<form method="post" action="${path}/compare"><input type="hidden" name="base" value="${e(r.sha)}"><input type="hidden" name="head" value="${e(tip)}"><button class="btn" title="Review what changed from this commit to the newest one">Compare with newest</button></form>` : ''}</td></tr>`).join('');
-  const notice = truncated ? `<div class="notice notice-info" role="status">Scanned 60 commits. Older KiCad changes follow with Older.</div>` : '';
+  const notice = truncated ? `<div class="notice notice-info" role="status">Scanned ${MAX_SCAN} commits. Older KiCad changes follow with Older.</div>` : '';
   const nav = `${first ? '' : link(list(''), 'Newest', 'btn')}${next ? link(list(next), 'Older', 'btn') : ''}`;
   return frame({ title: 'KiCad changes', user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { href: `${path}/projects`, label: 'Projects' }, { label: 'KiCad changes' }],
     body: `<main class="page page-wide design-site"><div class="page-head"><div><h1>KiCad changes</h1><p class="lead">${e(owner)}/${e(repo)} · <code>${e(displayDir)}</code> · <code>${e(ref)}</code></p></div><div class="page-actions">${link(safeKey ? `${base}/design` : `${path}/projects`, 'Latest design', 'btn btn-primary')}</div></div>${started ? '<div class="notice notice-info" role="status">The render has started. It appears in the list in about two minutes.</div>' : ''}<p class="muted">Commits on the default branch that changed a KiCad file in this project folder (schematic, board, symbols, footprints, project, rules, worksheet, 3D models). README and other edits are not listed.</p>${notice}${rows.length ? siteTable(['Snapshot', 'Commit', 'Message', 'Author', 'When', 'Open'], body, 'KiCad changes') : '<p class="muted">No commit in this folder has changed a KiCad file in the range scanned.</p>'}<p class="page-actions">${nav}</p></main>` });
