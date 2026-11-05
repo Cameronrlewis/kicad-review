@@ -105,7 +105,7 @@ use `pr:<number>` and mean the PR source head. Missing context is not replaced b
 older revision. Writers receive a site link to request a review manually; tools
 do not dispatch or rerun workflows.
 
-After owner approval, provision the SDK's OAUTH_KV namespace and bind it in
+To enable it, provision the SDK's OAUTH_KV namespace and bind it in
 `wrangler.toml`. It holds OAuth clients/codes/grants and encrypted short-lived
 GitHub access credentials only, not designs or repository permission records.
 Keep GitHub client secrets and `SESSION_KEY` private. The existing GitHub App and
@@ -126,8 +126,7 @@ id = "<the printed id>"
 
 Run `npm ci --prefix site` before site tests or deployment. The Worker entry point
 is `site/mcp-entry.js`. The site stays usable without `OAUTH_KV`; `/mcp` then returns a
-configuration error and no Connect panel is shown. Deployment still needs owner
-approval. Test with Wrangler 4.148.0 and the callback URLs in GitHub App settings.
+configuration error and no Connect panel is shown. Test with Wrangler 4.148.0 and the callback URLs in GitHub App settings.
 
 OAuth scope is `read:design`. Consent names the client, redirect and data recipient.
 The connection lasts at most one hour or until the GitHub token expires. Refresh
@@ -148,7 +147,7 @@ KiCad IPC, write tools, supplier requests or source-file fetching are included.
 
 ## MCP dependencies (verified 2026-11-02)
 
-`site/package.json` pins `@cloudflare/workers-oauth-provider` 1.2.4 and `@modelcontextprotocol/sdk` 1.32.2 exactly; `site/package-lock.json` locks the rest. The SDK's `WebStandardStreamableHTTPServerTransport` runs stateless (`sessionIdGenerator: undefined`, `enableJsonResponse: true`) in workerd and Node and negotiates protocol `2025-03-26`. Discovery in this SDK is `discoverOAuthProtectedResourceMetadata(url, opts, fetchFn)` (fetch is the third argument, differing from the 2-argument signature in the plan text; Tasks 10–12 must use this 3-argument form) and `discoverAuthorizationServerMetadata(url, {fetchFn})`.
+`site/package.json` pins `@cloudflare/workers-oauth-provider` 1.2.4 and `@modelcontextprotocol/sdk` 1.32.2 exactly; `site/package-lock.json` locks the rest. The SDK's `WebStandardStreamableHTTPServerTransport` runs stateless (`sessionIdGenerator: undefined`, `enableJsonResponse: true`) in workerd and Node and negotiates protocol `2025-03-26`. Discovery in this SDK is `discoverOAuthProtectedResourceMetadata(url, opts, fetchFn)` (fetch is the third argument, so callers pass all three) and `discoverAuthorizationServerMetadata(url, {fetchFn})`.
 
 OAuth provider facts the MCP code relies on, checked against the installed types and source:
 

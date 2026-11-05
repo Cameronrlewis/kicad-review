@@ -314,16 +314,15 @@ use `pr:<number>` and mean the PR source head. Missing context is not replaced b
 older revision. Writers receive a site link to request a review manually; tools
 do not dispatch or rerun workflows.
 
-After owner approval, provision the SDK's `OAUTH_KV` namespace and bind it in
-`wrangler.toml`. It holds OAuth clients/codes/grants and encrypted short-lived
+To enable it, provision the SDK's `OAUTH_KV` namespace and bind it in
+`wrangler.toml` (commands in [site/README.md](site/README.md#remote-mcp-optional)). It holds OAuth clients/codes/grants and encrypted short-lived
 GitHub access credentials only, not designs or repository permission records.
 Keep GitHub client secrets and `SESSION_KEY` private. The existing GitHub App and
 GitHub sign-in are reused; there is no additional account or API key.
 
 Run `npm ci --prefix site` before site tests or deployment. The Worker entry point
 is `site/mcp-entry.js`. The site stays usable without `OAUTH_KV`; `/mcp` then returns a
-configuration error and no Connect panel is shown. Deployment still needs owner
-approval. Test with Wrangler 4.148.0 and the callback URLs in GitHub App settings.
+configuration error and no Connect panel is shown. Test with Wrangler 4.148.0 and the callback URLs in GitHub App settings.
 
 OAuth scope is `read:design`. Consent names the client, redirect and data recipient.
 The connection lasts at most one hour or until the GitHub token expires. Refresh
