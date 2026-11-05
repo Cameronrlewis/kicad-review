@@ -232,9 +232,11 @@ function firstChangedView(p) {
   const s = p.sheets.find(s => s.status !== "unchanged");
   return s ? `sheet:${s.path}` : boardAvailable(p) ? "board" : p.libraries?.length ? "lib:0" : p.sheets[0] ? `sheet:${p.sheets[0].path}` : "board";
 }
-function openProject(i) { clearImageSelection(); S.part3d = null; S.p = i; S.s = null; S.io = null; S.ig = null; S.layers = null; select(firstChangedView(proj())); renderPanel(); }
+// One Appearance store per project; bind it before anything patches the store or mounts the dock.
+function viewerIdFor(p) { return JSON.stringify([D.repo || location.pathname, p.dir]); }
+function openProject(i) { clearImageSelection(); S.part3d = null; S.p = i; Appearance.configure([], viewerIdFor(proj())); S.s = null; S.io = null; S.ig = null; S.layers = null; select(firstChangedView(proj())); renderPanel(); }
 function stopPlacing() { S.placing = false; document.body.classList.remove("placing"); }
-function select(view) { clearImageSelection(); S.part3d = null; renderInspector(); const library = String(S.v).startsWith("lib:") || String(view).startsWith("lib:") || tabsChange(view); stopPlacing(); S.v = view; if (String(view).startsWith("lib:")) S.t = "changes"; S.x = S.y = S.z = null; renderModes(); renderNav(); if (library) renderPanel(); renderZoombar(); draw(); saveHash(); }
+function select(view) { clearImageSelection(); S.part3d = null; renderInspector(); const library = String(S.v).startsWith("lib:") || String(view).startsWith("lib:") || tabsChange(view); stopPlacing(); S.v = view; S.m = modeFor(view, S.m); if (String(view).startsWith("lib:")) S.t = "changes"; S.x = S.y = S.z = null; renderModes(); renderNav(); if (library) renderPanel(); renderZoombar(); draw(); saveHash(); }
 
 function decodeState(hash) {
   const q = new URLSearchParams(hash.replace(/^#/, "").replace(/^.*?#/, "")), out = {};
@@ -248,10 +250,12 @@ function decodeState(hash) {
   if (q.has("lt")) { const [rig, bearing, exposure] = q.get("lt").split(","); out.lighting3d = { rig, bearing: +bearing, exposure: +exposure }; }
   return out;
 }
+// 3D has no wipe mode: a wipe request shows the side-by-side view.
+function modeFor(view, m) { return view === "3d" && m === "wipe" ? "side" : m; }
 function valid(st) {   // drop anything that does not exist in this report
   const pi = Number.isInteger(st.p) && D.projects[st.p] ? st.p : 0, out = { p: pi }, p = D.projects[pi];
   if ((st.v === "board" && boardAvailable(p)) || (st.v === '3d' && modelAvailable(p)) || p.sheets.some(s => `sheet:${s.path}` === st.v) || (/^lib:\d+$/.test(st.v) && !!p.libraries?.[+st.v.slice(4)])) out.v = st.v;
-  if (Object.hasOwn(MODES, st.m ?? "")) out.m = st.m;
+  if (Object.hasOwn(MODES, st.m ?? "")) out.m = modeFor(out.v, st.m);
   out.revision = ["base", "head"].includes(st.revision) ? st.revision : "head";
   for (const k of ["x", "y", "z"]) if (Number.isFinite(st[k]) && (k !== "z" || st[k] > 0)) out[k] = st[k];
   if (p.changes.some(r => r.id === st.s) || p.checks.some(c => c.violations.some(v => v.id === st.s))) out.s = st.s;
@@ -275,6 +279,8 @@ function applyState(st) {
   if (v.t === "appearance") { leftTab = "appearance"; leftCollapsed = false; }
   Object.assign(S, { p: v.p, v: v.v ?? firstChangedView(D.projects[v.p]), m: v.m ?? S.m, s: v.s ?? null, part3d: null, io: null, ig: null, t: v.t ?? S.t,
                      revision: v.revision ?? "head", layers: v.layers ?? null, hidden3d: v.hidden3d ?? [], assembled3d: v.assembled3d ?? true, lighting3d: v.lighting3d ?? window.ThreeStudio.normalizeLighting(window.ThreeStudio.PRESETS.bench), camera3d: v.camera3d ?? null, x: v.x ?? null, y: v.y ?? null, z: v.z ?? null });
+  Appearance.configure([], viewerIdFor(proj()));
+  S.m = modeFor(S.v, S.m);
   if (S.layers && S.v === "board") Appearance.patch({layers: Object.fromEntries(proj().board.layers.map(l => [canon(l.name), {visible: S.layers.includes(l.name)}]))});   // the link's l= wins over stored eyes
   if (S.x == null || S.y == null || S.z == null) S.x = S.y = S.z = null;
   const hasPos = S.z != null;
@@ -579,13 +585,15 @@ function boardFallback(note) {   // one route to SVG per project; a later projec
 let appearanceUI = null;
 const UNAVAILABLE = Object.fromEntries(["images", "ratsnest", "drcMarkers", "drawingSheet", "values", "references"].map(k => [k, "Not present in this report"]));
 function appearanceCtx() {
-  const scenes = (boardView.scenes || []).filter(Boolean), sides = (boardView.scenes || []).map(sc => new Set((sc?.layers || []).filter(l => l.enabled).map(l => l.name)));
+  // Scenes and WebGL belong to the board view of the bound project only (not 3D, sheets or another project).
+  const bound = S.v === "board" && boardView.project === S.p, all = bound ? boardView.scenes || [] : [];
+  const scenes = all.filter(Boolean), sides = all.map(sc => new Set((sc?.layers || []).filter(l => l.enabled).map(l => l.name)));
   const present = new Set([...scenes.flatMap(sc => sc.layers.filter(l => l.enabled).map(l => l.name)), ...proj().board.layers.map(l => canon(l.name))]);
   const family = n => /\.Cu$/.test(n) ? 0 : /\.(CrtYd|Fab)$/.test(n) ? 2 : /^(User\.|Dwgs\.|Cmts\.|Eco)/.test(n) ? 3 : 1;
   const layers = Object.keys(Appearance.get().layers).filter(n => present.has(n)).sort((a,b) => family(a) - family(b)).map(name => ({ name, label: layerLabel(name), changed: !!proj().board.layers.find(x => canon(x.name) === name)?.changed,
     title: sides.length === 2 && sides[0].has(name) !== sides[1].has(name) ? `${layerLabel(name)} (${sides[0].has(name) ? "base" : "head"} only)` : layerLabel(name) }));
   const shown = name => { const svg = proj().board.layers.find(x => canon(x.name) === name)?.name; return S.layers ? !svg || S.layers.includes(svg) : !svg || !HIDE_LAYERS.test(svg); };
-  const fallback = !boardView.useGL;
+  const fallback = !bound || !boardView.useGL;
   return { layers, fallback, nets: fallback ? [] : [...new Set(scenes.flatMap(sc => sc.nets.map(n => n.name)).filter(Boolean))].sort(),
     visible: name => Appearance.get().layers[name]?.visible !== false && shown(name),
     note: S.m !== "side" ? "Colour, alpha and visibility apply here. Other controls apply in Side mode." : boardView.note || "WebGL unavailable. Colour, alpha and visibility apply." };
@@ -822,7 +830,7 @@ async function draw() {
   delete $("#stage").dataset.boardReady; delete $("#stage").dataset.boardBackend;
   disposeAssets();
   // Bind before any lazy mount; the facade remains window.Appearance for every project.
-  Appearance.configure([], JSON.stringify([D.repo || location.pathname, proj().dir]));
+  Appearance.configure([], viewerIdFor(proj()));
   schematicResize.disconnect();
   resetCoordinates();
   const my = ++gen, view = currentView(), P = proj(), stage = document.createElement("main");
@@ -850,7 +858,8 @@ async function draw() {
   statusText('.status-message', 'Loading drawing…');
   if (S.v === '3d') {
     renderImageSearch();
-    disposeBoardRenderers();
+    disposeBoardRenderers(); boardView.scenes = null; boardView.useGL = false;
+    refreshAppearance();   // the dock drops 2D layer, net and WebGL controls
     appearanceSchematics.clear();
     releaseImageStage($("#stage"));
     $("#stage").replaceWith(stage); // WebGL needs connected canvas dimensions.
@@ -875,7 +884,7 @@ async function draw() {
   boardView.scenes = scenes; boardView.generation = my;
   if (boardView.project !== S.p) {
     boardView.project = S.p;
-    Appearance.configure([...new Set([...(scenes || []).filter(Boolean).flatMap(sc => sc.layers.filter(l => l.enabled).map(l => l.name)), ...(proj().board?.layers || []).map(l => canon(l.name))])], JSON.stringify([D.repo || location.pathname, proj().dir]));
+    Appearance.configure([...new Set([...(scenes || []).filter(Boolean).flatMap(sc => sc.layers.filter(l => l.enabled).map(l => l.name)), ...(proj().board?.layers || []).map(l => canon(l.name))])], viewerIdFor(proj()));
   }
   if (scenes && scenes.some(sc => sc && !sc.complete)) { boardView.note = "Geometry unsupported — showing SVG"; boardView.useGL = false; }
   else boardView.useGL = !!scenes && boardView.failed !== S.p;
@@ -1412,8 +1421,8 @@ function restoreImageNet() {
   const {name,previous}=savedImageNets,look=Appearance.get(),netColors={...look.netColors};
   // Restore only our temporary colour; preserve intervening Appearance edits.
   if(JSON.stringify(netColors[name])===JSON.stringify([1,.8,0,1])) {
-    if(previous===undefined)delete netColors[name];else netColors[name]=previous;
-    Appearance.set({...look,netColors});
+    if(previous!==undefined)Appearance.patch({netColors:{[name]:previous}});
+    else Appearance.patch({nets:{[name]:{color:null}}});
   }
   savedImageNets=null;
 }
@@ -1422,7 +1431,7 @@ function clearImageSelection() {
   document.querySelectorAll('#stage .image-selection').forEach(n=>n.remove());
 }
 function selectImageNet(name) {
-  restoreImageNet();savedImageNets={name,previous:Appearance.get().netColors[name]};
+  restoreImageNet();savedImageNets={name,previous:Appearance.get().netColors[name]?[...Appearance.get().netColors[name]]:undefined};
   Appearance.patch({netColors:{[name]:[1,.8,0,1]}});
 }
 function chooseImage(record,side,kind,point,pin=null) {
@@ -1839,9 +1848,9 @@ function goTo(id) {
 async function electricalManifest(sheetPath, side) {
   const id = proj().sheets.find(s => s.path === sheetPath)?.hotspots?.[side];
   if (!id) return null;
-  try {
-    const m = JSON.parse(await svgText(id));
-    return m?.version === 1 && m.units === "mm" ? m.views?.find(v => v.sheet === sheetPath) || null : null;
+  try {   // the same validated manifest as inspection; a rejected one never reaches zoomTo
+    const m = decodedSheetHotspots.get(id) || validateImageManifest(await jsonAsset(id), "sheet");
+    return m.views.find(v => v.sheet === sheetPath) || null;
   } catch { return null; }
 }
 function electricalPins(row, side, sheetPath, manifest) {
@@ -2860,6 +2869,10 @@ document.addEventListener("keydown", e => {
   else if (e.key === "b" && S.v === '3d' && S.m === "blend") toggleBlend3D();
   else if (e.key === "c" && THREADS_ON && S.v && S.v !== "3d") { S.placing = !S.placing; document.body.classList.toggle("placing", S.placing); }
   else if (e.key === "f") fit();
+  else if (e.key === "Escape" && S.v === "3d") {   // never rebuild the 3D session for Escape
+    if (S.s == null && !S.part3d && !S.placing && !window.Review3D?.state?.selected?.length) return;
+    stopPlacing(); S.s = null; markSelected(); window.Review3D?.clearSelection(); saveHash();
+  }
   else if (e.key === "Escape") { stopPlacing(); S.s = null; markSelected(); draw(); saveHash(); }
 });
 function positionLink() {

@@ -121,9 +121,17 @@ jobs:
         run: |
           set -euo pipefail
           DEPS="$HOME/.cache/kicad-review-meshopt"
-          mkdir -p "$DEPS"
-          if [ ! -d "$DEPS/node_modules/meshoptimizer" ]; then
-            npm install --prefix "$DEPS" --no-save --package-lock=false @gltf-transform/core@4.2.1 @gltf-transform/extensions@4.2.1 @gltf-transform/functions@4.2.1 meshoptimizer@0.22.0 || { echo "::warning::3D compression dependencies unavailable; keeping raw GLBs."; exit 0; }
+          if [ ! -f "$DEPS/.complete" ]; then
+            rm -rf "$DEPS"
+            mkdir -p "$DEPS"
+            if npm install --prefix "$DEPS" --no-save --package-lock=false @gltf-transform/core@4.2.1 @gltf-transform/extensions@4.2.1 @gltf-transform/functions@4.2.1 meshoptimizer@0.22.0 \
+               && NODE_PATH="$DEPS/node_modules" node -e "require('@gltf-transform/core'); require('@gltf-transform/extensions'); require('@gltf-transform/functions'); require('meshoptimizer')"; then
+              touch "$DEPS/.complete"
+            else
+              rm -rf "$DEPS"
+              python3 -c "import sys; sys.path.insert(0, 'tools'); import kicad_review as kr; print('::warning::' + kr.workflow_command_escape('3D compression dependencies unavailable; keeping raw GLBs.'))"
+              exit 0
+            fi
           fi
 
       - name: Compress 3D board models
@@ -151,7 +159,7 @@ jobs:
             else
               cp "$dir/board.raw.glb" "$dir/board.glb"
               rm -f "$dir/board-parts.json" "$dir/board-stats.json" "$dir/board-processed.json"
-              echo "::warning::3D processing failed for $dir; keeping the raw GLB."
+              python3 -c "import sys; sys.path.insert(0, 'tools'); import kicad_review as kr; print('::warning::' + kr.workflow_command_escape('3D processing failed for ' + sys.argv[1] + '; keeping the raw GLB.'))" "$dir"
             fi
           done < <(find review -name board-3d-input.json -print0)
 
@@ -178,6 +186,24 @@ jobs:
           WAIVERS_REF: origin/${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}
         run: python3 tools/kicad_review.py report
 
+      # One archived artifact per run holds every project's exported files (<project index>/<file>). Entries are
+      # stored, not recompressed: STEP and GLB are the bulk, and the review site reads one entry by byte range.
+      # Uploaded before the report, so a rejected upload can still be reflected in it.
+      - name: Upload downloads
+        id: downloads
+        if: steps.report.outputs.downloads == 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.report.outputs.downloads_name }}
+          path: review/downloads
+          compression-level: 0
+          retention-days: 90
+
+      - name: Drop unstored downloads from the report
+        if: steps.downloads.outcome == 'failure'
+        run: python3 tools/kicad_review.py drop-downloads
+
       # Threads live on the pull request as review comments; the summary only counts them.
       - name: Collect review threads
         if: steps.report.outputs.threads == 'true' && github.event.pull_request.number
@@ -189,7 +215,7 @@ jobs:
           # ponytail: first 100 threads only; gate fails closed above that ceiling; paginate if needed.
           gh api graphql -f owner="${GITHUB_REPOSITORY%/*}" -f name="${GITHUB_REPOSITORY#*/}" -F number="$PR" \
             -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){totalCount nodes{isResolved comments(first:1){nodes{body}}}}}}}' \
-            > review/threads.json || { rm -f review/threads.json; echo "::warning::Could not read review threads"; }
+            > review/threads.json || { rm -f review/threads.json; python3 -c "import sys; sys.path.insert(0, 'tools'); import kicad_review as kr; print('::warning::' + kr.workflow_command_escape('Could not read review threads'))"; }
 
       # Optional; opted-in callers must grant issues: read. Existing v1 callers are unchanged.
       - name: Collect anchored issues
@@ -200,7 +226,7 @@ jobs:
         run: |
           # ponytail: first 100 open issues; paginate if a repository ever anchors more.
           gh api "repos/$GITHUB_REPOSITORY/issues?state=open&per_page=100" > review/issues.json \
-            || { rm -f review/issues.json; echo "::warning::Could not read issues. Add 'issues: read' to the caller's permissions."; }
+            || { rm -f review/issues.json; python3 -c "import sys; sys.path.insert(0, 'tools'); import kicad_review as kr; print('::warning::' + kr.workflow_command_escape(\"Could not read issues. Add 'issues: read' to the caller's permissions.\"))"; }
 
       - name: Copy named report
         if: steps.detect.outputs.changed == 'true'
@@ -217,21 +243,8 @@ jobs:
           path: review/${{ steps.report.outputs.name }}
           retention-days: 90
 
-      # One archived artifact per run holds every project's exported files (<project index>/<file>). Entries are
-      # stored, not recompressed: STEP and GLB are the bulk, and the review site reads one entry by byte range.
-      - name: Upload downloads
-        if: steps.report.outputs.downloads == 'true'
-        continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: ${{ steps.report.outputs.downloads_name }}
-          path: review/downloads
-          compression-level: 0
-          retention-days: 90
-
       - name: Upload digest-keyed 3D assets
         if: steps.detect.outputs.changed == 'true' && hashFiles('review/3d/kicad-3d-*.gz') != ''
-        continue-on-error: true
         # A node action receives Actions runtime credentials; a plain run step does not.
         uses: ./tools/.github/actions/upload-3d-assets
         env:
@@ -375,11 +388,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           HEAD: ${{ steps.detect.outputs.head }}
         run: |
-          [ -f review/check-runs.json ] || { echo "::warning::review/check-runs.json missing; no check runs published."; exit 0; }
+          [ -f review/check-runs.json ] || { python3 -c "import sys; sys.path.insert(0, 'tools'); import kicad_review as kr; print('::warning::' + kr.workflow_command_escape('review/check-runs.json missing; no check runs published.'))"; exit 0; }
           jq -c '.[]' review/check-runs.json | while read -r run; do
             printf '%s\n' "$run" | jq --arg sha "$HEAD" '. + {head_sha: $sha, status: "completed"}' \
               | gh api "repos/$GITHUB_REPOSITORY/check-runs" --input - > /dev/null \
-              || { echo "::warning::Could not publish check runs. Add 'checks: write' to the permissions of .github/workflows/kicad-review.yml."; exit 0; }
+              || { python3 -c "import sys; sys.path.insert(0, 'tools'); import kicad_review as kr; print('::warning::' + kr.workflow_command_escape(\"Could not publish check runs. Add 'checks: write' to the permissions of .github/workflows/kicad-review.yml.\"))"; exit 0; }
           done
 
       - name: Pull request comment
@@ -419,8 +432,8 @@ jobs:
           FAILED: ${{ steps.report.outputs.failed }}
           THREADS: ${{ steps.summary.outputs.threads_failed }}
         run: |
-          [ -z "$FAILED" ] || echo "::error::Required checks failed: $FAILED"
-          [ -z "$THREADS" ] || echo "::error::Merge blocked: $THREADS"
+          [ -z "$FAILED" ] || python3 -c "import sys; sys.path.insert(0, 'tools'); import kicad_review as kr; print('::error::' + kr.workflow_command_escape('Required checks failed: ' + sys.argv[1]))" "$FAILED"
+          [ -z "$THREADS" ] || python3 -c "import sys; sys.path.insert(0, 'tools'); import kicad_review as kr; print('::error::' + kr.workflow_command_escape('Merge blocked: ' + sys.argv[1]))" "$THREADS"
           exit 1
 
       - name: Fabrication outputs for the version tag
@@ -453,7 +466,7 @@ jobs:
           # ponytail: GitHub has no conditional release edit; re-read narrows the remaining race window.
           gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --json body -q .body > review/release-body-current.md
           if ! cmp -s review/release-body.md review/release-body-current.md; then
-            echo "::warning::Release notes changed while the review section was built; skipping the edit."
+            python3 -c "import sys; sys.path.insert(0, 'tools'); import kicad_review as kr; print('::warning::' + kr.workflow_command_escape('Release notes changed while the review section was built; skipping the edit.'))"
             exit 0
           fi
           gh release edit "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --notes-file review/release-notes.md

@@ -6063,6 +6063,37 @@ def cmd_report(args):
         if ask_on: fh.write(f"context_name={name[:-5]}.context.json\n")
 
 
+DOWNLOADS_NOT_STORED = "not stored: this run could not upload its download files"
+
+
+def cmd_drop_downloads(args):
+    """The downloads upload failed: keep each download row, but as an error with no link or command."""
+    def drop(projects):
+        for project in projects:
+            if project.get("downloads"):
+                project["downloads"] = [{"kind": d["kind"], "label": d["label"], "error": DOWNLOADS_NOT_STORED} for d in project["downloads"]]
+    marker, path = "<script>window.REVIEW_DATA = ", "review/kicad-review.html"
+    with open(path, encoding="utf-8") as fh:
+        html = fh.read()
+    start = html.find(marker)
+    end = html.find("</script>", start) if start >= 0 else -1
+    if end < 0:
+        raise RuntimeError(f"{path} has no window.REVIEW_DATA payload")
+    start += len(marker)
+    data = json.loads(html[start:end].strip().removesuffix(";"))
+    drop(data["projects"])
+    # Same encoding as finalize_report: < stays escaped, so the payload can never close its script.
+    payload = json.dumps(data, separators=(',', ':')).replace('<', '\\u003c')
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(f"{html[:start]}{payload};{html[end:]}")
+    with open("review/data.json", encoding="utf-8") as fh:
+        side = json.load(fh)
+    drop(side["projects"])
+    with open("review/data.json", "w", encoding="utf-8") as fh:
+        json.dump(side, fh)
+    print("::warning::" + workflow_command_escape("Download files were not stored; the report lists them as unavailable."))
+
+
 STATUS_ICON = {"pass": "✅", "fail": "❌", "warn": "⚠️", "not_run": "—"}
 MARKER = "<!-- kicad-review -->"
 TABLE_KINDS = ("title block", "design rules", "symbol", "footprint", "sheet", "label", "global label",
@@ -6766,6 +6797,8 @@ def main():
     p.set_defaults(func=cmd_lookup)
     p = sub.add_parser("report", help="self-contained HTML comparison report")
     p.set_defaults(func=cmd_report)
+    p = sub.add_parser("drop-downloads", help="mark the report's download files unavailable after a failed upload")
+    p.set_defaults(func=cmd_drop_downloads)
     args = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")  # comment text has → and —, whatever the locale
     args.func(args)

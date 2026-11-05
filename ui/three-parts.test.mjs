@@ -17,3 +17,15 @@ test('BR02 rejects corrupt and duplicate world indexes without repairing identit
   assert.equal(window.ThreeParts.reference(renamed,'head',[{...p,ref:'J12'}]),'J12');
   assert.equal(window.ThreeParts.reference({uuid:'new',uuid_before:'u',ref:'J12'},'base',[p]),'J1');
 });
+
+test('U6: without a part-index UUID match the base reference comes from the Reference change tuple', () => {
+  const w={};runInNewContext(readFileSync(new URL('./three-parts.js',import.meta.url),'utf8'),{window:w});
+  const renamed={uuid:'u',ref:'J12',action:'modified',changes:[['position','(1, 1)','(2, 1)'],['reference','J1','J12']]};
+  assert.equal(w.ThreeParts.revisionRef(renamed,'base'),'J1');
+  assert.equal(w.ThreeParts.revisionRef(renamed,'head'),'J12');
+  assert.equal(w.ThreeParts.revisionRef({ref:'R3',changes:[['value','1k','2k']]},'base'),'R3');
+  assert.equal(w.ThreeParts.revisionRef({ref:'R4',action:'removed'},'base'),'R4');
+  // Highlighting and ghost creation resolve through reference(); an old report has no part rows.
+  assert.equal(w.ThreeParts.reference(renamed,'base',[]),'J1');
+  assert.equal(w.ThreeParts.reference(renamed,'head',[]),'J12');
+});
