@@ -128,17 +128,18 @@ export class RefreshCoordinator {
   }
 }
 
+// Exchange directly only without the coordinator (tests, local dev). With it, a lost answer may mean the object
+// already spent the one-use token: ask the object once more (it keeps a completed result) and never replay it here.
 async function coordinatedRefresh(env, r) {
-  const direct = () => tokenRequest(env, { grant_type: 'refresh_token', refresh_token: r });
-  if (!env.REFRESH) return direct();
-  try {
-    const name = base64url(new Uint8Array(await crypto.subtle.digest('SHA-256', text.encode(r))));
-    const result = await env.REFRESH.get(env.REFRESH.idFromName(name)).fetch('https://refresh/', { method: 'POST', body: JSON.stringify({ r }) });
-    if (!result.ok) return direct();
-    return await result.json();
-  } catch {
-    return direct();
+  if (!env.REFRESH) return tokenRequest(env, { grant_type: 'refresh_token', refresh_token: r });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const name = base64url(new Uint8Array(await crypto.subtle.digest('SHA-256', text.encode(r))));
+      const result = await env.REFRESH.get(env.REFRESH.idFromName(name)).fetch('https://refresh/', { method: 'POST', body: JSON.stringify({ r }) });
+      if (result.ok) return await result.json();
+    } catch {}
   }
+  return { error: 'refresh_unavailable' };
 }
 
 const refreshing = new Map();
@@ -666,10 +667,11 @@ async function home(request, env) {
   const active = await currentSession(request, env);
   if (!active?.token) {
     // bad_refresh_token: another request probably rotated this token and set a fresh cookie; keep it.
+    // refresh_unavailable: the refresh may have succeeded out of reach; keep the cookie for a later try.
     return response(signedOutPage({ sessionEnded: Boolean(stored) }), {
       headers: {
         'Content-Type': 'text/html; charset=utf-8',
-        ...(stored && active?.error !== 'bad_refresh_token' ? { 'Set-Cookie': clear('s', new URL(request.url).protocol === 'https:') } : {}),
+        ...(stored && !['bad_refresh_token', 'refresh_unavailable'].includes(active?.error) ? { 'Set-Cookie': clear('s', new URL(request.url).protocol === 'https:') } : {}),
       },
     });
   }
