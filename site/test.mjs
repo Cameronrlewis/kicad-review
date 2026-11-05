@@ -18,7 +18,7 @@ const anchor = { v: 1, project: 'Thermal_Camera', file: 'Thermal_Camera/Thermal_
   target: 'object', uuid: '0a1b2c3d-0000-4000-8000-000000000001', kind: 'footprint', ref: 'R16', x: 12.3, y: 45.6,
   side: 'head', commit: 'a'.repeat(40), severity: 'blocking' };
 
-const repoOk = () => new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true, push: true }, default_branch: 'main' }));
+const repoOk = () => new Response(JSON.stringify({ id: 5, owner: { login: 'Cameronrlewis' }, permissions: { pull: true, push: true }, default_branch: 'main' }));
 
 test('history ignores unrelated artifacts from the same run', () => {
   const artifacts = [{ id: 900, name: 'kicad-review.html', workflow_run: { id: 77 } }, { id: 901, name: 'build.zip', workflow_run: { id: 77 } }];
@@ -363,14 +363,82 @@ test('expired access tokens refresh once, while refresh errors clear the session
     assert.match(await response.text(), /Signed in as octocat/);
     assert.ok(cookieValue(response, 's'));
   } finally { restore(); }
-  restore = mockFetch(async () => tokenResponse({ error: 'bad_refresh' }));
+  // A token that never rotated successfully: errors clear the session and are never cached.
+  const refused = await seal({ t: 'old-token', r: 'refused-refresh', e: Date.now() - 1, re: Date.now() + 7_200_000, u: 'octocat' }, env);
+  let failures = 0;
+  restore = mockFetch(async () => { failures += 1; return tokenResponse({ error: 'bad_refresh' }); });
   try {
-    const response = await call('/', { headers: { Cookie: `s=${expired}` } });
-    assert.match(await response.text(), /Sign in with GitHub/);
-    assert.match(cookies(response).join('\n'), /s=;.*Max-Age=0/);
+    for (const attempt of [1, 2]) {
+      const response = await call('/', { headers: { Cookie: `s=${refused}` } });
+      assert.match(await response.text(), /Sign in with GitHub/);
+      assert.match(cookies(response).join('\n'), /s=;.*Max-Age=0/);
+      assert.equal(failures, attempt);
+    }
   } finally { restore(); }
 });
 
+test('concurrent near-expiry requests share one one-use refresh token rotation', async () => {
+  const expiring = await seal({ t: 'old-token', r: 'one-use-refresh', e: Date.now() + 60_000, re: Date.now() + 7_200_000, u: 'octocat' }, env);
+  let refreshes = 0;
+  const restore = mockFetch(async (url) => {
+    if (url !== 'https://github.com/login/oauth/access_token') return new Response('{}', { status: 500 });
+    refreshes += 1;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // GitHub rotates refresh tokens: only the first exchange of a refresh token succeeds.
+    return refreshes === 1 ? tokenResponse({ access_token: 'new-token', refresh_token: 'new-refresh' }) : tokenResponse({ error: 'bad_refresh_token' });
+  });
+  try {
+    const responses = await Promise.all([1, 2, 3].map(() => call('/', { headers: { Cookie: `s=${expiring}` } })));
+    assert.equal(refreshes, 1);
+    for (const response of responses) {
+      assert.match(await response.text(), /Signed in as octocat/);
+      assert.equal((await open(cookieValue(response, 's'), env)).r, 'new-refresh');
+    }
+  } finally { restore(); }
+});
+
+
+test('a request with the old cookie arriving just after a completed rotation reuses its result instead of signing out', async () => {
+  const expiring = await seal({ t: 'old-token', r: 'staggered-refresh', e: Date.now() + 60_000, re: Date.now() + 7_200_000, u: 'octocat' }, env);
+  let refreshes = 0;
+  const restore = mockFetch(async (url) => {
+    if (url !== 'https://github.com/login/oauth/access_token') return new Response('{}', { status: 500 });
+    refreshes += 1;
+    // One-use refresh tokens: a second exchange of the consumed token is refused.
+    return refreshes === 1 ? tokenResponse({ access_token: 'new-token', refresh_token: 'new-refresh' }) : tokenResponse({ error: 'bad_refresh_token' });
+  });
+  try {
+    const first = await call('/', { headers: { Cookie: `s=${expiring}` } });
+    assert.match(await first.text(), /Signed in as octocat/);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const late = await call('/', { headers: { Cookie: `s=${expiring}` } });
+    assert.equal(refreshes, 1);
+    assert.match(await late.text(), /Signed in as octocat/);
+    assert.equal((await open(cookieValue(late, 's'), env)).r, 'new-refresh');
+    // After the grace window the consumed token is exchanged again and its refusal signs out.
+    const realNow = Date.now, later = realNow() + 31_000;
+    Date.now = () => later;
+    try {
+      const expired = await call('/', { headers: { Cookie: `s=${expiring}` } });
+      assert.equal(refreshes, 2);
+      assert.match(await expired.text(), /Sign in with GitHub/);
+    } finally { Date.now = realNow; }
+  } finally { restore(); }
+});
+
+test('OAuth token exchanges never follow redirects, and a redirect fails closed', async () => {
+  const expired = await seal({ t: 'old-token', r: 'redirected-refresh', e: Date.now() - 1, re: Date.now() + 7_200_000, u: 'octocat' }, env);
+  const modes = [];
+  const restore = mockFetch(async (url, options = {}) => {
+    modes.push(options.redirect);
+    return new Response(null, { status: 302, headers: { Location: 'https://evil.example/token' } });
+  });
+  try {
+    const response = await call('/', { headers: { Cookie: `s=${expired}` } });
+    assert.match(await response.text(), /Sign in with GitHub/);
+    assert.deepEqual(modes, ['manual']);
+  } finally { restore(); }
+});
 test('unsafe next is ignored and login text is HTML escaped', async () => {
   const login = await call('/login?next=//evil.com');
   const state = cookieValue(login, 'st');
@@ -519,7 +587,7 @@ test('review route hides inaccessible repositories behind the same HTML 404', as
 });
 
 test('review route shows the repository after a pull-access check and refreshes the session', async () => {
-  const sealed = await signedIn({ e: Date.now() - 1 });
+  const sealed = await signedIn({ e: Date.now() - 1, r: 'review-route-refresh' });
   let calls = 0;
   const restore = mockFetch(async (url, options = {}) => {
     calls += 1;
@@ -581,8 +649,9 @@ test('raw artifact route streams the signed blob with its frame-only sandbox CSP
   const seen = [];
   const restore = mockFetch(async (url, options = {}) => {
     seen.push([url, options]);
-    if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true } }));
-    if (url === 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/42') return new Response(JSON.stringify({ name: 'kicad-review.html', expired: false }));
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return accessibleRepo();
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/42') return new Response(JSON.stringify({ name: 'kicad-review.html', expired: false, workflow_run: { id: 9, repository_id: 5 } }));
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo/actions/runs/9') return reviewRun();
     if (url === 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/42/zip') {
       assert.equal(options.redirect, 'manual');
       return new Response(null, { status: 302, headers: { Location: blobUrl } });
@@ -599,8 +668,128 @@ test('raw artifact route streams the signed blob with its frame-only sandbox CSP
     assert.equal(response.headers.get('Location'), null);
     assert.equal(await response.text(), '<!doctype html><svg></svg>');
     assert.equal(cookies(response).length, 0);
-    assert.equal(seen.length, 4);
+    assert.equal(seen.length, 5);
   } finally { restore(); }
+});
+
+test('report routes serve only report-family artifacts from this repository kicad-review.yml run of the named head', async () => {
+  const sealed = await signedIn(), head = 'b'.repeat(40);
+  let artifact, run, downloads = 0;
+  const restore = mockFetch(async (url) => {
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return Response.json({ id: 5, owner: { login: 'Cameronrlewis' }, permissions: { pull: true } });
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/42') return Response.json(artifact);
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo/actions/runs/9') return run ? Response.json(run) : new Response('{}', { status: 404 });
+    if (url.endsWith('/artifacts/42/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/provenance' } });
+    assert.equal(url, 'https://signed.example/provenance'); downloads++;
+    return new Response('<!doctype html><p>report</p>');
+  });
+  const good = { id: 9, path: '.github/workflows/kicad-review.yml', event: 'push', head_sha: head, repository: { id: 5 } };
+  const report = { name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', expired: false, workflow_run: { id: 9, repository_id: 5, head_sha: head } };
+  const get = async (suffix) => (await call(`/r/Cameronrlewis/repo/a/42${suffix}`, { headers: { Cookie: `s=${sealed}`, 'Sec-Fetch-Dest': 'iframe' } })).status;
+  try {
+    for (const [label, a, r] of [
+      ['unrelated HTML', { ...report, name: 'unrelated.html' }, good],
+      ['other workflow', report, { ...good, path: '.github/workflows/other.yml' }],
+      ['missing run', report, null],
+      ['no run identity', { ...report, workflow_run: { repository_id: 5 } }, good],
+      ['other repository run', report, { ...good, repository: { id: 99 } }],
+      ['artifact without repository', { ...report, workflow_run: { id: 9 } }, good],
+      ['name head is not the run head', report, { ...good, head_sha: 'c'.repeat(40) }],
+      ['design name head is not the run head', { ...report, name: 'kicad-design-ccccccc.html' }, good],
+    ]) {
+      artifact = a; run = r;
+      for (const suffix of ['', '/raw']) assert.equal(await get(suffix), 404, `${label} ${suffix}`);
+    }
+    assert.equal(downloads, 0);
+    for (const [label, a, r] of [
+      ['push run', report, good],
+      ['manual run of a hand-given head', report, { ...good, event: 'workflow_dispatch', head_sha: 'c'.repeat(40) }],
+      ['legacy name', { ...report, name: 'kicad-review.html' }, good],
+      ['design snapshot', { ...report, name: 'kicad-design-bbbbbbb.html' }, good],
+    ]) {
+      artifact = a; run = r;
+      for (const suffix of ['', '/raw']) assert.equal(await get(suffix), 200, `${label} ${suffix}`);
+    }
+  } finally { restore(); }
+});
+
+test('finding 2: image and 3D asset requests reuse verified run from warm isolate cache without extra GitHub run call', async () => {
+  const { reportCache } = await import('./report-cache.js');
+  reportCache.clear();
+  const sealed = await signedIn();
+  let runCalls = 0;
+  const digest3d = 'd'.repeat(64);
+  const gzModel = gzipSync('glTF-binary-payload');
+  const data = {
+    version: 1,
+    assets: { [imageId]: { kind: 'svg', name: 'sheet.svg' } },
+    blobs: { [imageId]: gzipSync(imageText).toString('base64') },
+    projects: [{ board: { assets3d: { head: { model: { digest: digest3d, artifactName: `kicad-3d-${digest3d}-board.glb.gz`, bytes: gzModel.length } } } } }],
+  };
+  const stored = storedImageReport(data);
+  const restore = mockFetch(async (url) => {
+    url = String(url);
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/artifacts/42')) {
+      return Response.json({
+        name: 'kicad-review-deadbee-cafebad-pass.html',
+        size_in_bytes: stored.length,
+        updated_at: '2026-10-29T00:00:00Z',
+        workflow_run: { id: 9, repository_id: 5 },
+      });
+    }
+    if (url.endsWith('/actions/runs/9')) {
+      runCalls++;
+      return reviewRun({ head_sha: 'cafebad'.padEnd(40, '0') });
+    }
+    if (url.endsWith('/artifacts/42/zip')) {
+      return new Response(null, { status: 302, headers: { Location: 'https://signed.example/run-memo' } });
+    }
+    if (url === 'https://signed.example/run-memo') {
+      return new Response(stored);
+    }
+    if (url.includes('/runs/9/artifacts?')) {
+      return Response.json({ artifacts: [{ id: 91, name: `kicad-3d-${digest3d}-board.glb.gz`, expired: false, size_in_bytes: gzModel.length, workflow_run: { id: 9 } }] });
+    }
+    if (url.endsWith('/artifacts/91/zip')) {
+      return new Response(null, { status: 302, headers: { Location: 'https://artifact.actions.githubusercontent.com/model91' } });
+    }
+    if (url === 'https://artifact.actions.githubusercontent.com/model91') {
+      return new Response(gzModel);
+    }
+    throw new Error(`unexpected URL ${url}`);
+  });
+  try {
+    const raw = await call('/r/Cameronrlewis/repo/a/42/raw', {
+      headers: { Cookie: `s=${sealed}` },
+    });
+    assert.equal(raw.status, 200);
+    assert.equal(runCalls, 1, 'initial raw report fetch must verify run once');
+
+    // Image asset request reuses verified run from warm cache:
+    const asset = await call(`/r/Cameronrlewis/repo/a/42/assets/${imageId}.svg`, {
+      headers: { Cookie: `s=${sealed}` },
+    });
+    assert.equal(asset.status, 200);
+    assert.equal(runCalls, 1, 'image asset request must not make an extra GitHub run call');
+
+    // Conditional image asset request reuses verified run:
+    const asset304 = await call(`/r/Cameronrlewis/repo/a/42/assets/${imageId}.svg`, {
+      headers: { Cookie: `s=${sealed}`, 'If-None-Match': `"${imageId}"` },
+    });
+    assert.equal(asset304.status, 304);
+    assert.equal(runCalls, 1, 'conditional image asset request must not make an extra GitHub run call');
+
+    // 3D asset request reuses verified run:
+    const model = await call(`/r/Cameronrlewis/repo/a/42/3d/${digest3d}/board.glb`, {
+      headers: { Cookie: `s=${sealed}` },
+    });
+    assert.equal(model.status, 200);
+    assert.equal(runCalls, 1, '3D asset request must not make an extra GitHub run call');
+  } finally {
+    restore();
+    reportCache.clear();
+  }
 });
 
 test('raw document navigation redirects to its framed review without downloading', async () => {
@@ -608,7 +797,8 @@ test('raw document navigation redirects to its framed review without downloading
   const restore = mockFetch(async (url) => {
     seen.push(url);
     if (url.endsWith('/repo')) return accessibleRepo();
-    if (url.endsWith('/artifacts/43')) return new Response(JSON.stringify({ name: 'kicad-review-deadbee-cafebad-pass.html', expired: false }));
+    if (url.endsWith('/artifacts/43')) return new Response(JSON.stringify({ name: 'kicad-review-deadbee-cafebad-pass.html', expired: false, workflow_run: { id: 9, repository_id: 5 } }));
+    if (url.endsWith('/actions/runs/9')) return reviewRun({ head_sha: 'cafebad'.padEnd(40, '0') });
     throw new Error(`unexpected ${url}`);
   });
   try {
@@ -618,6 +808,7 @@ test('raw document navigation redirects to its framed review without downloading
     assert.deepEqual(seen, [
       'https://api.github.com/repos/Cameronrlewis/repo',
       'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/43',
+      'https://api.github.com/repos/Cameronrlewis/repo/actions/runs/9',
     ]);
   } finally { restore(); }
 });
@@ -626,11 +817,11 @@ test('framed artifact page keeps the report sandboxed and escapes metadata', asy
   const sealed = await signedIn(); const seen = [];
   const restore = mockFetch(async (url) => {
     seen.push(url);
-    if (url.includes('/actions/runs/')) return new Response(JSON.stringify({ event: 'push', pull_requests: [] }));
+    if (url.includes('/actions/runs/')) return reviewRun({ id: 123, head_sha: 'cafebad'.padEnd(40, '0'), pull_requests: [] });
     if (url.endsWith('/repo')) return accessibleRepo();
     if (url.endsWith('/artifacts/44')) return new Response(JSON.stringify({
       name: 'kicad-review-deadbee-cafebad-fail.html', expired: false,
-      workflow_run: { id: 123 },
+      workflow_run: { id: 123, repository_id: 5 },
     }));
     throw new Error(`unexpected ${url}`);
   });
@@ -658,8 +849,8 @@ test('framed artifact page keeps the report sandboxed and escapes metadata', asy
 test('framed artifact page uses legacy review crumbs', async () => {
   const sealed = await signedIn();
   const restore = mockFetch(async (url) => {
-    if (url.includes('/actions/runs/')) return new Response(JSON.stringify({ event: 'push', pull_requests: [] }));
-    return url.endsWith('/repo') ? accessibleRepo() : new Response(JSON.stringify({ name: 'kicad-review.html', expired: false }));
+    if (url.includes('/actions/runs/')) return reviewRun({ pull_requests: [] });
+    return url.endsWith('/repo') ? accessibleRepo() : new Response(JSON.stringify({ name: 'kicad-review.html', expired: false, workflow_run: { id: 9, repository_id: 5 } }));
   });
   try {
     const body = await (await call('/r/Cameronrlewis/repo/a/45', { headers: { Cookie: `s=${sealed}` } })).text();
@@ -672,8 +863,9 @@ test('artifact redirect URL remains server-side', async () => {
   const sealed = await signedIn();
   const blobUrl = 'https://signed.example/very-secret';
   const restore = mockFetch(async (url) => {
-    if (url.endsWith('/repo')) return new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true } }));
-    if (url.endsWith('/artifacts/7')) return new Response(JSON.stringify({ name: 'report.html' }));
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/artifacts/7')) return new Response(JSON.stringify({ name: 'kicad-review.html', workflow_run: { id: 9, repository_id: 5 } }));
+    if (url.endsWith('/actions/runs/9')) return reviewRun();
     if (url.endsWith('/artifacts/7/zip')) return new Response(null, { status: 302, headers: { Location: blobUrl } });
     return new Response('<p>review</p>');
   });
@@ -690,8 +882,8 @@ test('artifact redirect URL remains server-side', async () => {
 test('expired artifacts explain how to get a new review', async () => {
   const sealed = await signedIn();
   const restore = mockFetch(async (url) => url.endsWith('/repo')
-    ? new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true } }))
-    : new Response(JSON.stringify({ name: 'report.html', expired: true })));
+    ? accessibleRepo()
+    : new Response(JSON.stringify({ name: 'kicad-review.html', expired: true, workflow_run: { id: 9, repository_id: 5 } })));
   try {
     const response = await call('/r/Cameronrlewis/repo/a/8', { headers: { Cookie: `s=${sealed}` } });
     assert.equal(response.status, 404);
@@ -884,7 +1076,11 @@ function compareRequest(path, body, sealed, origin = 'https://site.example') {
 }
 
 function accessibleRepo() {
-  return new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true }, default_branch: 'main' }));
+  return new Response(JSON.stringify({ id: 5, owner: { login: 'Cameronrlewis' }, permissions: { pull: true }, default_branch: 'main' }));
+}
+// The kicad-review.yml run of repository 5 that report routes require (reportArtifact checks its provenance).
+function reviewRun(fields = {}) {
+  return Response.json({ id: 9, path: '.github/workflows/kicad-review.yml', event: 'push', head_sha: 'b'.repeat(40), repository: { id: 5 }, ...fields });
 }
 
 const base = 'deadbeef00000000000000000000000000000000';
@@ -1025,7 +1221,7 @@ test('completed rerun redirects to newest non-expired review artifact even after
   const restore = mockFetch(async (url) => {
     if (url.endsWith('/repo')) return accessibleRepo();
     if (url.endsWith('/runs/12')) return new Response(JSON.stringify({ status: 'completed', conclusion: 'failure' }));
-    assert.equal(url, 'https://api.github.com/repos/Cameronrlewis/repo/actions/runs/12/artifacts');
+    assert.equal(url, 'https://api.github.com/repos/Cameronrlewis/repo/actions/runs/12/artifacts?per_page=100');
     return new Response(JSON.stringify({ artifacts: [{ id: 55, name: 'kicad-review-deadbee-cafebad-pass.html', created_at: '2026-10-11' }, { id: 57, name: 'kicad-review-deadbee-cafebad-pass.html', created_at: '2026-10-13', expired: true }, { id: 56, name: 'kicad-review-deadbee-cafebad-pass.html', created_at: '2026-10-12' }] }));
   });
   try {
@@ -1191,7 +1387,7 @@ test('PG-O1 failed runs name the same stage as progress', async () => {
       if (url.endsWith('/repo')) return accessibleRepo();
       if (url.endsWith('/runs/12')) return new Response(JSON.stringify({ status: 'completed', conclusion: 'failure' }));
       if (url.endsWith('/jobs')) return new Response(JSON.stringify({ jobs }));
-      if (url.endsWith('/artifacts')) return new Response(JSON.stringify({ artifacts: [] }));
+      if (url.includes('/artifacts')) return new Response(JSON.stringify({ artifacts: [] }));
       throw new Error(`unexpected ${url}`);
     });
     try {
@@ -1221,7 +1417,7 @@ test('run page distinguishes nothing to review, failed runs, and failures with r
     if (url.endsWith('/repo')) return accessibleRepo();
     if (url.endsWith('/runs/12')) return new Response(JSON.stringify({ status: 'completed', conclusion: 'failure' }));
     if (url.endsWith('/jobs')) return new Response(JSON.stringify(failedJobs));
-    if (url.endsWith('/artifacts')) return new Response(JSON.stringify({ artifacts: [] }));
+    if (url.includes('/artifacts')) return new Response(JSON.stringify({ artifacts: [] }));
     throw new Error(`unexpected ${url}`);
   });
   try {
@@ -1234,7 +1430,7 @@ test('run page distinguishes nothing to review, failed runs, and failures with r
   restore = mockFetch(async (url) => {
     if (url.endsWith('/repo')) return accessibleRepo();
     if (url.endsWith('/runs/12')) return new Response(JSON.stringify({ status: 'completed', conclusion: 'success' }));
-    if (url.endsWith('/artifacts')) return new Response(JSON.stringify({ artifacts: [] }));
+    if (url.includes('/artifacts')) return new Response(JSON.stringify({ artifacts: [] }));
     throw new Error(`unexpected ${url}`);
   });
   try {
@@ -1246,7 +1442,7 @@ test('run page distinguishes nothing to review, failed runs, and failures with r
     if (url.endsWith('/repo')) return accessibleRepo();
     if (url.endsWith('/runs/12')) return new Response(JSON.stringify({ status: 'completed', conclusion: 'failure' }));
     if (url.endsWith('/jobs')) return new Response(JSON.stringify(failedJobs));
-    if (url.endsWith('/artifacts')) return new Response(JSON.stringify({ artifacts: [{ id: 56, name: 'kicad-review-deadbee-cafebad-fail.html' }] }));
+    if (url.includes('/artifacts')) return new Response(JSON.stringify({ artifacts: [{ id: 56, name: 'kicad-review-deadbee-cafebad-fail.html' }] }));
     throw new Error(`unexpected ${url}`);
   });
   try {
@@ -1277,7 +1473,7 @@ test('run jobs are fetched as the user only for progress or a failed run without
     completedUrls.push(url);
     if (url.endsWith('/repo')) return accessibleRepo();
     if (url.endsWith('/runs/12')) return new Response(JSON.stringify({ status: 'completed', conclusion: 'success' }));
-    if (url.endsWith('/artifacts')) return new Response(JSON.stringify({ artifacts: [] }));
+    if (url.includes('/artifacts')) return new Response(JSON.stringify({ artifacts: [] }));
     throw new Error(`unexpected ${url}`);
   });
   try {
@@ -1293,8 +1489,8 @@ test('expired artifacts offer regeneration only when their name records revision
     ['kicad-review.html', /Back to reviews/],
   ]) {
     const restore = mockFetch(async (url) => url.endsWith('/repo')
-      ? new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true } }))
-      : new Response(JSON.stringify({ name, expired: true })));
+      ? accessibleRepo()
+      : new Response(JSON.stringify({ name, expired: true, workflow_run: { id: 9, repository_id: 5 } })));
     try {
       const body = await (await call('/r/Cameronrlewis/repo/a/8', { headers: { Cookie: `s=${sealed}` } })).text();
       assert.match(body, /Reviews are kept for 90 days by GitHub\. Generate it again to see it\./);
@@ -1423,13 +1619,14 @@ test('share tokens are unguessable, strictly validated, expiring and bound to on
 const { privateKey, publicKey: sharePublicKey } = await crypto.subtle.generateKey({ name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, true, ['sign', 'verify']);
 const appEnv = { ...shareEnv, GITHUB_APP_ID: '42', GITHUB_APP_PRIVATE_KEY: `-----BEGIN PRIVATE KEY-----\n${Buffer.from(await crypto.subtle.exportKey('pkcs8', privateKey)).toString('base64')}\n-----END PRIVATE KEY-----` };
 const sharePost = async (path, body = {}, headers = {}, cookie) => request(path, { method: 'POST', headers: { Origin: 'https://site.example', 'Content-Type': 'application/json', Cookie: `s=${cookie ?? await signedIn()}`, ...headers }, body: JSON.stringify(body) });
-const shareMeta = (expires = new Date(Date.now() + 2 * 86400_000).toISOString()) => ({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', expired: false, expires_at: expires });
+const shareMeta = (expires = new Date(Date.now() + 2 * 86400_000).toISOString()) => ({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', expired: false, expires_at: expires, workflow_run: { id: 9, repository_id: 5 } });
 const shareJson = (data, status = 200) => new Response(JSON.stringify(data), { status });
 function shareCreationFetch({ push = true, metadata = shareMeta(), generation = '3', genStatus = 200, refreshed = false } = {}) {
   return mockFetch(async (url, options = {}) => {
     if (url === 'https://github.com/login/oauth/access_token' && refreshed) return tokenResponse();
-    if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return shareJson({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true, push } });
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return shareJson({ id: 5, owner: { login: 'Cameronrlewis' }, permissions: { pull: true, push } });
     if (url.endsWith('/actions/artifacts/123')) return shareJson(metadata);
+    if (url.endsWith('/actions/runs/9')) return reviewRun();
     if (url.endsWith('/installation')) return shareJson({ id: 7 });
     if (url.endsWith('/access_tokens')) {
       assert.deepEqual(JSON.parse(options.body), { repositories: ['repo'], permissions: { actions: 'read', actions_variables: 'read' } });
@@ -1601,9 +1798,9 @@ test('review page avoids PDF discovery calls and uses listing hint when present'
     const restore = mockFetch(async (url) => {
       seen.push(url);
       if (url.endsWith('/repo')) return accessibleRepo();
-      if (url.endsWith('/actions/runs/9')) return new Response(JSON.stringify({ event: 'push', pull_requests: [] }));
+      if (url.endsWith('/actions/runs/9')) return reviewRun({ pull_requests: [] });
       assert.ok(url.endsWith('/artifacts/123'));
-      return new Response(JSON.stringify({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', workflow_run: { id: 9 } }));
+      return new Response(JSON.stringify({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', workflow_run: { id: 9, repository_id: 5 } }));
     });
     try {
       const response = await call(`/r/Cameronrlewis/repo/a/123${suffix}`, { headers: { Cookie: `s=${sealed}` } });
@@ -1787,7 +1984,9 @@ test('reply and resolve call the right GitHub endpoints', async () => {
   const calls = [];
   const restore = mockFetch(async (url, options = {}) => {
     if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return repoOk();
-    calls.push([url, JSON.parse(options.body || '{}')]);
+    const sent = JSON.parse(options.body || '{}');
+    calls.push([url, sent]);
+    if (/node\(id:/.test(sent.query)) return new Response(JSON.stringify({ data: { node: { repository: { name: 'Repo', owner: { login: 'cameronrlewis' } }, pullRequest: { number: 7 } } } }));
     return new Response(JSON.stringify({ data: { resolveReviewThread: { thread: { isResolved: true } } } }), { status: url.endsWith('/replies') ? 201 : 200 });
   });
   try {
@@ -1796,10 +1995,88 @@ test('reply and resolve call the right GitHub endpoints', async () => {
     assert.equal((await threadsJson('/r/Cameronrlewis/repo/pull/7/threads/bad%20id/resolve', {}, undefined, sealed)).status, 404);
     assert.deepEqual(calls[0], ['https://api.github.com/repos/Cameronrlewis/repo/pulls/7/comments/11/replies', { body: 'done' }]);
     assert.equal(calls[1][0], 'https://api.github.com/graphql');
-    assert.match(calls[1][1].query, /resolveReviewThread/);
+    assert.match(calls[1][1].query, /PullRequestReviewThread\{repository/);
     assert.deepEqual(calls[1][1].variables, { id: 'PRRT_kwDO1' });
-    assert.equal(calls.length, 2);
+    assert.match(calls[2][1].query, /resolveReviewThread/);
+    assert.deepEqual(calls[2][1].variables, { id: 'PRRT_kwDO1' });
+    assert.equal(calls.length, 3);
   } finally { restore(); }
+});
+
+test('resolve refuses a thread from another repository or pull request', async () => {
+  const sealed = await signedIn({ t: 'access-secret' });
+  for (const [label, scope] of [['other repo', { repository: { name: 'secret', owner: { login: 'outsider' } }, pullRequest: { number: 7 } }],
+    ['other pull', { repository: { name: 'repo', owner: { login: 'Cameronrlewis' } }, pullRequest: { number: 8 } }],
+    ['not a thread', null]]) {
+    const mutations = [];
+    const restore = mockFetch(async (url, options = {}) => {
+      if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return repoOk();
+      const { query } = JSON.parse(options.body || '{}');
+      if (/ReviewThread\(input/.test(query)) { mutations.push(query); return new Response(JSON.stringify({ data: { resolveReviewThread: { thread: { isResolved: true } } } })); }
+      return new Response(JSON.stringify({ data: { node: scope } }));
+    });
+    try {
+      for (const op of ['resolve', 'unresolve']) {
+        const response = await threadsJson(`/r/Cameronrlewis/repo/pull/7/threads/PRRT_foreign/${op}`, {}, undefined, sealed);
+        assert.equal(response.status, 404, label);
+      }
+      assert.equal(mutations.length, 0, label);
+    } finally { restore(); }
+  }
+});
+
+test('resolve accepts a thread when repository was renamed or transferred', async () => {
+  const sealed = await signedIn({ t: 'access-secret' });
+  const mutations = [];
+  const restore = mockFetch(async (url, options = {}) => {
+    if (url === 'https://api.github.com/repos/Cameronrlewis/old-name') {
+      return new Response(JSON.stringify({ name: 'canonical-name', owner: { login: 'cameronrlewis' }, permissions: { pull: true } }));
+    }
+    const { query } = JSON.parse(options.body || '{}');
+    if (/ReviewThread\(input/.test(query)) {
+      mutations.push(query);
+      return new Response(JSON.stringify({ data: { resolveReviewThread: { thread: { isResolved: true } } } }));
+    }
+    if (/PullRequestReviewThread\{repository/.test(query)) {
+      return new Response(JSON.stringify({ data: { node: { repository: { name: 'canonical-name', owner: { login: 'cameronrlewis' } }, pullRequest: { number: 7 } } } }));
+    }
+    return new Response('not found', { status: 404 });
+  });
+  try {
+    const response = await threadsJson('/r/Cameronrlewis/old-name/pull/7/threads/PRRT_1/resolve', {}, undefined, sealed);
+    assert.equal(response.status, 200);
+    assert.equal(mutations.length, 1);
+  } finally { restore(); }
+});
+
+test('resolve refuses a thread whose owner and name come from different repositories', async () => {
+  const sealed = await signedIn({ t: 'access-secret' });
+  const owners = env.ALLOWED_OWNERS;
+  env.ALLOWED_OWNERS = 'Cameronrlewis,oldowner,newowner';
+  try { for (const [nodeOwner, nodeName] of [['oldowner', 'new-name'], ['newowner', 'old-name']]) {
+    const mutations = [];
+    const restore = mockFetch(async (url, options = {}) => {
+      if (url === 'https://api.github.com/repos/oldowner/old-name') {
+        return new Response(JSON.stringify({ name: 'new-name', owner: { login: 'newowner' }, permissions: { pull: true } }));
+      }
+      const { query } = JSON.parse(options.body || '{}');
+      if (/ReviewThread\(input/.test(query)) {
+        mutations.push(query);
+        return new Response(JSON.stringify({ data: { resolveReviewThread: { thread: { isResolved: true } } } }));
+      }
+      if (/PullRequestReviewThread\{repository/.test(query)) {
+        return new Response(JSON.stringify({ data: { node: { repository: { name: nodeName, owner: { login: nodeOwner } }, pullRequest: { number: 7 } } } }));
+      }
+      return new Response('not found', { status: 404 });
+    });
+    try {
+      for (const op of ['resolve', 'unresolve']) {
+        const response = await threadsJson(`/r/oldowner/old-name/pull/7/threads/PRRT_1/${op}`, {}, undefined, sealed);
+        assert.equal(response.status, 404, `${nodeOwner}/${nodeName} ${op}`);
+      }
+      assert.equal(mutations.length, 0, `${nodeOwner}/${nodeName}`);
+    } finally { restore(); }
+  } } finally { env.ALLOWED_OWNERS = owners; }
 });
 
 test('thread routes explain a missing Pull requests and Contents permissions', async () => {
@@ -1807,28 +2084,61 @@ test('thread routes explain a missing Pull requests and Contents permissions', a
   const restore = mockFetch(async (url) => url === 'https://api.github.com/repos/Cameronrlewis/repo' ? repoOk()
     : new Response(JSON.stringify({ message: 'Resource not accessible by integration' }), { status: 403 }));
   try {
-    const response = await threadsJson('/r/Cameronrlewis/repo/pull/7/threads/11/reply', { text: 'x' }, undefined, sealed);
-    assert.equal(response.status, 403);
-    assert.match((await response.json()).error, /Pull requests and Contents permissions \(read and write\)/);
+    for (const action of ['/11/reply', '/PRRT_1/resolve', '/PRRT_1/unresolve']) {
+      const response = await threadsJson('/r/Cameronrlewis/repo/pull/7/threads' + action, action.endsWith('/reply') ? { text: 'x' } : {}, undefined, sealed);
+      assert.equal(response.status, 403);
+      assert.match((await response.json()).error, /Pull requests and Contents permissions \(read and write\)/);
+    }
   } finally { restore(); }
 });
 
-test('artifact PR discovery is best-effort on the framed artifact route', async () => {
+test('resolve and unresolve handle scope-query 403 and 502 errors without mutating', async () => {
+  const sealed = await signedIn({ t: 'access-secret' });
+  for (const [scenario, scopeResponse, expectedStatus] of [
+    ['forbidden error', new Response(JSON.stringify({ errors: [{ type: 'FORBIDDEN' }] })), 403],
+    ['general error', new Response(JSON.stringify({ errors: [{ message: 'Service unavailable' }] })), 502],
+    ['server error', new Response('error', { status: 500 }), 502],
+  ]) {
+    const mutations = [];
+    const restore = mockFetch(async (url, options = {}) => {
+      if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return repoOk();
+      const { query } = JSON.parse(options.body || '{}');
+      if (/ReviewThread\(input/.test(query)) {
+        mutations.push(query);
+        return new Response(JSON.stringify({ data: { resolveReviewThread: { thread: { isResolved: true } } } }));
+      }
+      return scopeResponse.clone();
+    });
+    try {
+      for (const op of ['resolve', 'unresolve']) {
+        const response = await threadsJson(`/r/Cameronrlewis/repo/pull/7/threads/PRRT_1/${op}`, {}, undefined, sealed);
+        assert.equal(response.status, expectedStatus, scenario);
+        const data = await response.json();
+        if (expectedStatus === 403) assert.match(data.error, /Pull requests and Contents permissions \(read and write\)/);
+        else assert.equal(data.error, 'GitHub did not answer. Try again.');
+      }
+      assert.equal(mutations.length, 0, scenario);
+    } finally { restore(); }
+  }
+});
+
+test('artifact PR discovery reads the mandatory provenance run on the framed artifact route', async () => {
   const sealed = await signedIn();
-  for (const runData of [{ event: 'pull_request', pull_requests: [{ number: 7 }] }, { event: 'push', pull_requests: [] }, null, 'throw']) {
+  for (const [runData, status] of [[{ event: 'pull_request', pull_requests: [{ number: 7 }] }, 200], [{ event: 'push', pull_requests: [] }, 200], [null, 404], ['throw', 404]]) {
     const seen = [];
     const restore = mockFetch(async (url) => {
       seen.push(url);
       if (url.endsWith('/repo')) return repoOk();
-      if (url.endsWith('/artifacts/44')) return new Response(JSON.stringify({ name: 'kicad-review.html', workflow_run: { id: 123 } }));
+      if (url.endsWith('/artifacts/44')) return new Response(JSON.stringify({ name: 'kicad-review.html', workflow_run: { id: 123, repository_id: 5 } }));
       if (runData === 'throw') throw new Error('run unavailable');
-      return new Response(JSON.stringify(runData), { status: runData ? 200 : 403 });
+      return runData ? reviewRun({ id: 123, ...runData }) : new Response('{}', { status: 403 });
     });
     try {
       const response = await call('/r/Cameronrlewis/repo/a/44', { headers: { Cookie: `s=${sealed}` } });
-      assert.equal(response.status, 200);
-      assert.match(await response.text(), /<iframe/);
+      assert.equal(response.status, status);
+      if (status === 200) assert.match(await response.text(), /<iframe/);
       assert.equal(seen[2], 'https://api.github.com/repos/Cameronrlewis/repo/actions/runs/123');
+      assert.equal(seen.length, 3, 'one run lookup serves provenance and PR discovery');
     } finally { restore(); }
   }
 });
@@ -1966,9 +2276,9 @@ test('artifact wrapper discovers PR number and disables thread requests for push
     const restore = mockFetch(async (url) => {
       if (url.endsWith('/repo')) return accessibleRepo();
       if (url.endsWith('/artifacts/44')) return new Response(JSON.stringify({
-        name: 'kicad-review-deadbee-cafebad-pass.html', expired: false, workflow_run: { id: 123 },
+        name: 'kicad-review-deadbee-cafebad-pass.html', expired: false, workflow_run: { id: 123, repository_id: 5 },
       }));
-      if (url.endsWith('/actions/runs/123')) return new Response(JSON.stringify({ event, status: 'completed', conclusion: 'failure', pull_requests: [{ number: 7 }] }));
+      if (url.endsWith('/actions/runs/123')) return reviewRun({ id: 123, head_sha: 'cafebad'.padEnd(40, '0'), event, status: 'completed', conclusion: 'failure', pull_requests: [{ number: 7 }] });
       throw new Error(`unexpected ${url}`);
     });
     try {
@@ -2123,7 +2433,7 @@ test('missing share secrets keep existing review HTML byte-identical and guest r
     for (const key of ['SHARE_KEY', 'GITHUB_APP_ID', 'GITHUB_APP_PRIVATE_KEY']) {
       const config = { ...appEnv, [key]: '' };
       const response = await worker.fetch(request('/r/Cameronrlewis/repo/a/123', { headers: { Cookie: `s=${cookie}` } }), config);
-      assert.equal(await response.text(), reviewPage(props));
+      assert.equal(await response.text(), reviewPage({ ...props, workflowRunId: 9 }));
       assert.equal((await worker.fetch(request(`/s/${await guestToken()}`), config)).status, 404);
       assert.equal((await worker.fetch(await sharePost('/r/Cameronrlewis/repo/a/123/share'), config)).status, 404);
       assert.equal((await worker.fetch(await sharePost('/r/Cameronrlewis/repo/share/revoke'), config)).status, 404);
@@ -3248,6 +3558,27 @@ test('bench-t8 start caps calls, deduplicates repositories and joins only record
   } finally { restore(); }
 });
 
+
+test('finding 2: home stays inside the free-plan subrequest budget when every repository has thousands of artifacts', async () => {
+  const sealed = await signedIn(); const calls = [];
+  const restore = mockFetch(async url => {
+    calls.push(url);
+    if (url.endsWith('/user/installations')) return Response.json({ installations: Array.from({ length: 5 }, (_, id) => ({ id })) });
+    if (url.includes('/repositories?')) return Response.json({ repositories: Array.from({ length: 5 }, (_, i) => ({ owner: { login: 'Cameronrlewis' }, name: `repo${i}`, pushed_at: `2026-10-${10 + i}T00:00:00Z` })) });
+    // Every page is full: the listing never ends inside any page bound.
+    if (url.includes('/actions/artifacts?')) return Response.json({ artifacts: Array.from({ length: 100 }, (_, i) => ({ id: i, name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', created_at: '2026-10-16T10:00:00Z', workflow_run: { id: 77, head_sha: 'b'.repeat(40), head_branch: 'topic' } })) });
+    if (url.includes('/actions/runs?')) return Response.json({ workflow_runs: [] });
+    if (url.includes('/pulls?')) return Response.json([]);
+    throw new Error(`Unexpected ${url}`);
+  });
+  try {
+    const body = await (await call('/', { headers: { Cookie: `s=${sealed}` } })).text();
+    // 1 installations + 5 repository lists + 5 × (3 artifact pages + runs + pulls); the free plan allows 50.
+    assert.equal(calls.length, 31);
+    assert.doesNotMatch(body, /could not be loaded/);
+    assert.equal((body.match(/href="\/r\/Cameronrlewis\/repo\d\/a\/\d+"/g) || []).length >= 20, true);
+  } finally { restore(); }
+});
 test('bench-t8 retains available reports when run and PR APIs fail', async () => {
   const sealed = await signedIn();
   const restore = mockFetch(async url => {
@@ -3549,7 +3880,7 @@ for(const encoded of [true,false])test('BR02 broker gzip transport '+(encoded?'f
 });
 
 // Task 9.1: authenticated image delivery and the opaque-frame bridge.
-import { assetFromReport, readStoredData, privateAsset } from './worker.js';
+import { assetFromReport, readStoredData, privateAsset, readExactly } from './worker.js';
 const imageId = 'abcdef123456';
 const imageText = '<svg xmlns="http://www.w3.org/2000/svg"/>';
 const imageData = () => ({ version: 1, assets: { [imageId]: { kind: 'svg', name: 'sheet.svg' } },
@@ -3616,7 +3947,8 @@ test('digest assets revalidate permissions and expiry before 200 or 304 and neve
   const restore = mockFetch(async (url, options) => {
     seen.push(url);
     if (url.endsWith('/repo')) return pullRevoked ? new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: false } })) : denied ? new Response('{}', { status: 404 }) : accessibleRepo();
-    if (url.endsWith('/artifacts/42')) return unknown ? new Response('{}', { status: 404 }) : new Response(JSON.stringify({ name: 'kicad-review.html', expired, workflow_run: { repository_id: 5 } }));
+    if (url.endsWith('/artifacts/42')) return unknown ? new Response('{}', { status: 404 }) : new Response(JSON.stringify({ name: 'kicad-review.html', expired, workflow_run: { id: 9, repository_id: 5 } }));
+    if (url.endsWith('/actions/runs/9')) return reviewRun();
     if (url.endsWith('/artifacts/42/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/image-envelope' } });
     assert.equal(url, 'https://signed.example/image-envelope');
     assert.equal(options?.headers?.Authorization, undefined);
@@ -3650,7 +3982,8 @@ test('worker wrapper response defers the allowlist envelope fetch to the browser
   const restore = mockFetch(async url => {
     seen.push(url);
     if (url.endsWith('/repo')) return accessibleRepo();
-    if (url.endsWith('/artifacts/42')) return Response.json({ name: 'kicad-review.html', expired: false });
+    if (url.endsWith('/artifacts/42')) return Response.json({ name: 'kicad-review.html', expired: false, workflow_run: { id: 9, repository_id: 5 } });
+    if (url.endsWith('/actions/runs/9')) return reviewRun();
     if (url.endsWith('/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/envelope' } });
     assert.equal(url, 'https://signed.example/envelope');
     return new Response(storedImageReport());
@@ -3660,7 +3993,7 @@ test('worker wrapper response defers the allowlist envelope fetch to the browser
     const page = await call('/r/Cameronrlewis/repo/a/42', options);
     assert.equal(page.status, 200);
     assert.match(await page.text(), /assetParentFactory/);
-    assert.deepEqual(seen, ['https://api.github.com/repos/Cameronrlewis/repo', 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/42']);
+    assert.deepEqual(seen, ['https://api.github.com/repos/Cameronrlewis/repo', 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/42', 'https://api.github.com/repos/Cameronrlewis/repo/actions/runs/9']);
     for (const suffix of ['/raw', `/assets/${imageId}.svg`]) {
       const result = await call(`/r/Cameronrlewis/repo/a/42${suffix}`, options);
       assert.equal(result.status, 200);
@@ -3723,7 +4056,8 @@ test('asset parent uses authenticated route declarations without trusting the ch
   data.blobs.deadbeef1111 = gzipSync('{"version":1}').toString('base64');
   const restore = mockFetch(async url => {
     if (url.endsWith('/repo')) return denied ? new Response('{}', { status: 404 }) : accessibleRepo();
-    if (url.endsWith('/artifacts/42')) return Response.json({ name: 'kicad-review.html', expired });
+    if (url.endsWith('/artifacts/42')) return Response.json({ name: 'kicad-review.html', expired, workflow_run: { id: 9, repository_id: 5 } });
+    if (url.endsWith('/actions/runs/9')) return reviewRun();
     if (url.endsWith('/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/envelope' } });
     assert.equal(url, 'https://signed.example/envelope'); downloads++;
     return new Response(storedImageReport(data));
@@ -3869,7 +4203,7 @@ test('digest asset denies foreign repository IDs, expired timestamps and unknown
     if (url.endsWith('/repo')) return new Response(JSON.stringify({ id: 10, owner: { login: 'Cameronrlewis' }, permissions: { pull: true } }));
     if (url.endsWith('/artifacts/42')) return mode === 'unknown' ? new Response('{}', { status: 404 }) : new Response(JSON.stringify({
       name: 'kicad-review.html', expired: false, expires_at: mode === 'invalid' ? 'not-a-date' : mode === 'expired' ? '2000-01-01T00:00:00Z' : '2099-01-01T00:00:00Z',
-      workflow_run: { repository_id: mode === 'foreign' ? 20 : 10 } }));
+      workflow_run: { id: 9, repository_id: mode === 'foreign' ? 20 : 10 } }));
     downloads++; throw new Error(`must not download ${url}`);
   });
   try {
@@ -3884,7 +4218,8 @@ test('digest JSON uses gzip MIME and hosted raw takes declarations only from the
   const sealed = await signedIn(), data = imageData(); data.assets[imageId].kind = 'json';
   const restore = mockFetch(async url => {
     if (url.endsWith('/repo')) return accessibleRepo();
-    if (url.endsWith('/artifacts/42')) return new Response(JSON.stringify({ name: 'kicad-review.html', expired: false }));
+    if (url.endsWith('/artifacts/42')) return new Response(JSON.stringify({ name: 'kicad-review.html', expired: false, workflow_run: { id: 9, repository_id: 5 } }));
+    if (url.endsWith('/actions/runs/9')) return reviewRun();
     if (url.endsWith('/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/envelope' } });
     return new Response(storedImageReport(data));
   });
@@ -3902,7 +4237,7 @@ test('digest JSON uses gzip MIME and hosted raw takes declarations only from the
   } finally { restore(); }
 });
 test('private gzip responses preserve encodeBody manual through the wrapper', async () => {
-  const sealed = await signedIn({ e: Date.now() - 1 });
+  const sealed = await signedIn({ e: Date.now() - 1, r: 'gzip-wrapper-refresh' });
   const Original = globalThis.Response, encodings = new WeakMap(); let refreshes = 0;
   globalThis.Response = class extends Original {
     constructor(body, init) { super(body, init); encodings.set(this, init?.encodeBody); }
@@ -3910,7 +4245,8 @@ test('private gzip responses preserve encodeBody manual through the wrapper', as
   const restore = mockFetch(async url => {
     if (url === 'https://github.com/login/oauth/access_token') { refreshes++; return tokenResponse(); }
     if (url.endsWith('/repo')) return repoOk();
-    if (url.endsWith('/artifacts/42')) return new Response(JSON.stringify({ name: 'kicad-review.html', expired: false }));
+    if (url.endsWith('/artifacts/42')) return new Response(JSON.stringify({ name: 'kicad-review.html', expired: false, workflow_run: { id: 9, repository_id: 5 } }));
+    if (url.endsWith('/actions/runs/9')) return reviewRun();
     if (url.endsWith('/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/envelope' } });
     assert.equal(url, 'https://signed.example/envelope');
     return new Response(storedImageReport());
@@ -3933,7 +4269,8 @@ test('private gzip responses preserve encodeBody manual through the wrapper', as
       assert.equal((await open(refreshed, env)).t, 'access-secret');
       assert.deepEqual(Buffer.from(await r.arrayBuffer()), status === 200 ? gzipSync(imageText) : Buffer.alloc(0));
     }
-    assert.equal(refreshes, 2);
+    // The second request still carries the rotated cookie and reuses that rotation.
+    assert.equal(refreshes, 1);
   } finally { restore(); globalThis.Response = Original; }
 });
 for (const failure of ['open', 'close']) test(`browser cache test releases its HTTP listener when browser ${failure} fails`, () => {
@@ -3983,7 +4320,8 @@ test('raw and digest delivery follow signed blob redirects without forwarding Gi
   const sealed = await signedIn(), redirects = [];
   const restore = mockFetch(async (url, options) => {
     if (url.endsWith('/repo')) return accessibleRepo();
-    if (url.endsWith('/artifacts/42')) return new Response(JSON.stringify({ name: 'kicad-review.html', expired: false }));
+    if (url.endsWith('/artifacts/42')) return new Response(JSON.stringify({ name: 'kicad-review.html', expired: false, workflow_run: { id: 9, repository_id: 5 } }));
+    if (url.endsWith('/actions/runs/9')) return reviewRun();
     if (url.endsWith('/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/redirecting-blob' } });
     assert.equal(url, 'https://signed.example/redirecting-blob');
     redirects.push(options?.redirect ?? 'follow');
@@ -4532,8 +4870,9 @@ test('report cache reuses raw parsing and assets but revalidates every request',
       return mode === 'missing' ? new Response('{}', { status: 404 }) : Response.json({
         name: 'kicad-review.html', size_in_bytes: stored.length, updated_at: updated,
         expired: mode === 'expired', expires_at: mode === 'past' ? '2000-01-01T00:00:00Z' : '2099-01-01T00:00:00Z',
-        workflow_run: { repository_id: 5 } });
+        workflow_run: { id: 9, repository_id: 5 } });
     }
+    if (url.endsWith('/actions/runs/9')) return reviewRun();
     if (url.endsWith('/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/cache-probe' } });
     assert.equal(url, 'https://signed.example/cache-probe'); downloads++; return new Response(stored);
   });
@@ -4582,7 +4921,8 @@ test('raw handler evicts least recently used reports by retained bytes before en
     if (url.endsWith('/repo')) return accessibleRepo();
     const artifact = url.match(/\/artifacts\/(87650[1-3])$/);
     if (artifact) return Response.json({ name: 'kicad-review.html', size_in_bytes: stored.length,
-      updated_at: '2026-10-29T00:00:00Z', workflow_run: { repository_id: 5 } });
+      updated_at: '2026-10-29T00:00:00Z', workflow_run: { id: 9, repository_id: 5 } });
+    if (url.endsWith('/actions/runs/9')) return reviewRun();
     const zip = url.match(/\/artifacts\/(87650[1-3])\/zip$/);
     if (zip) { downloading = zip[1]; return new Response(null, { status: 302, headers: { Location: 'https://signed.example/lru' } }); }
     assert.equal(url, 'https://signed.example/lru'); downloads.push(downloading); return new Response(stored);
@@ -4625,7 +4965,8 @@ async function coldHarness({ legacy = false } = {}) {
   const restore = mockFetch(async url => {
     if (url.endsWith('/repo')) return accessibleRepo();
     if (/\/artifacts\/\d+$/.test(url)) return Response.json({ name: 'kicad-review.html',
-      ...(legacy ? {} : { size_in_bytes: stored.length, updated_at: '2026-10-29T00:00:00Z' }), workflow_run: { repository_id: 5 } });
+      ...(legacy ? {} : { size_in_bytes: stored.length, updated_at: '2026-10-29T00:00:00Z' }), workflow_run: { id: 9, repository_id: 5 } });
+    if (url.endsWith('/actions/runs/9')) return reviewRun();
     if (url.endsWith('/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/single-flight' } });
     assert.equal(url, 'https://signed.example/single-flight'); h.downloads++;
     h.maxActive = Math.max(h.maxActive, ++h.active);
@@ -4724,6 +5065,7 @@ for (const scenario of ['valid', 'valid-parts', 'design', 'design-head-mismatch'
         return new Response(JSON.stringify({ name: reportName, expired,
           workflow_run: { id: 9, repository_id: scenario === 'foreign-repo' ? 6 : 5 } }));
       }
+      if (url.endsWith('/actions/runs/9')) return reviewRun();
       if (url.endsWith('/artifacts/12/zip')) return new Response(null, { status: 302,
         headers: { Location: 'https://artifact.actions.githubusercontent.com/report' } });
       if (url === 'https://artifact.actions.githubusercontent.com/report') return new Response(stored);
@@ -4813,7 +5155,7 @@ test('BR02 image route rejects 64-character 3D model digests', async () => {
   } finally { restore(); }
 });
 
-import { lazy3dData, currentBody } from './report-shell.js';
+import { lazy3dData, currentBody, declaredAssets, MAX_REPORT_BYTES, IMAGE_ASSET_LIMITS, ASSET_3D_LIMITS } from './report-shell.js';
 import { verifyReportFamily } from './report-kind.js';
 test('BR02 lazy stripping is opt-in and retains blobs used outside 3D',async()=>{
   const digest='d'.repeat(64);
@@ -4883,7 +5225,7 @@ async function lazy3dHarness({ family = 'comparison', scenario = 'valid' } = {})
     if (url.endsWith('/repos/Cameronrlewis/repo')) return h.revoked
       ? Response.json({ id: 5, owner: { login: 'Cameronrlewis' }, permissions: { pull: false } })
       : Response.json({ id: 5, owner: { login: 'Cameronrlewis' }, permissions: { pull: true } });
-    if (url.endsWith('/actions/runs/9')) return Response.json({ status: 'completed', conclusion: 'success', event: 'push' });
+    if (url.endsWith('/actions/runs/9')) return reviewRun({ status: 'completed', conclusion: 'success' });
     if (url.endsWith('/artifacts/12')) return Response.json({ name, expired: h.expired, workflow_run: { id: 9, repository_id: 5 } });
     if (url.endsWith('/artifacts/12/zip')) return new Response(null, { status: 302, headers: { Location: 'https://artifact.actions.githubusercontent.com/report' } });
     if (url === 'https://artifact.actions.githubusercontent.com/report') { h.html++; return new Response(stored); }
@@ -4973,8 +5315,10 @@ for (const family of ['comparison', 'design']) for (const scenario of ['bad-name
   test(`BR02 authenticated lazy 3D fails closed: ${family} ${scenario}`, async () => {
     const h = await lazy3dHarness({ family, scenario: scenario === 'no-pull' || scenario === 'expired-html' ? 'valid' : scenario });
     try {
-      // Unverifiable names keep their embedded models: never stripped, never silently served.
-      if (scenario === 'bad-name' || scenario === 'head-mismatch') await assertEmbeddedShell(h);
+      // Names outside the report families are not served at all; a design head that the
+      // stored data does not bind keeps its embedded models: never stripped, never silently served.
+      if (scenario === 'bad-name') { assert.equal((await h.wrapper()).status, 404); assert.equal((await h.raw()).status, 404); assert.equal(h.html, 0); }
+      else if (scenario === 'head-mismatch') await assertEmbeddedShell(h);
       else if (scenario !== 'no-pull' && scenario !== 'expired-html') await assertStrippedShell(h);
       // A previously issued ETag must never turn a denial into 304.
       const etags = { model: `"${h.files.model.digest}"`, parts: `"${h.files.parts.digest}"` };
@@ -5154,15 +5498,16 @@ const ctxDoc = { version: 1, kind: 'kicad-review-design-context', base: 'a'.repe
 const kvFake = () => { const m = new Map(); return { m, get: async (k) => m.get(k) ?? null, put: async (k, v) => { m.set(k, v); } }; };
 const askEnv = (extra = {}) => ({ ...env, ANTHROPIC_API_KEY: 'sk-test', ASK_KV: kvFake(), ...extra });
 const apiBase = 'https://api.github.com/repos/Cameronrlewis/repo';
-function askMocks({ toml = '[ask]\nenabled = true\n', anthropic, seen = [], artifacts = [{id:56,name:'kicad-review-aaaaaaa-bbbbbbb-pass.context.json',expired:false,digest:'sha256:abc'}], contextBody = JSON.stringify(ctxDoc) } = {}) {
+function askMocks({ toml = '[ask]\nenabled = true\n', anthropic, seen = [], artifacts = [{id:56,name:'kicad-review-aaaaaaa-bbbbbbb-pass.context.json',expired:false,digest:'sha256:abc',workflow_run:{id:9}}], contextBody = JSON.stringify(ctxDoc) } = {}) {
   return async (url, options = {}) => {
     seen.push({ url: String(url), options });
     if (url === apiBase) return repoOk();
     if (String(url).startsWith(`${apiBase}/contents/kicad-review.toml`)) return toml === null ? new Response('{}', { status: 404 }) : new Response(toml);
-    if (url === `${apiBase}/actions/artifacts/55`) return new Response(JSON.stringify({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', expired: false, workflow_run: { id: 9 } }));
+    if (url === `${apiBase}/actions/artifacts/55`) return new Response(JSON.stringify({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', expired: false, workflow_run: { id: 9, repository_id: 5 } }));
+    if (url === `${apiBase}/actions/runs/9`) return reviewRun();
     if (url === `${apiBase}/actions/runs/9/artifacts?per_page=100`) return new Response(JSON.stringify({ artifacts }));
-    if (url === `${apiBase}/actions/artifacts/56/zip`) return new Response(null, { status: 302, headers: { Location: 'https://blob.example/ctx' } });
-    if (url === 'https://blob.example/ctx') return new Response(contextBody);
+    if (url === `${apiBase}/actions/artifacts/56/zip`) return new Response(null, { status: 302, headers: { Location: 'https://ctx.blob.core.windows.net/ctx' } });
+    if (url === 'https://ctx.blob.core.windows.net/ctx') return new Response(contextBody);
     if (url === 'https://api.anthropic.com/v1/messages') return anthropic(options);
     throw new Error('unexpected fetch ' + url);
   };
@@ -5274,6 +5619,45 @@ test('ask route: missing, expired, malformed, disabled and oversized context cal
   ]) {
     const seen=[],restore=mockFetch(askMocks({...options,seen,anthropic:()=>{throw Error('unexpected model');}}));
     try{const r=await askPost('/r/Cameronrlewis/repo/a/55/ask',{messages:[{role:'user',text:'hi'}]},askEnv(),cookie);assert.equal(r.status,status);assert.match((await r.json()).error,pattern);assert.equal(seen.filter(s=>s.url.includes('anthropic')).length,0);}finally{restore();}
+  }
+});
+
+test('ask route: context needs a kicad-review.yml report, is found on any artifact page, and is bounded before download', async () => {
+  const cookie = await signedIn({ t: 'access-secret' });
+  const ask = () => askPost('/r/Cameronrlewis/repo/a/55/ask', { messages: [{ role: 'user', text: 'hi' }] }, askEnv(), cookie);
+  const ctx = { id: 56, name: 'kicad-review-aaaaaaa-bbbbbbb-pass.context.json', expired: false, workflow_run: { id: 9 } };
+  const filler = Array.from({ length: 100 }, (_, i) => ({ id: 1000 + i, name: `other-${i}`, workflow_run: { id: 9 } }));
+  const cases = [
+    ['other workflow', { run: { path: '.github/workflows/other.yml' } }, 404],
+    ['other repository run', { run: { repository: { id: 6 } } }, 404],
+    ['head mismatch', { run: { head_sha: 'c'.repeat(40) } }, 404],
+    ['foreign repository artifact', { meta: { repository_id: 6 } }, 404],
+    ['two context matches', { pages: [[ctx, { ...ctx, id: 57 }]] }, 404],
+    ['context from another run', { pages: [[{ ...ctx, workflow_run: { id: 8 } }]] }, 404],
+    ['declared oversize', { pages: [[{ ...ctx, size_in_bytes: 400001 }]] }, 502],
+    ['unpaged listing', { pages: Array.from({ length: 10 }, () => filler) }, 502],
+    ['storage off-host', { location: 'https://evil.example/ctx' }, 502],
+    ['second page', { pages: [filler, [ctx]] }, 200],
+  ];
+  for (const [label, { run = {}, meta = {}, pages = [[ctx]], location = 'https://ctx.blob.core.windows.net/ctx' }, status] of cases) {
+    const seen = [];
+    const base = askMocks({ seen, anthropic: answerStream });
+    const restore = mockFetch(async (url, options) => {
+      if (url === `${apiBase}/actions/runs/9`) return reviewRun(run);
+      if (url === `${apiBase}/actions/artifacts/55`) return Response.json({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', expired: false, workflow_run: { id: 9, repository_id: 5, ...meta } });
+      const page = /\/actions\/runs\/9\/artifacts\?per_page=100(?:&page=(\d+))?$/.exec(url);
+      if (page) return Response.json({ artifacts: pages[Number(page[1] || 1) - 1] || [] });
+      if (url === `${apiBase}/actions/artifacts/56/zip`) return new Response(null, { status: 302, headers: { Location: location } });
+      if (url === 'https://evil.example/ctx') throw new Error('fetched an off-host location');
+      return base(url, options);
+    });
+    try {
+      const r = await ask();
+      assert.equal(r.status, status, label);
+      await r.text();
+      assert.equal(seen.filter(s => s.url.includes('anthropic')).length, status === 200 ? 1 : 0, label);
+      if (label === 'declared oversize') assert.equal(seen.filter(s => s.url.endsWith('/zip')).length, 0, label);
+    } finally { restore(); }
   }
 });
 
@@ -5549,7 +5933,7 @@ test('ask context download is refused by Content-Length and stops reading past t
   const huge = () => new ReadableStream({ pull(c) { pulls++; if (pulls > 1000) c.close(); else c.enqueue(new Uint8Array(100_000).fill(32)); } });
   const base = askMocks({ anthropic: answerStream });
   const restore = mockFetch(async (url, options) => {
-    if (url === 'https://blob.example/ctx') return new Response(huge(), { headers: { 'Content-Length': '400001' } });
+    if (url === 'https://ctx.blob.core.windows.net/ctx') return new Response(huge(), { headers: { 'Content-Length': '400001' } });
     return base(url, options);
   });
   try {
@@ -5559,7 +5943,7 @@ test('ask context download is refused by Content-Length and stops reading past t
   } finally { restore(); }
   pulls = 0;
   const restore2 = mockFetch(async (url, options) => {
-    if (url === 'https://blob.example/ctx') return new Response(huge());
+    if (url === 'https://ctx.blob.core.windows.net/ctx') return new Response(huge());
     return base(url, options);
   });
   try {
@@ -5844,7 +6228,7 @@ test('large stored entries pipe the upstream body natively into a FixedLengthStr
     const longer = async (a, b) => { const r = await rangeOf(zip)(a, b); if (a === start) r.headers.set('Content-Length', String(b - a + 2)); return r; };
     await assert.rejects(zipEntryStream(longer, entry), /bad range length/);
     // Through the whole route: no wrapper re-wraps, tees or buffers the body.
-    const big = Buffer.alloc(70 * 1024, 3), routeZip = makeZip([{ name: '0/P-bbbbbbb-board.glb', data: big }, { name: '0/downloads.json', data: downloadEnvelope() }]);
+    const big = Buffer.alloc(70 * 1024, 3), routeZip = makeZip([{ name: '0/P-bbbbbbb-board.glb', data: big }, { name: '0/downloads.json', data: downloadEnvelope('b'.repeat(40), [{ kind: 'glb', path: '0/P-bbbbbbb-board.glb', bytes: big.length }]) }]);
     const sealed = await signedIn(), restore = downloadFetch({ zip: routeZip });
     try {
       const response = await call('/r/Cameronrlewis/repo/a/123/download/0/glb', { headers: { Cookie: `s=${sealed}` } });
@@ -5861,8 +6245,8 @@ function downloadFetch({ zip, event = 'pull_request', rangeOk = true, badRange =
     if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return forbidden ? new Response(JSON.stringify({permissions:{pull:false},owner:{login:'Cameronrlewis'}})) : accessibleRepo();
     if (url === 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/123') return new Response(JSON.stringify(report));
     if (url === 'https://api.github.com/repos/Cameronrlewis/repo/actions/runs/9') return new Response(JSON.stringify({ id: 9, event }));
-    const pageMatch = /^https:\/\/api\.github\.com\/repos\/Cameronrlewis\/repo\/actions\/runs\/9\/artifacts\?per_page=100&page=(\d+)$/.exec(url);
-    if (pageMatch) { const rows = bundles || (bundle ? [bundle] : []), page = +pageMatch[1]; return new Response(JSON.stringify({ artifacts: rows.slice((page - 1) * 100, page * 100) })); }
+    const pageMatch = /^https:\/\/api\.github\.com\/repos\/Cameronrlewis\/repo\/actions\/runs\/9\/artifacts\?per_page=100(?:&page=(\d+))?$/.exec(url);
+    if (pageMatch) { const rows = bundles || (bundle ? [bundle] : []), page = +(pageMatch[1] || 1); return new Response(JSON.stringify({ artifacts: rows.slice((page - 1) * 100, page * 100) })); }
     if (url === 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/124/zip') {
       assert.equal(options.redirect, 'manual', 'GitHub redirect must not forward the token');
       assert.ok(new Headers(options.headers).has('Authorization'), 'GitHub API request stays authenticated');
@@ -5881,10 +6265,19 @@ function downloadFetch({ zip, event = 'pull_request', rangeOk = true, badRange =
     return new Response(zip.subarray(+m[1], bodyEnd), { status: 206, headers: { 'Content-Range': badRange ? `bytes 1-1/${zip.length}` : `bytes ${m[1]}-${Math.min(+m[2], zip.length - 1)}/${zip.length}` } });
   });
 }
-const downloadEnvelope = (head = 'b'.repeat(40)) => Buffer.from(JSON.stringify({ files: [], head }));
+const defaultDownloadFiles0 = [
+  { kind: 'fab', path: '0/fab-P-bbbbbbb.zip', bytes: 6 },
+  { kind: 'pdf', path: '0/P-bbbbbbb-schematic.pdf', bytes: 8 },
+  { kind: 'step', path: '0/P-bbbbbbb-board.step', bytes: 9 },
+  { kind: 'glb', path: '0/P-bbbbbbb-board.glb', bytes: 4 },
+];
+const defaultDownloadFiles1 = [
+  { kind: 'pdf', path: '1/Q-bbbbbbb-schematic.pdf', bytes: 6 },
+];
+const downloadEnvelope = (head = 'b'.repeat(40), files = defaultDownloadFiles0) => Buffer.from(JSON.stringify({ files, head }));
 const downloadZip = (head) => makeZip([{ name: '0/fab-P-bbbbbbb.zip', data: Buffer.from('PK-fab') }, { name: '0/P-bbbbbbb-schematic.pdf', data: Buffer.from('%PDF-1.7'), deflate: true },
   { name: '0/P-bbbbbbb-board.step', data: Buffer.from('ISO-10303') }, { name: '0/P-bbbbbbb-board.glb', data: Buffer.from('glTF') }, { name: '1/Q-bbbbbbb-schematic.pdf', data: Buffer.from('%PDF-Q') },
-  { name: '0/downloads.json', data: downloadEnvelope(head) }, { name: '1/downloads.json', data: downloadEnvelope(head) }]);  // envelopes last, so the first-entry offsets above stay valid
+  { name: '0/downloads.json', data: downloadEnvelope(head, defaultDownloadFiles0) }, { name: '1/downloads.json', data: downloadEnvelope(head, defaultDownloadFiles1) }]);  // envelopes last, so the first-entry offsets above stay valid
 
 test('download route streams attachments without sending the GitHub token to the redirected host', async () => {
   const sealed = await signedIn(), restore = downloadFetch({ zip: downloadZip() });
@@ -5981,3 +6374,796 @@ test('download route requires sign-in and a numeric index and known kind', async
     for (const path of ['0/exe', '../fab', 'x/fab', '0/fab/extra']) assert.equal((await call(`/r/Cameronrlewis/repo/a/123/download/${path}`, { headers: { Cookie: `s=${sealed}` } })).status, 404, path);
   } finally { restore(); }
 });
+
+test('artifact size bounds reject oversized reports, 3D descriptors, manifest envelopes and embedded images before allocating', async () => {
+  const sealed = await signedIn(), headers = { Cookie: `s=${sealed}`, 'Sec-Fetch-Dest': 'iframe' };
+  let downloads = 0;
+  // 1. Oversized report metadata.size_in_bytes rejected before downloading /zip or blob.
+  let restore = mockFetch(async url => {
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/artifacts/42')) return Response.json({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', expired: false, size_in_bytes: 10 * 1024 * 1024 + 1, workflow_run: { id: 9, repository_id: 5 } });
+    downloads++; throw new Error(`must not download oversized report ${url}`);
+  });
+  try {
+    assert.equal((await call('/r/Cameronrlewis/repo/a/42/raw', { headers })).status, 404);
+    assert.equal((await call(`/r/Cameronrlewis/repo/a/42/assets/${imageId}.svg`, { headers })).status, 404);
+    assert.equal(downloads, 0);
+  } finally { restore(); }
+  // Also reject oversized report body when metadata omits size_in_bytes.
+  restore = mockFetch(async url => {
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/artifacts/42')) return Response.json({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', expired: false, workflow_run: { id: 9, repository_id: 5 } });
+    if (url.endsWith('/actions/runs/9')) return reviewRun();
+    if (url.endsWith('/artifacts/42/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/huge-report' } });
+    return new Response('x', { headers: { 'Content-Length': String(10 * 1024 * 1024 + 1) } });
+  });
+  try {
+    assert.equal((await call('/r/Cameronrlewis/repo/a/42/raw', { headers })).status, 404);
+  } finally { restore(); }
+  // 2. Oversized 3D asset descriptors (model > 32 MiB, parts > 4 MiB) rejected before listing or downloading sibling artifacts.
+  const digest = 'c'.repeat(64);
+  for (const [kind, key, limit] of [['board.glb', 'model', 32 * 1024 * 1024], ['board-parts.json', 'parts', 4 * 1024 * 1024]]) {
+    const data = { version: 1, projects: [{ board: { assets3d: { head: { [key]: { digest, artifactName: `kicad-3d-${digest}-${kind}.gz`, bytes: limit + 1 } } } } }] };
+    const stored = `<script>window.REVIEW_DATA = ${JSON.stringify(data)};</script>`;
+    let siblingCalls = 0;
+    restore = mockFetch(async url => {
+      if (url.endsWith('/repo')) return accessibleRepo();
+      if (url.endsWith('/artifacts/43')) return Response.json({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', expired: false, workflow_run: { id: 9, repository_id: 5 } });
+      if (url.endsWith('/actions/runs/9')) return reviewRun();
+      if (url.endsWith('/artifacts/43/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/3d-report' } });
+      if (url === 'https://signed.example/3d-report') return new Response(stored);
+      siblingCalls++; throw new Error(`must not fetch sibling for oversized ${kind}: ${url}`);
+    });
+    try {
+      assert.equal((await call(`/r/Cameronrlewis/repo/a/43/3d/${digest}/${kind}`, { headers })).status, 404, kind);
+      assert.equal(siblingCalls, 0, kind);
+    } finally { restore(); }
+  }
+  // 3. Oversized manifest envelope (stored downloads.json > 64 KiB) rejected before reading entry payload.
+  const hugeEnvelopeZip = makeZip([{ name: '0/fab-P-bbbbbbb.zip', data: Buffer.from('PK-fab') }, { name: '0/downloads.json', data: Buffer.alloc(64 * 1024 + 1, 0x20) }]);
+  restore = downloadFetch({ zip: hugeEnvelopeZip });
+  try {
+    assert.equal((await call('/r/Cameronrlewis/repo/a/123/download/0/fab', { headers })).status, 404);
+  } finally { restore(); }
+  // 4. Oversized encoded image/JSON blobs rejected before atob (SVG > 4 * ceil(8 MiB / 3), JSON > 4 * ceil(4 MiB / 3)).
+  const originalAtob = globalThis.atob;
+  let atobCalls = 0;
+  globalThis.atob = value => { atobCalls++; return originalAtob(value); };
+  try {
+    for (const [kind, maxBytes] of [['svg', IMAGE_ASSET_LIMITS.svg], ['json', IMAGE_ASSET_LIMITS.json]]) {
+      const maxEncoded = Math.ceil(maxBytes / 3) * 4;
+      const within = { version: 1, assets: { [imageId]: { kind } }, blobs: { [imageId]: 'A'.repeat(maxEncoded) } };
+      assert.deepEqual({ ...declaredAssets(within) }, { [imageId]: { kind } }, `${kind} at limit`);
+      const data = { version: 1, assets: { [imageId]: { kind } }, blobs: { [imageId]: 'A'.repeat(maxEncoded + 4) } };
+      assert.deepEqual({ ...declaredAssets(data) }, {}, `${kind} over limit in declaredAssets`);
+      assert.equal(assetFromReport(storedImageReport(data), imageId, kind), null, kind);
+    }
+    assert.equal(atobCalls, 0, 'atob must not be called on oversized encoded blobs');
+  } finally { globalThis.atob = originalAtob; }
+  // 5. lazy3dData retains blobs whose descriptor exceeds ASSET_3D_LIMITS[kind] and strips those within limits.
+  for (const [field, key, kind, limit] of [['model3d', 'model', 'board.glb', ASSET_3D_LIMITS['board.glb']], ['parts3d', 'parts', 'board-parts.json', ASSET_3D_LIMITS['board-parts.json']]]) {
+    const makeLazyInput = bytes => ({
+      version: 1,
+      blobs: { slot: 'payload-base64' },
+      projects: [{ board: { [field]: { head: 'slot' }, assets3d: { head: { [key]: { digest, artifactName: `kicad-3d-${digest}-${kind}.gz`, bytes } } } } }],
+    });
+    assert.equal(lazy3dData(makeLazyInput(limit)).blobs.slot, undefined, `${kind} stripped at limit`);
+    assert.equal(lazy3dData(makeLazyInput(limit + 1)).blobs.slot, 'payload-base64', `${kind} retained over limit`);
+  }
+  // 6. Share validArtifact size_in_bytes cap (createShare & serveShare) and currentBody Content-Length / streamed cap.
+  const token = await guestToken();
+  for (const size_in_bytes of [MAX_REPORT_BYTES + 1, -1, 1.5]) {
+    let restoreShare = shareCreationFetch({ metadata: { ...shareMeta(), size_in_bytes } });
+    try {
+      assert.equal((await worker.fetch(await sharePost('/r/Cameronrlewis/repo/a/123/share'), appEnv)).status, 410);
+    } finally { restoreShare(); }
+    restoreShare = guestFetch({ metadata: { ...shareMeta(), size_in_bytes } });
+    try {
+      assert.equal((await worker.fetch(request(`/s/${token}`), appEnv)).status, 404);
+    } finally { restoreShare(); }
+  }
+  await assert.rejects(() => currentBody(new Response('x', { headers: { 'Content-Length': String(MAX_REPORT_BYTES + 1) } })), /Report unavailable/);
+  let bodyPulls = 0;
+  const streamedOver = new Response(new ReadableStream({
+    pull(c) {
+      bodyPulls++;
+      c.enqueue(new Uint8Array(1024 * 1024));
+    },
+  }));
+  await assert.rejects(() => currentBody(streamedOver), /Report unavailable/);
+  assert.equal(bodyPulls, 11, 'streamed read cancels immediately past 10 MiB');
+  // 7. Sibling 3D artifact metadata size_in_bytes cap and readExactly cap per kind.
+  for (const [kind, key, limit] of [['board.glb', 'model', ASSET_3D_LIMITS['board.glb']], ['board-parts.json', 'parts', ASSET_3D_LIMITS['board-parts.json']]]) {
+    const data = { version: 1, projects: [{ board: { assets3d: { head: { [key]: { digest, artifactName: `kicad-3d-${digest}-${kind}.gz`, bytes: 32 } } } } }] };
+    const stored = `<script>window.REVIEW_DATA = ${JSON.stringify(data)};</script>`;
+    let zipDownloads = 0;
+    restore = mockFetch(async url => {
+      if (url.endsWith('/repo')) return accessibleRepo();
+      if (url.endsWith('/artifacts/44')) return Response.json({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', expired: false, workflow_run: { id: 9, repository_id: 5 } });
+      if (url.endsWith('/actions/runs/9')) return reviewRun();
+      if (url.endsWith('/artifacts/44/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/3d-report44' } });
+      if (url === 'https://signed.example/3d-report44') return new Response(stored);
+      if (url.includes('/runs/9/artifacts?')) return Response.json({ artifacts: [{ id: 91, name: `kicad-3d-${digest}-${kind}.gz`, expired: false, size_in_bytes: limit + 1, workflow_run: { id: 9 } }] });
+      zipDownloads++; throw new Error(`must not download oversized sibling ${kind}: ${url}`);
+    });
+    try {
+      assert.equal((await call(`/r/Cameronrlewis/repo/a/44/3d/${digest}/${kind}`, { headers })).status, 404, kind);
+      assert.equal(zipDownloads, 0, kind);
+    } finally { restore(); }
+    assert.equal(await readExactly(new Response(new Uint8Array(4)), limit + 1, limit), null, `${kind} readExactly over maxBytes`);
+  }
+  assert.deepEqual(await readExactly(new Response(new Uint8Array([1, 2, 3, 4])), 4, ASSET_3D_LIMITS['board-parts.json']), new Uint8Array([1, 2, 3, 4]));
+});
+
+test('conditional asset requests validate access, expiry, descriptor and sibling liveness without downloading or decoding payloads', async () => {
+  const sealed = await signedIn(), digest3d = 'c'.repeat(64);
+  const gzModel = gzipSync('glTF-binary-payload');
+  const data = {
+    version: 1,
+    assets: { [imageId]: { kind: 'svg', name: 'sheet.svg' }, deadbeef0001: { kind: 'svg', name: 'bad.svg' } },
+    blobs: { [imageId]: gzipSync(imageText).toString('base64'), deadbeef0001: '!malformed-base64!' },
+    projects: [{ board: { assets3d: { head: { model: { digest: digest3d, artifactName: `kicad-3d-${digest3d}-board.glb.gz`, bytes: gzModel.length } } } } }],
+  };
+  const stored = `<script>window.REVIEW_DATA = ${JSON.stringify(data)};</script>`;
+  let blobDownloads = 0, siblingLists = 0, siblingExpired = false;
+  const restore = mockFetch(async url => {
+    url = String(url);
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/artifacts/55')) return Response.json({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', expired: false, size_in_bytes: stored.length, updated_at: '2026-10-29T00:00:00Z', workflow_run: { id: 9, repository_id: 5 } });
+    if (url.endsWith('/actions/runs/9')) return reviewRun();
+    if (url.endsWith('/artifacts/55/zip')) return new Response(null, { status: 302, headers: { Location: 'https://artifact.actions.githubusercontent.com/report55' } });
+    if (url === 'https://artifact.actions.githubusercontent.com/report55') return new Response(stored);
+    if (url.includes('/runs/9/artifacts?')) {
+      siblingLists++;
+      return Response.json({ artifacts: [{ id: 91, name: `kicad-3d-${digest3d}-board.glb.gz`, expired: siblingExpired, workflow_run: { id: 9 } }] });
+    }
+    if (url.endsWith('/artifacts/91/zip')) {
+      blobDownloads++;
+      return new Response(null, { status: 302, headers: { Location: 'https://artifact.actions.githubusercontent.com/model91' } });
+    }
+    if (url === 'https://artifact.actions.githubusercontent.com/model91') {
+      blobDownloads++;
+      return new Response(gzModel);
+    }
+    throw new Error(`unexpected URL ${url}`);
+  });
+  const originalAtob = globalThis.atob;
+  let atobCalls = 0;
+  try {
+    // Conditional SVG request: validates descriptor and base64 syntax without calling atob/unbase64 on the asset blob.
+    const encodedBlob = data.blobs[imageId];
+    globalThis.atob = value => { if (value === encodedBlob) atobCalls++; return originalAtob(value); };
+    const svg304 = await call(`/r/Cameronrlewis/repo/a/55/assets/${imageId}.svg`, { headers: { Cookie: `s=${sealed}`, 'If-None-Match': `W/"${imageId}"` } });
+    assert.equal(svg304.status, 304);
+    assert.equal(atobCalls, 0, 'conditional SVG 304 must not decode base64');
+    // Malformed base64 blob yields 404 even on conditional If-None-Match request.
+    const badSvg = await call('/r/Cameronrlewis/repo/a/55/assets/deadbeef0001.svg', { headers: { Cookie: `s=${sealed}`, 'If-None-Match': '"deadbeef0001"' } });
+    assert.equal(badSvg.status, 404, 'malformed base64 must fail closed with 404 on conditional request');
+    // Conditional 3D request: validates descriptor and sibling liveness without requesting /zip or downloading the blob.
+    const model304 = await call(`/r/Cameronrlewis/repo/a/55/3d/${digest3d}/board.glb`, { headers: { Cookie: `s=${sealed}`, 'If-None-Match': `"${digest3d}"` } });
+    assert.equal(model304.status, 304);
+    assert.equal(siblingLists, 1, 'conditional 3D 304 still checks sibling artifact liveness');
+    assert.equal(blobDownloads, 0, 'conditional 3D 304 must not request /zip or download the 3D blob');
+    // Expired sibling still denies conditional 3D request with 404.
+    siblingExpired = true;
+    const model404 = await call(`/r/Cameronrlewis/repo/a/55/3d/${digest3d}/board.glb`, { headers: { Cookie: `s=${sealed}`, 'If-None-Match': `"${digest3d}"` } });
+    assert.equal(model404.status, 404);
+    assert.equal(blobDownloads, 0);
+  } finally {
+    globalThis.atob = originalAtob;
+    restore();
+    (await import('./report-cache.js')).reportCache.clear();
+  }
+});
+
+
+test('finding 1: conditional SVG revalidation of a blob over 4.5M base64 characters answers 304, not an isolate exception', async () => {
+  const sealed = await signedIn();
+  const { randomBytes } = await import('node:crypto');
+  // Incompressible 3.6 MB payload: 4.8M base64 characters, inside the 8 MiB SVG limit.
+  const blob = randomBytes(3_600_000).toString('base64');
+  assert.ok(blob.length > 4_500_000);
+  const data = { version: 1, assets: { [imageId]: { kind: 'svg', name: 'sheet.svg' } }, blobs: { [imageId]: blob } };
+  const stored = `<script>window.REVIEW_DATA = ${JSON.stringify(data)};</script>`;
+  const restore = mockFetch(async url => {
+    url = String(url);
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/artifacts/56')) return Response.json({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', expired: false, size_in_bytes: stored.length, updated_at: '2026-10-29T00:00:00Z', workflow_run: { id: 9, repository_id: 5 } });
+    if (url.endsWith('/actions/runs/9')) return reviewRun();
+    if (url.endsWith('/artifacts/56/zip')) return new Response(null, { status: 302, headers: { Location: 'https://artifact.actions.githubusercontent.com/report56' } });
+    if (url === 'https://artifact.actions.githubusercontent.com/report56') return new Response(stored);
+    throw new Error(`unexpected URL ${url}`);
+  });
+  try {
+    const path = `/r/Cameronrlewis/repo/a/56/assets/${imageId}.svg`;
+    assert.equal((await call(path, { headers: { Cookie: `s=${sealed}` } })).status, 200);
+    const revalidated = await call(path, { headers: { Cookie: `s=${sealed}`, 'If-None-Match': `"${imageId}"` } });
+    assert.equal(revalidated.status, 304);
+  } finally {
+    restore();
+    (await import('./report-cache.js')).reportCache.clear();
+  }
+});
+test('finding 6: completed run paginates artifacts past page 1 and rejects ambiguous reports', async () => {
+  const sealed = await signedIn();
+  const filler = Array.from({ length: 100 }, (_, i) => ({ id: 1000 + i, name: `kicad-3d-${String(i).padStart(64, '0')}-board.glb.gz`, expired: false, workflow_run: { id: 12 } }));
+  const report = { id: 56, name: 'kicad-review-deadbee-cafebad-pass.html', created_at: '2026-10-12T00:00:00Z', expired: false, workflow_run: { id: 12 } };
+  const pdf = { id: 57, name: 'kicad-review-deadbee-cafebad-pass.pdf', expired: false, workflow_run: { id: 12 } };
+  let rows = [...filler, report, pdf];
+  const restore = mockFetch(async url => {
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/runs/12')) return Response.json({ status: 'completed', conclusion: 'success' });
+    const m = /\/runs\/12\/artifacts(?:\?per_page=(\d+)(?:&page=(\d+))?)?$/.exec(url);
+    if (m) {
+      const perPage = Number(m[1] || 30), page = Number(m[2] || 1);
+      return Response.json({ artifacts: rows.slice((page - 1) * perPage, page * perPage) });
+    }
+    throw new Error(`unexpected ${url}`);
+  });
+  try {
+    const response = await call('/r/Cameronrlewis/repo/run/12', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.status, 302);
+    assert.equal(response.headers.get('Location'), '/r/Cameronrlewis/repo/a/56?pdf=1');
+    // Ambiguous matching reports (two distinct reports in the same run) fail closed.
+    rows = [report, { ...report, id: 58, name: 'kicad-review-deadbee-cafebad-fail.html' }];
+    const ambiguous = await call('/r/Cameronrlewis/repo/run/12', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(ambiguous.status, 404);
+  } finally { restore(); }
+});
+
+test('finding 7: readiness paginates reviews past 100 before computing latest decisions', async () => {
+  const sealed = await signedIn({ t: 'access-secret' });
+  const head = 'n'.repeat(40);
+  const page1 = Array.from({ length: 100 }, (_, i) => ({
+    user: { login: i === 49 ? 'ann' : `u${i}` },
+    state: 'APPROVED',
+    commit_id: head,
+    submitted_at: `2026-10-12T10:${String(i).padStart(2, '0')}:00Z`,
+  }));
+  const page2 = [{ user: { login: 'ann' }, state: 'CHANGES_REQUESTED', commit_id: head, submitted_at: '2026-10-12T12:00:00Z' }];
+  const restore = mockFetch(async url => {
+    if (url.endsWith('/repo')) return repoOk();
+    if (url.endsWith('/pulls/7')) return Response.json({ head: { sha: head }, requested_reviewers: [] });
+    const m = /\/pulls\/7\/reviews\?per_page=100(?:&page=(\d+))?$/.exec(url);
+    if (m) return Response.json(Number(m[1] || 1) === 1 ? page1 : page2);
+    if (url.endsWith('/graphql')) return Response.json({ data: { repository: { pullRequest: { reviewThreads: { totalCount: 0, nodes: [] } } } } });
+    throw new Error(`unexpected ${url}`);
+  });
+  try {
+    const response = await call('/r/Cameronrlewis/repo/pull/7/readiness', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    const ann = body.decisions.find(d => d.login === 'ann');
+    assert.deepEqual(ann, { login: 'ann', state: 'CHANGES_REQUESTED', stale: false });
+  } finally { restore(); }
+});
+
+test('readiness paginates review threads past 100 before computing open and blocking counts', async () => {
+  const sealed = await signedIn({ t: 'access-secret' });
+  const head = 'n'.repeat(40);
+  const makeThread = (i, severity = 'comment', resolved = false) => ({
+    id: `PRRT_${i}`,
+    isResolved: resolved,
+    resolvedBy: null,
+    comments: {
+      totalCount: 1,
+      pageInfo: { hasNextPage: false, endCursor: null },
+      nodes: [{
+        databaseId: i,
+        body: threadBody({ anchor: { ...anchor, ref: `R${i}`, severity }, text: `thread ${i}`, link: 'https://s/r' }),
+        author: { login: 'alice' },
+        createdAt: '2026-10-12T10:00:00Z',
+        url: `https://github.com/x#${i}`,
+      }],
+    },
+  });
+  const threadsPage1 = Array.from({ length: 100 }, (_, i) => makeThread(i + 1, 'comment', true));
+  const threadsPage2 = [makeThread(101, 'blocking', false)];
+
+  const restore = mockFetch(async (url, options = {}) => {
+    assert.equal(options.headers.Authorization, 'Bearer access-secret');
+    if (url.endsWith('/repo')) return repoOk();
+    if (url.endsWith('/pulls/7')) return Response.json({ head: { sha: head }, requested_reviewers: [] });
+    if (url.includes('/reviews?')) return Response.json([]);
+    assert.equal(url, 'https://api.github.com/graphql');
+    const { variables } = JSON.parse(options.body);
+    if (!variables.after) {
+      return Response.json({
+        data: {
+          repository: {
+            pullRequest: {
+              headRefOid: head,
+              reviewThreads: {
+                totalCount: 101,
+                pageInfo: { hasNextPage: true, endCursor: 'cursor_100' },
+                nodes: threadsPage1,
+              },
+            },
+          },
+        },
+      });
+    }
+    assert.equal(variables.after, 'cursor_100');
+    return Response.json({
+      data: {
+        repository: {
+          pullRequest: {
+            headRefOid: head,
+            reviewThreads: {
+              totalCount: 101,
+              pageInfo: { hasNextPage: false, endCursor: null },
+              nodes: threadsPage2,
+            },
+          },
+        },
+      },
+    });
+  });
+  try {
+    const response = await call('/r/Cameronrlewis/repo/pull/7/readiness', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.open, 1);
+    assert.equal(body.blocking, 1);
+  } finally { restore(); }
+});
+
+test('finding 10: commit history links the newest review when a commit head was reviewed multiple times', async () => {
+  const sealed = await signedIn();
+  const restore = mockFetch(async url => {
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/branches?per_page=100')) return Response.json([{ name: 'main' }]);
+    if (url.endsWith('/tags?per_page=100')) return Response.json([]);
+    if (url.includes('/commits?')) return Response.json([{ sha: 'cafebad000000000000000000000000000000000', commit: { message: 'Fix board', author: { name: 'Ada', date: '2026-10-12T04:05:00Z' } } }]);
+    if (url.includes('/actions/artifacts?')) return Response.json({ artifacts: [
+      { id: 10, name: 'kicad-review-deadbee-cafebad-fail.html', created_at: '2026-10-12T10:00:00Z', expired: false, workflow_run: { id: 1 } },
+      { id: 20, name: 'kicad-review-deadbee-cafebad-pass.html', created_at: '2026-10-12T11:00:00Z', expired: false, workflow_run: { id: 2 } },
+    ] });
+    throw new Error(`unexpected ${url}`);
+  });
+  try {
+    const body = await (await call('/r/Cameronrlewis/repo/commits', { headers: { Cookie: `s=${sealed}` } })).text();
+    assert.match(body, /\/r\/Cameronrlewis\/repo\/a\/20"/);
+    assert.doesNotMatch(body, /\/r\/Cameronrlewis\/repo\/a\/10"/);
+  } finally { restore(); }
+});
+
+test('finding 11: thread listing cursor-paginates threads past 100 and comments past 50', async () => {
+  const sealed = await signedIn({ t: 'access-secret' });
+  const makeThread = (i, commentNodes, commentPageInfo = { hasNextPage: false, endCursor: null }) => ({
+    id: `PRRT_${i}`, isResolved: false, resolvedBy: null,
+    comments: { totalCount: commentNodes.length, pageInfo: commentPageInfo, nodes: commentNodes },
+  });
+  const firstComment = i => ({ databaseId: i * 100 + 1, body: threadBody({ anchor: { ...anchor, ref: `R${i}` }, text: `open ${i}`, link: 'https://s/r' }), author: { login: 'alice' }, createdAt: '2026-10-12T10:00:00Z', url: `https://github.com/x#${i}` });
+  const comments50 = Array.from({ length: 50 }, (_, j) => j === 0 ? firstComment(1) : ({ databaseId: 100 + j + 1, body: `reply ${j}`, author: { login: 'bob' }, createdAt: '2026-10-12T11:00:00Z', url: `https://github.com/x#1-${j}` }));
+  const comment51 = { databaseId: 151, body: 'reply 50', author: { login: 'carol' }, createdAt: '2026-10-12T12:00:00Z', url: 'https://github.com/x#1-50' };
+  const threadsPage1 = [
+    makeThread(1, comments50, { hasNextPage: true, endCursor: 'c50' }),
+    ...Array.from({ length: 99 }, (_, idx) => makeThread(idx + 2, [firstComment(idx + 2)])),
+  ];
+  const threadsPage2 = [makeThread(101, [firstComment(101)])];
+  let incomplete = false;
+  const restore = mockFetch(async (url, options = {}) => {
+    if (url.endsWith('/repo')) return repoOk();
+    assert.equal(url, 'https://api.github.com/graphql');
+    const { variables } = JSON.parse(options.body);
+    if (incomplete) {
+      return Response.json({ data: { repository: { pullRequest: { headRefOid: 'b'.repeat(40), reviewThreads: { totalCount: 101, pageInfo: { hasNextPage: true, endCursor: null }, nodes: threadsPage1 } } } } });
+    }
+    if ('i0' in variables) {
+      assert.deepEqual(variables, { i0: 'PRRT_1', a0: 'c50' });
+      return Response.json({ data: { t0: { comments: { totalCount: 51, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [comment51] } } } });
+    }
+    if (!variables.after) {
+      return Response.json({ data: { repository: { pullRequest: { headRefOid: 'b'.repeat(40), reviewThreads: { totalCount: 101, pageInfo: { hasNextPage: true, endCursor: 't100' }, nodes: threadsPage1 } } } } });
+    }
+    assert.equal(variables.after, 't100');
+    return Response.json({ data: { repository: { pullRequest: { headRefOid: 'b'.repeat(40), reviewThreads: { totalCount: 101, pageInfo: { hasNextPage: false, endCursor: null }, nodes: threadsPage2 } } } } });
+  });
+  try {
+    const response = await call('/r/Cameronrlewis/repo/pull/7/threads', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.status, 200);
+    const data = await response.json();
+    assert.equal(data.threads.length, 101);
+    assert.equal(data.threads[100].id, 'PRRT_101');
+    assert.equal(data.threads[0].comments.length, 51);
+    assert.equal(data.threads[0].comments[50].body, 'reply 50');
+    incomplete = true;
+    const failed = await call('/r/Cameronrlewis/repo/pull/7/threads', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(failed.status, 502);
+  } finally { restore(); }
+});
+
+// Comment pages beyond the list query: a mock GitHub that answers the aliased batch query per thread.
+function commentPagingMock({ threads, pages }) {
+  const calls = [];
+  const restore = mockFetch(async (url, options = {}) => {
+    if (url.endsWith('/repo')) return repoOk();
+    assert.equal(url, 'https://api.github.com/graphql');
+    const { query, variables } = JSON.parse(options.body);
+    calls.push({ query, variables });
+    if (!('i0' in variables)) {
+      return Response.json({ data: { repository: { pullRequest: { headRefOid: 'b'.repeat(40), reviewThreads: { totalCount: threads.length, pageInfo: { hasNextPage: false, endCursor: null }, nodes: threads } } } } });
+    }
+    const data = {};
+    for (let i = 0; `i${i}` in variables; i++) {
+      assert.match(query, new RegExp(`t${i}:node\\(id:\\$i${i}\\)\\{\\.\\.\\. on PullRequestReviewThread\\{comments\\(first:100,after:\\$a${i}\\)`));
+      data[`t${i}`] = pages(variables[`i${i}`], variables[`a${i}`]);
+    }
+    return Response.json({ data });
+  });
+  return { calls, restore, extra: () => calls.filter(c => 'i0' in c.variables) };
+}
+const pagedComment = (thread, n) => ({ databaseId: thread * 10000 + n, body: n === 1 ? threadBody({ anchor: { ...anchor, ref: `R${thread}` }, text: `open ${thread}`, link: 'https://s/r' }) : `reply ${thread}-${n}`, author: { login: 'bob' }, createdAt: '2026-10-12T11:00:00Z', url: `https://github.com/x#${thread}-${n}` });
+const commentRange = (thread, from, to) => Array.from({ length: to - from + 1 }, (_, j) => pagedComment(thread, from + j));
+const pagedThread = (thread, total, first = commentRange(thread, 1, Math.min(total, 50)), pageInfo = { hasNextPage: total > 50, endCursor: total > 50 ? `T${thread}@50` : null }) => ({
+  id: `PRRT_${thread}`, isResolved: false, resolvedBy: null, comments: { totalCount: total, pageInfo, nodes: first },
+});
+
+test('thread listing fetches the next comment page of many threads in one batched request', async () => {
+  const sealed = await signedIn({ t: 'access-secret' });
+  const threads = Array.from({ length: 49 }, (_, i) => pagedThread(i + 1, 51));
+  const mock = commentPagingMock({ threads, pages: (id, after) => {
+    const thread = Number(id.slice('PRRT_'.length));
+    assert.equal(after, `T${thread}@50`);
+    return { comments: { totalCount: 51, pageInfo: { hasNextPage: false, endCursor: `T${thread}@51` }, nodes: commentRange(thread, 51, 51) } };
+  } });
+  try {
+    const response = await call('/r/Cameronrlewis/repo/pull/7/threads', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.status, 200);
+    const data = await response.json();
+    assert.equal(data.threads.length, 49);
+    for (const [i, thread] of data.threads.entries()) {
+      assert.equal(thread.id, `PRRT_${i + 1}`);
+      assert.deepEqual(thread.comments.map(c => c.id), commentRange(i + 1, 1, 51).map(c => c.databaseId));
+    }
+    assert.ok(mock.extra().length <= 2, `extra comment requests: ${mock.extra().length}`);
+    assert.equal(mock.calls.length - mock.extra().length, 1);
+    for (const { query } of mock.extra()) assert.doesNotMatch(query, /PRRT_|T\d+@/);
+  } finally { mock.restore(); }
+});
+
+test('thread listing keeps paging only threads with more comments and keeps comment order', async () => {
+  const sealed = await signedIn({ t: 'access-secret' });
+  // Thread 1: 50 + 100 + 100 + 7 comments (3 extra pages); thread 2: 50 + 20 (1 extra page); thread 3 is complete.
+  const totals = { 1: 257, 2: 70, 3: 4 };
+  const threads = [pagedThread(1, 257), pagedThread(2, 70), pagedThread(3, 4)];
+  const mock = commentPagingMock({ threads, pages: (id, after) => {
+    const thread = Number(id.slice('PRRT_'.length));
+    const from = Number(/@(\d+)$/.exec(after)[1]) + 1, to = Math.min(totals[thread], from + 99);
+    return { comments: { totalCount: totals[thread], pageInfo: { hasNextPage: to < totals[thread], endCursor: `T${thread}@${to}` }, nodes: commentRange(thread, from, to) } };
+  } });
+  try {
+    const response = await call('/r/Cameronrlewis/repo/pull/7/threads', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.status, 200);
+    const data = await response.json();
+    for (const [i, thread] of data.threads.entries()) {
+      assert.deepEqual(thread.comments.map(c => c.id), commentRange(i + 1, 1, totals[i + 1]).map(c => c.databaseId));
+    }
+    assert.deepEqual(mock.extra().map(c => c.variables), [
+      { i0: 'PRRT_1', a0: 'T1@50', i1: 'PRRT_2', a1: 'T2@50' },
+      { i0: 'PRRT_1', a0: 'T1@150' },
+      { i0: 'PRRT_1', a0: 'T1@250' },
+    ]);
+  } finally { mock.restore(); }
+});
+
+test('thread listing comment paging stops at the page cap and fails closed on bad pages', async () => {
+  const sealed = await signedIn({ t: 'access-secret' });
+  const get = () => call('/r/Cameronrlewis/repo/pull/7/threads', { headers: { Cookie: `s=${sealed}` } });
+  const endless = commentPagingMock({ threads: [pagedThread(1, 5000)], pages: (id, after) => {
+    const from = Number(/@(\d+)$/.exec(after)[1]) + 1;
+    return { comments: { totalCount: 5000, pageInfo: { hasNextPage: true, endCursor: `T1@${from + 99}` }, nodes: commentRange(1, from, from + 99) } };
+  } });
+  try {
+    const response = await get();
+    assert.equal(response.status, 502);
+    assert.deepEqual(await response.json(), { error: 'GitHub did not answer. Try again.' });
+    assert.equal(endless.extra().length, 9);
+  } finally { endless.restore(); }
+  const noCursor = commentPagingMock({ threads: [pagedThread(1, 51, undefined, { hasNextPage: true, endCursor: null })], pages: () => assert.fail('no cursor to page from') });
+  try {
+    assert.equal((await get()).status, 502);
+    assert.equal(noCursor.extra().length, 0);
+  } finally { noCursor.restore(); }
+  for (const page of [null, {}, { comments: null }, { comments: { nodes: 'x' } }]) {
+    const malformed = commentPagingMock({ threads: [pagedThread(1, 51), pagedThread(2, 51)], pages: id => id === 'PRRT_2' ? page : { comments: { totalCount: 51, pageInfo: { hasNextPage: false, endCursor: 'T1@51' }, nodes: commentRange(1, 51, 51) } } });
+    try {
+      const response = await get();
+      assert.equal(response.status, 502);
+      assert.deepEqual(await response.json(), { error: 'GitHub did not answer. Try again.' });
+    } finally { malformed.restore(); }
+  }
+  const lastPage = { totalCount: 51, pageInfo: { hasNextPage: false, endCursor: 'T1@51' }, nodes: commentRange(1, 51, 51) };
+  for (const shape of [{ pageInfo: undefined }, { pageInfo: null }, { pageInfo: {} },
+    { pageInfo: { hasNextPage: 'true', endCursor: 'T1@50' } }, { pageInfo: { hasNextPage: 1, endCursor: 'T1@50' } }, { pageInfo: { hasNextPage: null, endCursor: 'T1@50' } },
+    { pageInfo: { hasNextPage: true } }, { pageInfo: { hasNextPage: true, endCursor: null } }, { pageInfo: { hasNextPage: true, endCursor: 50 } },
+    { totalCount: undefined }, { totalCount: null }, { totalCount: -1 }, { totalCount: 50.5 }, { totalCount: '51' },
+    { nodes: undefined }, { nodes: null }, { nodes: 'x' }]) {
+    const thread = pagedThread(1, 51);
+    const firstPage = commentPagingMock({ threads: [{ ...thread, comments: { ...thread.comments, ...shape } }], pages: () => ({ comments: lastPage }) });
+    try {
+      const response = await get();
+      assert.equal(response.status, 502, `first page ${JSON.stringify(shape)}`);
+      assert.deepEqual(await response.json(), { error: 'GitHub did not answer. Try again.' });
+    } finally { firstPage.restore(); }
+    const extraPage = commentPagingMock({ threads: [pagedThread(1, 51)], pages: () => ({ comments: { ...lastPage, ...shape } }) });
+    try {
+      const response = await get();
+      assert.equal(response.status, 502, `extra page ${JSON.stringify(shape)}`);
+      assert.deepEqual(await response.json(), { error: 'GitHub did not answer. Try again.' });
+    } finally { extraPage.restore(); }
+  }
+  const valid = commentPagingMock({ threads: [pagedThread(1, 51), pagedThread(2, 3)], pages: () => ({ comments: lastPage }) });
+  try {
+    const response = await get();
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).threads.map(t => t.comments.length), [51, 3]);
+  } finally { valid.restore(); }
+  const unanchored = pagedThread(9, 51, [{ ...pagedComment(9, 1), body: 'plain review comment' }]);
+  const skipped = commentPagingMock({ threads: [unanchored, pagedThread(3, 3)], pages: () => assert.fail('unanchored threads are not paged') });
+  try {
+    const response = await get();
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).threads.map(t => t.id), ['PRRT_3']);
+    assert.equal(skipped.extra().length, 0);
+  } finally { skipped.restore(); }
+});
+
+test('GET threads route returns 200 with empty list when PR is missing or has no reviewThreads', async () => {
+  const sealed = await signedIn({ t: 'access-secret' });
+  for (const data of [
+    { repository: { pullRequest: null } },
+    { repository: { pullRequest: { headRefOid: 'b'.repeat(40), reviewThreads: null } } },
+    { repository: null },
+  ]) {
+    const restore = mockFetch(async (url, options = {}) => {
+      if (url.endsWith('/repo')) return repoOk();
+      assert.equal(url, 'https://api.github.com/graphql');
+      return Response.json({ data });
+    });
+    try {
+      const response = await call('/r/Cameronrlewis/repo/pull/7/threads', { headers: { Cookie: `s=${sealed}` } });
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), { threads: [], head: data.repository?.pullRequest?.headRefOid || null });
+    } finally { restore(); }
+  }
+});
+
+test('finding 12: issues route paginates open issues past 100 and fails closed when scan is incomplete', async () => {
+  const unanchored = Array.from({ length: 100 }, (_, i) => ({ number: i + 1, title: `Plain ${i + 1}`, html_url: `https://github.com/o/r/issues/${i + 1}`, state: 'open', body: 'no anchor' }));
+  const anchoredOnPage2 = { number: 101, title: 'Tracked on page 2', html_url: 'https://github.com/o/r/issues/101', state: 'open', body: threadBody({ anchor, text: 'existing', link: 'https://site.example/r/o/r/a/1' }) };
+  let posts = 0, overflow = false;
+  const gh = async (path, token, options) => {
+    if (options?.method === 'POST') { posts++; return new Response(JSON.stringify({ number: 102, html_url: 'https://github.com/o/r/issues/102' }), { status: 201 }); }
+    const m = /\/repos\/o\/r\/issues\?state=open&per_page=100(?:&page=(\d+))?$/.exec(path);
+    assert.ok(m, `unexpected path ${path}`);
+    if (overflow) return Response.json(unanchored);
+    return Response.json(Number(m[1] || 1) === 1 ? unanchored : [anchoredOnPage2]);
+  };
+  const response = await issuesRoute(issueRequest(issueInput), {}, { owner: 'o', repo: 'r', rest: '' }, { access: issueAccess, gh });
+  assert.equal(response.status, 409);
+  assert.equal(posts, 0);
+  const body = await response.json();
+  assert.equal(body.url, 'https://github.com/o/r/issues/101');
+  // Fail closed when open issues exceed the 10-page scan bound.
+  overflow = true;
+  const over = await issuesRoute(issueRequest(issueInput), {}, { owner: 'o', repo: 'r', rest: '' }, { access: issueAccess, gh });
+  assert.equal(over.status, 502);
+  assert.equal(posts, 0);
+});
+
+test('finding 6: listing keeps the 10-page bound', async () => {
+  const sealed = await signedIn();
+  const pages = [];
+  const restore = mockFetch(async url => {
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.includes('/actions/artifacts?')) {
+      const page = Number(new URL(url).searchParams.get('page') || 1);
+      pages.push(page);
+      return Response.json({ artifacts: Array.from({ length: 100 }, (_, i) => ({ id: 1000 + page * 100 + i, name: `kicad-review-deadbee-${(page * 100 + i).toString(16).padStart(7, '0')}-pass.html`, created_at: `2026-10-${String(20 - page).padStart(2, '0')}T10:00:00Z`, expired: false, workflow_run: { id: page * 100 + i } })) });
+    }
+    throw new Error(`unexpected ${url}`);
+  });
+  try {
+    const response = await call('/r/Cameronrlewis/repo', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.status, 200);
+    assert.deepEqual(pages, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    assert.match(await response.text(), /\/r\/Cameronrlewis\/repo\/a\/1\d{3}/);
+  } finally { restore(); }
+});
+
+test('issues GET returns partial anchored issues when open issues exceed the 10-page bound', async () => {
+  const sealed = await signedIn();
+  const anchoredIssue = {
+    number: 1, title: 'Issue 1', html_url: 'https://github.com/Cameronrlewis/repo/issues/1', state: 'open',
+    body: threadBody({ anchor, text: 'note 1', link: 'https://s/r' }),
+  };
+  const unanchored = Array.from({ length: 100 }, (_, i) => ({ number: 100 + i, title: `Issue ${100 + i}`, html_url: `https://github.com/Cameronrlewis/repo/issues/${100 + i}`, state: 'open', body: 'no anchor' }));
+  const restore = mockFetch(async url => {
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.includes('/issues?state=open')) {
+      const page = Number(new URL(url).searchParams.get('page') || 1);
+      return Response.json(page === 1 ? [anchoredIssue, ...unanchored.slice(1)] : unanchored);
+    }
+    throw new Error(`unexpected ${url}`);
+  });
+  try {
+    const response = await call('/r/Cameronrlewis/repo/issues', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.issues?.length, 1);
+    assert.equal(body.issues[0]?.number, 1);
+  } finally { restore(); }
+});
+
+test('home dashboard paginates artifacts past page 1 to discover recent reviews', async () => {
+  const sealed = await signedIn();
+  const pages = [];
+  const dummyArtifacts = Array.from({ length: 100 }, (_, i) => ({ id: 2000 + i, name: `dummy-${i}.zip`, expired: false }));
+  const reportArtifact = { id: 999, name: 'kicad-review-deadbee-cafebad-pass.html', created_at: '2026-10-16T10:00:00Z', expired: false, workflow_run: { id: 42, head_sha: 'cafebad'.padEnd(40, '0'), head_branch: 'main' } };
+  const restore = mockFetch(async url => {
+    if (url.endsWith('/user/installations')) return Response.json({ installations: [{ id: 1 }] });
+    if (url.includes('/repositories?')) return Response.json({ repositories: [{ owner: { login: 'Cameronrlewis' }, name: 'repo', pushed_at: '2026-10-16T10:00:00Z' }] });
+    if (url.includes('/actions/artifacts?')) {
+      const page = Number(new URL(url).searchParams.get('page') || 1);
+      pages.push(page);
+      return Response.json({ artifacts: page === 1 ? dummyArtifacts : [reportArtifact] });
+    }
+    if (url.includes('/actions/runs?')) return Response.json({ workflow_runs: [{ id: 42, pull_requests: [], name: 'Review', conclusion: 'success', created_at: '2026-10-16T10:00:00Z' }] });
+    if (url.includes('/pulls?')) return Response.json([]);
+    throw new Error(`unexpected ${url}`);
+  });
+  try {
+    const response = await call('/', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.status, 200);
+    const body = await response.text();
+    assert.deepEqual(pages, [1, 2]);
+    assert.match(body, /\/r\/Cameronrlewis\/repo\/a\/999/);
+  } finally { restore(); }
+});
+
+test('finding 8: downloads are selected by manifest record, rejecting unlisted, mismatched-size, or failed entries', async () => {
+  const sealed = await signedIn(), headers = { Cookie: `s=${sealed}` };
+  const head = 'b'.repeat(40);
+
+  // 1. Failed export in manifest (error: "export failed") while zip contains stale 0/old.pdf -> must 404, not 200.
+  const stalePdfZip = makeZip([
+    { name: '0/old.pdf', data: Buffer.from('%PDF-stale') },
+    { name: '0/downloads.json', data: Buffer.from(JSON.stringify({ files: [{ kind: 'pdf', error: 'export failed' }], head })) },
+  ]);
+  let restore = downloadFetch({ zip: stalePdfZip });
+  try {
+    const res = await call('/r/Cameronrlewis/repo/a/123/download/0/pdf', { headers });
+    assert.equal(res.status, 404, 'failed manifest export must return 404');
+    assert.deepEqual(await res.json(), { error: 'Download unavailable' });
+  } finally { restore(); }
+
+  // 2. Sole .glb in zip has a different path from manifest record -> must 404.
+  const pathMismatchZip = makeZip([
+    { name: '0/unlisted.glb', data: Buffer.from('glTF-unlisted') },
+    { name: '0/downloads.json', data: Buffer.from(JSON.stringify({ files: [{ kind: 'glb', path: '0/manifest.glb', bytes: 13 }], head })) },
+  ]);
+  restore = downloadFetch({ zip: pathMismatchZip });
+  try {
+    const res = await call('/r/Cameronrlewis/repo/a/123/download/0/glb', { headers });
+    assert.equal(res.status, 404, 'unlisted zip entry must return 404');
+    assert.deepEqual(await res.json(), { error: 'Download unavailable' });
+  } finally { restore(); }
+
+  // 3. Central-directory entry size differs from manifest declared bytes -> must 404.
+  const sizeMismatchZip = makeZip([
+    { name: '0/board.glb', data: Buffer.from('glTF-data') },
+    { name: '0/downloads.json', data: Buffer.from(JSON.stringify({ files: [{ kind: 'glb', path: '0/board.glb', bytes: 9999 }], head })) },
+  ]);
+  restore = downloadFetch({ zip: sizeMismatchZip });
+  try {
+    const res = await call('/r/Cameronrlewis/repo/a/123/download/0/glb', { headers });
+    assert.equal(res.status, 404, 'size mismatch between manifest and zip entry must return 404');
+    assert.deepEqual(await res.json(), { error: 'Download unavailable' });
+  } finally { restore(); }
+
+  // 4. Manifest path with path traversal or unsafe characters -> must 404 even if matching entry exists in zip.
+  const traversalZip = makeZip([
+    { name: '0/../evil.pdf', data: Buffer.from('%PDF-evil!') },
+    { name: '0/downloads.json', data: Buffer.from(JSON.stringify({ files: [{ kind: 'pdf', path: '0/../evil.pdf', bytes: 10 }], head })) },
+  ]);
+  restore = downloadFetch({ zip: traversalZip });
+  try {
+    const res = await call('/r/Cameronrlewis/repo/a/123/download/0/pdf', { headers });
+    assert.equal(res.status, 404, 'unsafe path in manifest must return 404');
+    assert.deepEqual(await res.json(), { error: 'Download unavailable' });
+  } finally { restore(); }
+
+  // 5. Unprefixed manifest path must fail closed with 404 even if entry exists in zip.
+  const unprefixedZip = makeZip([
+    { name: '0/board.pdf', data: Buffer.from('%PDF-board') },
+    { name: '0/downloads.json', data: Buffer.from(JSON.stringify({ files: [{ kind: 'pdf', path: 'board.pdf', bytes: 10 }], head })) },
+  ]);
+  restore = downloadFetch({ zip: unprefixedZip });
+  try {
+    const res = await call('/r/Cameronrlewis/repo/a/123/download/0/pdf', { headers });
+    assert.equal(res.status, 404, 'unprefixed manifest path must return 404');
+    assert.deepEqual(await res.json(), { error: 'Download unavailable' });
+  } finally { restore(); }
+
+  // 6. Multiple successful manifest records for the requested kind -> must 404 (ambiguous).
+  const duplicateRecordZip = makeZip([
+    { name: '0/one.pdf', data: Buffer.from('%PDF-1') },
+    { name: '0/two.pdf', data: Buffer.from('%PDF-2') },
+    { name: '0/downloads.json', data: Buffer.from(JSON.stringify({
+      files: [
+        { kind: 'pdf', path: '0/one.pdf', bytes: 6 },
+        { kind: 'pdf', path: '0/two.pdf', bytes: 6 },
+      ],
+      head,
+    })) },
+  ]);
+  restore = downloadFetch({ zip: duplicateRecordZip });
+  try {
+    const res = await call('/r/Cameronrlewis/repo/a/123/download/0/pdf', { headers });
+    assert.equal(res.status, 404, 'multiple manifest records for same kind must return 404');
+    assert.deepEqual(await res.json(), { error: 'Download unavailable' });
+  } finally { restore(); }
+});
+
+test('finding 9: malformed compare body and OAuth callback /user errors keep cookies and error gracefully', async () => {
+  // Part 1: Malformed multipart compare request retains renewed session cookie
+  const expired = await seal({ t: 'old-token', r: 'old-refresh', e: Date.now() - 1, re: Date.now() + 7_200_000, u: 'octocat' }, env);
+  let restore = mockFetch(async (url, options = {}) => {
+    if (url === 'https://github.com/login/oauth/access_token') {
+      return tokenResponse({ access_token: 'new-token', refresh_token: 'new-refresh' });
+    }
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo') {
+      return accessibleRepo();
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  });
+  try {
+    const res = await call('/r/Cameronrlewis/repo/compare', {
+      method: 'POST',
+      headers: {
+        Origin: 'https://site.example',
+        Cookie: `s=${expired}`,
+        'Content-Type': 'multipart/form-data; boundary=invalid-boundary',
+      },
+      body: '--invalid-boundary\r\nContent-Disposition: form-data; name="x"\r\n',
+    });
+    assert.equal(res.status, 400, 'malformed multipart compare body should return 400');
+    assert.ok(cookieValue(res, 's'), 'renewed session cookie must be present on 400');
+    assert.match(await res.text(), /Choose two different commits/);
+  } finally { restore(); }
+
+  // Part 2: OAuth callback /user network error clears state cookie and returns 502
+  const login = await call('/login');
+  const savedState = cookieValue(login, 'st');
+  restore = mockFetch(async (url) => {
+    if (url.includes('access_token')) return tokenResponse();
+    if (url === 'https://api.github.com/user') throw new Error('network down');
+    throw new Error(`unexpected fetch: ${url}`);
+  });
+  try {
+    const res = await call(`/callback?code=code&state=${encodeURIComponent(savedState)}`, {
+      headers: { Cookie: `st=${savedState}` },
+    });
+    assert.equal(res.status, 502, '/user network failure must return 502');
+    assert.match(cookies(res).join('\n'), /st=;.*Max-Age=0/, 'state cookie must be cleared on /user network failure');
+    assert.match(await res.text(), /Sign-in didn&#39;t complete/);
+  } finally { restore(); }
+
+  // Part 3: OAuth callback /user malformed JSON clears state cookie and returns 502
+  restore = mockFetch(async (url) => {
+    if (url.includes('access_token')) return tokenResponse();
+    if (url === 'https://api.github.com/user') return new Response('not valid json {', { status: 200, headers: { 'Content-Type': 'application/json' } });
+    throw new Error(`unexpected fetch: ${url}`);
+  });
+  try {
+    const res = await call(`/callback?code=code&state=${encodeURIComponent(savedState)}`, {
+      headers: { Cookie: `st=${savedState}` },
+    });
+    assert.equal(res.status, 502, '/user invalid JSON must return 502');
+    assert.match(cookies(res).join('\n'), /st=;.*Max-Age=0/, 'state cookie must be cleared on /user JSON error');
+    assert.match(await res.text(), /Sign-in didn&#39;t complete/);
+  } finally { restore(); }
+});
+

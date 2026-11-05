@@ -1,5 +1,6 @@
 // Ask about this design: the Worker side. Pure helpers first, then the route.
-import { json, accessFailure, sessionResponse } from './threads.js';
+import { json, accessFailure, sessionResponse, ghPages } from './threads.js';
+import { downloadUrl } from './share.js';
 
 export const LIMITS = { question: 4000, message: 16000, messages: 24, history: 20 };   // BoardRepo's limits
 
@@ -193,25 +194,32 @@ async function readBounded(response, max) {
   return new TextDecoder().decode(all);
 }
 
-export async function loadContext(owner, repo, id, token, gh) {
+// `verify` is the site's report check (reportArtifact): the artifact must be a report-family name from
+// this repository's kicad-review.yml run. Without it the loader fails closed. The run's artifacts are read
+// with the shared paged reader; zero or several context matches are refused; sizes are bounded before download.
+export async function loadContext(owner, repo, id, token, gh, verify) {
   const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions`;
   try {
-    const meta = await gh(`${root}/artifacts/${id}`, token);
-    if (!meta.ok) return { status: 404, error: 'This review was not found.' };
-    const report = await meta.json();
+    const verified = typeof verify === 'function' ? await verify() : null;
+    if (!verified) return { status: 404, error: 'This review was not found.' };
+    const report = verified.metadata;
     const snapshot = snapshotName.test(report.name || '');
     if (!snapshot && !reportName.test(report.name || '')) return { status: 404, error: 'This artifact is not a reviewed design.' };
-    if (report.expired || !/^\d{1,20}$/.test(String(report.workflow_run?.id))) return { status: 404, error: 'This review has expired.' };
-    const list = await gh(`${root}/runs/${report.workflow_run.id}/artifacts?per_page=100`, token);
-    if (!list.ok) return { status: 502, error: 'GitHub did not answer. Try again.' };
+    if (verified.expired || report.expired || !/^\d{1,20}$/.test(String(report.workflow_run?.id))) return { status: 404, error: 'This review has expired.' };
+    const runId = String(report.workflow_run.id);
+    const paged = await ghPages(gh, `${root}/runs/${runId}/artifacts`, token, (d) => d?.artifacts);
+    if (!paged.ok) return { status: 502, error: 'GitHub did not answer. Try again.' };
     const name = report.name.slice(0, -5) + '.context.json';
-    const artifact = ((await list.json()).artifacts || []).find((a) => !a.expired && a.name === name && /^\d{1,20}$/.test(String(a.id)));
-    if (!artifact) return { status: 404, error: 'This review has no design data. Turn on [ask] in kicad-review.toml and re-run the review.' };
+    const matches = paged.items.filter((a) => a?.name === name);
+    const [artifact] = matches;
+    if (matches.length !== 1 || artifact.expired || String(artifact.workflow_run?.id) !== runId || !/^\d{1,20}$/.test(String(artifact.id))) return { status: 404, error: 'This review has no design data. Turn on [ask] in kicad-review.toml and re-run the review.' };
+    if (artifact.size_in_bytes != null && (!Number.isSafeInteger(artifact.size_in_bytes) || artifact.size_in_bytes <= 0 || artifact.size_in_bytes > MAX_CONTEXT)) return { status: 502, error: 'The design data is missing or too large.' };
     const download = await gh(`${root}/artifacts/${artifact.id}/zip`, token, { redirect: 'manual' });
     if (download.status !== 302) return { status: 502, error: 'GitHub did not answer. Try again.' };
-    const location = new URL(download.headers.get('Location'));
-    if (location.protocol !== 'https:' || location.username || location.password) return { status: 502, error: 'GitHub did not answer. Try again.' };
-    const blob = await fetch(location.href, { redirect: 'manual' });
+    // Same storage host policy as the other artifact downloads; never forward GitHub authorization.
+    const location = downloadUrl(download.headers.get('Location'));
+    if (!location) return { status: 502, error: 'GitHub did not answer. Try again.' };
+    const blob = await fetch(location, { redirect: 'manual' });
     const body = blob.ok ? await readBounded(blob, MAX_CONTEXT) : null;
     if (!body) return { status: 502, error: 'The design data is missing or too large.' };
     let doc;
@@ -230,7 +238,7 @@ const dailyLimit = (env) => { const raw = String(env.ASK_DAILY_LIMIT ?? '').trim
 // null when KV cannot be read: the counter is then unknown, so the caller treats the count as 0 and says so.
 const readDay = async (env, day) => { try { return Number(await env.ASK_KV.get(day)) || 0; } catch { return null; } };
 
-export async function askRoute(request, env, { owner, repo, id, rest }, { access, gh }) {
+export async function askRoute(request, env, { owner, repo, id, rest }, { access, gh, verifyReport }) {
   const url = new URL(request.url);
   if (!env.ANTHROPIC_API_KEY || !env.ASK_KV) return json({ error: 'Ask is not set up on this site.' }, 503);
   if (request.headers.get('Origin') !== url.origin) return json({ error: 'Forbidden' }, 403);
@@ -249,7 +257,7 @@ export async function askRoute(request, env, { owner, repo, id, rest }, { access
     { headers: { Accept: 'application/vnd.github.raw+json' } });
   if (toml.status !== 404 && !toml.ok) return done(json({ error: 'GitHub did not answer. Try again.' }, 502));
   if (!toml.ok || !askOptedIn(await toml.text())) return done(json({ error: 'Ask is not turned on for this repository. Add [ask] enabled = true to kicad-review.toml on the default branch.' }, 403));
-  const loaded = await loadContext(owner, repo, id, token, gh);
+  const loaded = await loadContext(owner, repo, id, token, gh, verifyReport && (() => verifyReport(owner, repo, id, token, allowed.repo)));
   if (!loaded.doc) return done(json({ error: loaded.error }, loaded.status));
   const projects = loaded.doc.projects, project = typeof body?.project === 'string' ? projects.find((p) => p.dir === body.project) : projects[0];
   if (!project) return done(json({ error: 'That project is not in this review.' }, 400));
