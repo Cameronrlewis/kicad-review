@@ -78,18 +78,13 @@ export function canonicalFolder(folder) {
   const segments = dir.split('/');
   for (const s of segments) {
     if (!s || s === '.' || s === '..') return null;
-    let decoded = s;
-    try {
-      while (decoded.includes('%')) {
-        const next = decodeURIComponent(decoded);
-        if (next === decoded) break;
-        decoded = next;
-      }
-    } catch { return null; }
-    if (decoded === '.' || decoded === '..' || decoded.includes('/') || decoded.includes('\\')) return null;
   }
   return segments.join('/');
 }
+const folderFromKey = (key) => {
+  const dir = canonicalFolder(key);
+  return dir !== null && projectKey(dir) === key ? dir : null;
+};
 
 async function commitDetails(gh, token, root, sha, budget) {
   const files = []; let commit, incomplete = false;
@@ -228,7 +223,7 @@ export async function designRoute(request, env, { owner, repo, key, rest }, { ac
   let ref, dir;
   try {
     ref = rest ? decodeURIComponent(rest.slice(1)) : allowed.repo.default_branch;
-    const canonical = canonicalFolder(key);
+    const canonical = folderFromKey(key);
     if (canonical === null) return errorPage(404, ...generic, [projects], allowed.s);
     dir = canonical;
     key = projectKey(dir);
@@ -377,7 +372,7 @@ export async function designsRoute(request, env, { owner, repo, key }, deps) {
   if (allowed instanceof Response) return allowed;
   const url = new URL(request.url), path = repoPath(owner, repo);
   const back = [{ href: `${path}/projects`, label: 'Projects' }];
-  const canonical = canonicalFolder(key);
+  const canonical = folderFromKey(key);
   if (canonical === null) return errorPage(404, ...generic, back, allowed.s);
   const dir = canonical;
   key = projectKey(dir);
@@ -410,7 +405,7 @@ export async function renderRoute(request, env, { owner, repo }, { access, gh, e
   try { form = await request.formData(); } catch { form = new FormData(); }   // a malformed body is refused below, as on compare
   const sha = String(form.get('sha') || ''), key = String(form.get('key') || '');
   // The folder's history when the form names a valid folder key (letters, digits and the encodeURIComponent set); the picker otherwise.
-  const canonical = key && /^[A-Za-z0-9._~%!*'()-]{1,400}$/.test(key) ? canonicalFolder(key) : null;
+  const canonical = key && /^[A-Za-z0-9._~%!*'()-]{1,400}$/.test(key) ? folderFromKey(key) : null;
   const back = [{ href: canonical !== null ? `${path}/p/${projectKey(canonical)}/designs` : `${path}/projects`, label: 'Back to revisions' }];
   if (!/^[0-9a-f]{7,40}$/.test(sha)) return errorPage(400, 'Choose a commit', 'Pick a commit from the revision list.', back, allowed.s);
   try {

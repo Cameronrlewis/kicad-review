@@ -5762,6 +5762,19 @@ test('the repository-wide design link goes to the folder picker when there are s
   assert.equal(one.headers.get('Location'), '/r/Cameronrlewis/repo/p/Only/design');
 });
 
+test('project route keys preserve literal percent text after one decode', async () => {
+  const dirs = ['100%pass', '%2F'];
+  const routes = [['/commits?', () => json([{ sha: tipSha }])], ['/actions/artifacts?name=', () => json({ artifacts: [snap(55, 'ccccccc')] })],
+    ['design.blob.core.windows.net', () => new Response('<!doctype html><script>window.REVIEW_DATA = ' + JSON.stringify(payload(tipSha, dirs)) + ';</script>')]];
+  for (const [dir, index] of dirs.map((value, i) => [value, i])) {
+    const response = await designGet(`/r/Cameronrlewis/repo/p/${projectKey(dir)}/design`, routes);
+    assert.equal(response.status, 302, dir);
+    const location = new URL(response.headers.get('Location'), 'https://site.example');
+    assert.equal(location.searchParams.get('folder'), projectKey(dir));
+    assert.equal(location.searchParams.get('p'), String(index));
+  }
+});
+
 test('design resolves slash branches and explicit commits per folder, and refuses bad refs before calling GitHub', async () => {
   const calls = [];
   const routes = [['/commits?', (url) => { calls.push(url); return json([{ sha: tipSha }]); }], ['/actions/artifacts?name=', () => json({ artifacts: [snap(7, 'ccccccc')] })]];
@@ -5853,7 +5866,7 @@ test('designQuery and folder validation canonicalizes and re-encodes via project
   // Traversal and injection inputs are rejected or sanitized
   assert.equal(canonicalFolder('..'), null);
   assert.equal(canonicalFolder('%2e%2e'), null);
-  assert.equal(canonicalFolder('%252e%252e'), null);
+  assert.equal(canonicalFolder('%252e%252e'), '%2e%2e');
   assert.equal(canonicalFolder('a/../b'), null);
   assert.equal(canonicalFolder('a/./b'), null);
   assert.equal(canonicalFolder('a\x00b'), null);
