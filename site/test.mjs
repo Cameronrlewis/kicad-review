@@ -6069,10 +6069,9 @@ test('finding 11: thread listing cursor-paginates threads past 100 and comments 
     if (incomplete) {
       return Response.json({ data: { repository: { pullRequest: { headRefOid: 'b'.repeat(40), reviewThreads: { totalCount: 101, pageInfo: { hasNextPage: true, endCursor: null }, nodes: threadsPage1 } } } } });
     }
-    if (variables.threadId) {
-      assert.equal(variables.threadId, 'PRRT_1');
-      assert.equal(variables.after, 'c50');
-      return Response.json({ data: { node: { comments: { totalCount: 51, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [comment51] } } } });
+    if ('i0' in variables) {
+      assert.deepEqual(variables, { i0: 'PRRT_1', a0: 'c50' });
+      return Response.json({ data: { t0: { comments: { totalCount: 51, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [comment51] } } } });
     }
     if (!variables.after) {
       return Response.json({ data: { repository: { pullRequest: { headRefOid: 'b'.repeat(40), reviewThreads: { totalCount: 101, pageInfo: { hasNextPage: true, endCursor: 't100' }, nodes: threadsPage1 } } } } });
@@ -6092,6 +6091,116 @@ test('finding 11: thread listing cursor-paginates threads past 100 and comments 
     const failed = await call('/r/Cameronrlewis/repo/pull/7/threads', { headers: { Cookie: `s=${sealed}` } });
     assert.equal(failed.status, 502);
   } finally { restore(); }
+});
+
+// Comment pages beyond the list query: a mock GitHub that answers the aliased batch query per thread.
+function commentPagingMock({ threads, pages }) {
+  const calls = [];
+  const restore = mockFetch(async (url, options = {}) => {
+    if (url.endsWith('/repo')) return repoOk();
+    assert.equal(url, 'https://api.github.com/graphql');
+    const { query, variables } = JSON.parse(options.body);
+    calls.push({ query, variables });
+    if (!('i0' in variables)) {
+      return Response.json({ data: { repository: { pullRequest: { headRefOid: 'b'.repeat(40), reviewThreads: { totalCount: threads.length, pageInfo: { hasNextPage: false, endCursor: null }, nodes: threads } } } } });
+    }
+    const data = {};
+    for (let i = 0; `i${i}` in variables; i++) {
+      assert.match(query, new RegExp(`t${i}:node\\(id:\\$i${i}\\)\\{\\.\\.\\. on PullRequestReviewThread\\{comments\\(first:100,after:\\$a${i}\\)`));
+      data[`t${i}`] = pages(variables[`i${i}`], variables[`a${i}`]);
+    }
+    return Response.json({ data });
+  });
+  return { calls, restore, extra: () => calls.filter(c => 'i0' in c.variables) };
+}
+const pagedComment = (thread, n) => ({ databaseId: thread * 10000 + n, body: n === 1 ? threadBody({ anchor: { ...anchor, ref: `R${thread}` }, text: `open ${thread}`, link: 'https://s/r' }) : `reply ${thread}-${n}`, author: { login: 'bob' }, createdAt: '2026-10-12T11:00:00Z', url: `https://github.com/x#${thread}-${n}` });
+const commentRange = (thread, from, to) => Array.from({ length: to - from + 1 }, (_, j) => pagedComment(thread, from + j));
+const pagedThread = (thread, total, first = commentRange(thread, 1, Math.min(total, 50)), pageInfo = { hasNextPage: total > 50, endCursor: total > 50 ? `T${thread}@50` : null }) => ({
+  id: `PRRT_${thread}`, isResolved: false, resolvedBy: null, comments: { totalCount: total, pageInfo, nodes: first },
+});
+
+test('thread listing fetches the next comment page of many threads in one batched request', async () => {
+  const sealed = await signedIn({ t: 'access-secret' });
+  const threads = Array.from({ length: 49 }, (_, i) => pagedThread(i + 1, 51));
+  const mock = commentPagingMock({ threads, pages: (id, after) => {
+    const thread = Number(id.slice('PRRT_'.length));
+    assert.equal(after, `T${thread}@50`);
+    return { comments: { totalCount: 51, pageInfo: { hasNextPage: false, endCursor: `T${thread}@51` }, nodes: commentRange(thread, 51, 51) } };
+  } });
+  try {
+    const response = await call('/r/Cameronrlewis/repo/pull/7/threads', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.status, 200);
+    const data = await response.json();
+    assert.equal(data.threads.length, 49);
+    for (const [i, thread] of data.threads.entries()) {
+      assert.equal(thread.id, `PRRT_${i + 1}`);
+      assert.deepEqual(thread.comments.map(c => c.id), commentRange(i + 1, 1, 51).map(c => c.databaseId));
+    }
+    assert.ok(mock.extra().length <= 2, `extra comment requests: ${mock.extra().length}`);
+    assert.equal(mock.calls.length - mock.extra().length, 1);
+    for (const { query } of mock.extra()) assert.doesNotMatch(query, /PRRT_|T\d+@/);
+  } finally { mock.restore(); }
+});
+
+test('thread listing keeps paging only threads with more comments and keeps comment order', async () => {
+  const sealed = await signedIn({ t: 'access-secret' });
+  // Thread 1: 50 + 100 + 100 + 7 comments (3 extra pages); thread 2: 50 + 20 (1 extra page); thread 3 is complete.
+  const totals = { 1: 257, 2: 70, 3: 4 };
+  const threads = [pagedThread(1, 257), pagedThread(2, 70), pagedThread(3, 4)];
+  const mock = commentPagingMock({ threads, pages: (id, after) => {
+    const thread = Number(id.slice('PRRT_'.length));
+    const from = Number(/@(\d+)$/.exec(after)[1]) + 1, to = Math.min(totals[thread], from + 99);
+    return { comments: { totalCount: totals[thread], pageInfo: { hasNextPage: to < totals[thread], endCursor: `T${thread}@${to}` }, nodes: commentRange(thread, from, to) } };
+  } });
+  try {
+    const response = await call('/r/Cameronrlewis/repo/pull/7/threads', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.status, 200);
+    const data = await response.json();
+    for (const [i, thread] of data.threads.entries()) {
+      assert.deepEqual(thread.comments.map(c => c.id), commentRange(i + 1, 1, totals[i + 1]).map(c => c.databaseId));
+    }
+    assert.deepEqual(mock.extra().map(c => c.variables), [
+      { i0: 'PRRT_1', a0: 'T1@50', i1: 'PRRT_2', a1: 'T2@50' },
+      { i0: 'PRRT_1', a0: 'T1@150' },
+      { i0: 'PRRT_1', a0: 'T1@250' },
+    ]);
+  } finally { mock.restore(); }
+});
+
+test('thread listing comment paging stops at the page cap and fails closed on bad pages', async () => {
+  const sealed = await signedIn({ t: 'access-secret' });
+  const get = () => call('/r/Cameronrlewis/repo/pull/7/threads', { headers: { Cookie: `s=${sealed}` } });
+  const endless = commentPagingMock({ threads: [pagedThread(1, 5000)], pages: (id, after) => {
+    const from = Number(/@(\d+)$/.exec(after)[1]) + 1;
+    return { comments: { totalCount: 5000, pageInfo: { hasNextPage: true, endCursor: `T1@${from + 99}` }, nodes: commentRange(1, from, from + 99) } };
+  } });
+  try {
+    const response = await get();
+    assert.equal(response.status, 502);
+    assert.deepEqual(await response.json(), { error: 'GitHub did not answer. Try again.' });
+    assert.equal(endless.extra().length, 9);
+  } finally { endless.restore(); }
+  const noCursor = commentPagingMock({ threads: [pagedThread(1, 51, undefined, { hasNextPage: true, endCursor: null })], pages: () => assert.fail('no cursor to page from') });
+  try {
+    assert.equal((await get()).status, 502);
+    assert.equal(noCursor.extra().length, 0);
+  } finally { noCursor.restore(); }
+  for (const page of [null, {}, { comments: null }, { comments: { nodes: 'x' } }]) {
+    const malformed = commentPagingMock({ threads: [pagedThread(1, 51), pagedThread(2, 51)], pages: id => id === 'PRRT_2' ? page : { comments: { totalCount: 51, pageInfo: { hasNextPage: false, endCursor: 'T1@51' }, nodes: commentRange(1, 51, 51) } } });
+    try {
+      const response = await get();
+      assert.equal(response.status, 502);
+      assert.deepEqual(await response.json(), { error: 'GitHub did not answer. Try again.' });
+    } finally { malformed.restore(); }
+  }
+  const unanchored = pagedThread(9, 51, [{ ...pagedComment(9, 1), body: 'plain review comment' }]);
+  const skipped = commentPagingMock({ threads: [unanchored, pagedThread(3, 3)], pages: () => assert.fail('unanchored threads are not paged') });
+  try {
+    const response = await get();
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).threads.map(t => t.id), ['PRRT_3']);
+    assert.equal(skipped.extra().length, 0);
+  } finally { skipped.restore(); }
 });
 
 test('GET threads route returns 200 with empty list when PR is missing or has no reviewThreads', async () => {
