@@ -2457,7 +2457,15 @@ def project_objects(proj_dir, name, issues=None):
         issues += [{"channel": c, "document": "schematic", "reason": reason} for c in ("components", "visual")]
     pcb = posixpath.join(proj_dir, f"{name}.kicad_pcb")
     if os.path.exists(pcb):
-        objs.update(pcb_objects(pcb))
+        try:
+            objs.update(pcb_objects(pcb))
+        except (OSError, ValueError) as exc:
+            print("::warning::" + workflow_command_escape(
+                f"{pcb}: malformed board file; board objects left out: {exc}"), file=sys.stderr)
+            if issues is not None:
+                reason = "Board file malformed; board objects left out"
+                issues += [{"channel": c, "document": "board", "reason": reason, "unknownBoard": True}
+                           for c in ("components", "routing", "rules", "board", "visual")]
     for key, suffix, load in (
         ("meta:pro", ".kicad_pro", pro_objects),
         ("meta:dru", ".kicad_dru", lambda path: {"meta:dru": {
@@ -2482,6 +2490,10 @@ def project_pair(p):
     for key in {i["unknownMeta"] for i in issues if "unknownMeta" in i}:
         for side in objs:
             objs[side].pop(key, None)
+    if any(i.get("unknownBoard") for i in issues):  # one unreadable board leaves the board pair out on both sides
+        for side in objs:
+            objs[side] = {k: o for k, o in objs[side].items() if not (o.get("where") or {}).get("board")
+                          and k not in ("meta:setup", "meta:title_block:board")}
     return objs, issues
 
 
@@ -4341,19 +4353,36 @@ def project_checks(p, settings, objs, waivers=None):
         if os.path.exists(src) and not os.path.exists(f"{out_dir}/{s}/{f}"):  # never drop a check because its output is missing
             sys.exit(f"kicad-cli wrote no {f} for {src}")
         return load_violations(f"{out_dir}/{s}/{f}", k, objs[s])
+
+    def drc_not_run(sides):
+        """Reason a board side has no DRC run (render_side left drc.json.error instead of drc.json), else None."""
+        for s in sides:
+            marker = pathlib.Path(out_dir, s, "drc.json.error")
+            if os.path.exists(board_path(p, s)) and not os.path.exists(f"{out_dir}/{s}/drc.json") and marker.is_file():
+                return f"{s} " + marker.read_text(encoding="utf-8").strip()
+        return None
+
+    def not_run(name, reason, incomplete=False):
+        if settings["checks"].get(name, "off") == "off":
+            return None
+        return {"name": name, "title": CHECK_NAMES[name], "level": settings["checks"][name], "status": "not_run", "reason": reason,
+                **({"incomplete": True} if incomplete else {}),
+                "errors": 0, "new_errors": 0, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []}
     fields = settings["bom"]["required_fields"]
+    drc_reason = drc_not_run(("head", "base"))
+    parity_reason = drc_not_run([s for s in ("head", "base") if sch(s)]) if sch("head") else None
     checks = [
         run_check("erc", settings, side("head", "erc.json", "erc"), side("base", "erc.json", "erc"), waivers),
+        not_run("drc", drc_reason, True) if drc_reason else
         run_check("drc", settings, side("head", "drc.json", "drc"), side("base", "drc.json", "drc"), waivers),
+        not_run("parity", parity_reason, True) if parity_reason else
         run_check("parity", settings, side("head", "drc.json", "parity") if sch("head") else None,
                   side("base", "drc.json", "parity") if sch("base") else None, waivers),
         run_check("bom", settings, bom_violations(objs["head"], fields) if sch("head") else None,
                   bom_violations(objs["base"], fields) if sch("base") else None),
     ]
     out = [c for c in checks if c] + [
-        {"name": name, "title": CHECK_NAMES[name], "level": settings["checks"][name], "status": "not_run", "reason": "no schematic",
-         "errors": 0, "new_errors": 0, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []}
-        for name in ("parity", "bom") if not sch("head") and settings["checks"].get(name, "off") != "off"]
+        not_run(name, "no schematic") for name in ("parity", "bom") if not sch("head") and settings["checks"].get(name, "off") != "off"]
     if settings["checks"].get("release", "off") != "off":
         pcb = lambda s: posixpath.join(s, p["dir"], f"{p['name']}.kicad_pcb")
         preset = settings["fabrication"]["preset"]

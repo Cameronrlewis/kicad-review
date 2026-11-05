@@ -10838,3 +10838,73 @@ def test_f1_sheetfile_containment_and_hierarchy():
 
 test_f1_sheetfile_containment_and_hierarchy()
 print("ok F1 sheetfile containment and hierarchy")
+
+
+# F7: a malformed head board still produces a report with incomplete board evidence.
+def test_f7_malformed_board_report():
+    with tempfile.TemporaryDirectory() as td:
+        old = os.getcwd(); os.chdir(td)
+        try:
+            p = {"dir": "p", "name": "p", "status": "modified"}
+            good = br03_pcb("fp", [("pad1", "1", 0, "GND")]).replace('(kicad_pcb ', '(kicad_pcb (layers (0 "F.Cu" signal)) ')
+            drc = json.dumps({"violations": [{"type": "clearance", "severity": "error", "description": "x", "items": []}],
+                              "unconnected_items": [], "schematic_parity": []})
+            for side in ("base", "head"):
+                write(side, {"p/p.kicad_sch": '(kicad_sch (uuid root) (symbol (uuid r) (at 1 2 0) (property "Reference" "D1")))',
+                             "p/p.kicad_pcb": good})
+                write("review/p/" + side, {"sch/p.svg": '<svg width="10mm" height="10mm" viewBox="0 0 10 10"/>',
+                                           "netlist.net": "(export (nets))", "erc.json": '{"sheets":[]}', "drc.json": drc})
+            write("review", {"detect.json": json.dumps({"base": "a" * 40, "head": "b" * 40, "reason": "fixture", "projects": [p]}),
+                             "p/copper-diff.json": json.dumps({"rows": [], "incomplete": []})})
+
+            def report():
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                    try:
+                        kr.cmd_report(None)
+                    except SystemExit as exc:
+                        raise AssertionError(f"report ended: {exc}")
+                return json.loads(pathlib.Path("review/data.json").read_text())["projects"][0], err.getvalue()
+
+            # A fully valid project: DRC runs, board objects compared, no board incompleteness.
+            valid, _ = report()
+            checks = {c["name"]: c for c in valid["checks"]}
+            assert checks["drc"]["status"] == "pass" and checks["drc"]["errors"] == 1 and checks["drc"]["new_errors"] == 0, checks["drc"]
+            assert checks["parity"]["status"] == "pass", checks["parity"]
+            assert not any("malformed" in i["reason"] for i in valid["summary"]["incomplete"]), valid["summary"]
+            assert not any(r["kind"] == "footprint" for r in valid["changes"]), valid["changes"]
+
+            # Head board malformed: render_side left only the marker.
+            write("head", {"p/p.kicad_pcb": '(kicad_pcb (layers (0 "F.Cu" signal))'})
+            pathlib.Path("review/p/head/drc.json").unlink()
+            write("review/p/head", {"drc.json.error": "board DRC not run: malformed board file: malformed S-expression"})
+            project, err = report()
+            assert "::warning::head/p/p.kicad_pcb: malformed board file; board objects left out" in err, err
+            board = next(d for d in project["summary"]["documents"] if d["document"] == "board")
+            marked = {i["channel"] for i in board["incomplete"] if "malformed" in i["reason"]}
+            assert {"components", "routing", "rules", "board", "visual"} <= marked, board["incomplete"]
+            assert all(c["status"] == "incomplete" for c in board["channels"] if c["channel"] in marked), board["channels"]
+            # The readable base board is not reported as removed against a missing head board.
+            assert not any(r.get("document") == "board" and r["action"] == "removed" for r in project["changes"]), project["changes"]
+            checks = {c["name"]: c for c in project["checks"]}
+            for name in ("drc", "parity"):
+                c = checks[name]
+                assert c["status"] == "not_run" and c.get("incomplete") is True, c
+                assert c["reason"] == "head board DRC not run: malformed board file: malformed S-expression", c
+                assert c["errors"] == c["new_errors"] == c["fixed"] == 0 and c["violations"] == [], c
+            assert checks["erc"]["status"] == "pass", checks["erc"]
+
+            # Without the marker, a missing drc.json still stops the review.
+            pathlib.Path("review/p/head/drc.json.error").unlink()
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    kr.project_checks(p, kr.load_settings(), {"base": {}, "head": {}})
+                raise AssertionError("missing drc.json without a marker must stop the review")
+            except SystemExit as exc:
+                assert "kicad-cli wrote no drc.json" in str(exc), exc
+        finally:
+            os.chdir(old)
+
+
+test_f7_malformed_board_report()
+print("ok F7 malformed board gives a report with incomplete board evidence")
