@@ -30,6 +30,9 @@ const assets = {
   'kicad-colors.js': kicadColors, 'appearance-state.js': appearanceState, 'board-gl.js': boardGl,
   'appearance.js': appearance, 'board-marks.js': boardMarks, 'board-diff.js': boardDiff, 'three-studio.js': threeStudio, 'image-view.js': imageView, 'ask.js': ask,
 };
+export const MAX_REPORT_BYTES = 10 * 1024 * 1024;
+export const IMAGE_ASSET_LIMITS = { svg: 8 * 1024 * 1024, json: 4 * 1024 * 1024 };
+export const ASSET_3D_LIMITS = { 'board.glb': 32 * 1024 * 1024, 'board-parts.json': 4 * 1024 * 1024 };
 // String.replace with a function: `$` sequences in the inserted code stay literal.
 const put = (html, tag, text) => html.replace(tag, () => text);
 
@@ -46,8 +49,9 @@ export function readStoredData(html) {
 export function declaredAssets(data) {
   const result = Object.create(null);
   for (const [id, meta] of Object.entries(data?.assets || {})) {
-    if (/^[0-9a-f]{12}$/.test(id) && ['svg', 'json'].includes(meta?.kind)
-      && typeof data?.blobs?.[id] === 'string') result[id] = { kind: meta.kind };
+    const encoded = data?.blobs?.[id], max = IMAGE_ASSET_LIMITS[meta?.kind];
+    if (/^[0-9a-f]{12}$/.test(id) && max && typeof encoded === 'string'
+      && encoded.length > 0 && encoded.length <= Math.ceil(max / 3) * 4) result[id] = { kind: meta.kind };
   }
   return result;
 }
@@ -60,7 +64,7 @@ export function lazy3dData(input) {
   // which are strings (a shallow copy is independent), so multi-MB base64 is never copied.
   const data = structuredClone({ ...input, blobs: undefined }); data.blobs = { ...input.blobs };
   const valid = (a, kind) => a && /^[0-9a-f]{64}$/.test(a.digest)
-    && a.artifactName === `kicad-3d-${a.digest}-${kind}.gz` && Number.isFinite(a.bytes) && a.bytes > 0;
+    && a.artifactName === `kicad-3d-${a.digest}-${kind}.gz` && Number.isSafeInteger(a.bytes) && a.bytes > 0 && a.bytes <= ASSET_3D_LIMITS[kind];
   const candidates = new Set(), removable = [];
   for (const p of Array.isArray(data.projects) ? data.projects : []) for (const side of ['base', 'head']) {
     const b = p?.board; if (!b) continue;
@@ -111,8 +115,32 @@ export function currentReport(stored, { lazyAssets = false, lazy3d = false, stor
   return html;
 }
 
+const untext = new TextDecoder();
+
+export async function readReportText(response) {
+  const declared = response.headers?.get('Content-Length');
+  if (!response.body || (declared != null && Number(declared) > MAX_REPORT_BYTES)) {
+    await response.body?.cancel();
+    throw new Error('Report unavailable');
+  }
+  const reader = response.body.getReader(), chunks = [];
+  for (let n = 0; ;) {
+    const { done, value } = await reader.read();
+    if (done) {
+      const out = new Uint8Array(n);
+      for (let offset = 0, i = 0; i < chunks.length; offset += chunks[i++].byteLength) out.set(chunks[i], offset);
+      return untext.decode(out);
+    }
+    if ((n += value.byteLength) > MAX_REPORT_BYTES) {
+      await reader.cancel();
+      throw new Error('Report unavailable');
+    }
+    chunks.push(value);
+  }
+}
+
 // Body for a fetched stored report: the current interface when the data is recognisable, else the file as stored.
 export async function currentBody(response, options) {
-  const stored = await response.text();
+  const stored = await readReportText(response);
   return currentReport(stored, options) ?? stored;
 }

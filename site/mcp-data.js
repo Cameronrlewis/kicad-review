@@ -1,4 +1,4 @@
-import { LIST_QUERY, parseThreads } from './threads.js';
+import { parseThreads, ghPages, loadReviewThreads, validComments } from './threads.js';
 import { latestDecisions } from './readiness.js';
 
 // MCP trust boundaries: live GitHub authorization per call and byte-bounded input/output.
@@ -84,7 +84,8 @@ export async function resolveRevision(access, ref, gh) {
 
 // Newest context whose full head equals `sha`. The 7-character name only narrows candidates; nothing is cached,
 // and an outage or a missing match is an error, never an older revision presented as current.
-export async function selectContext(access, sha, { gh, loadContext }, accept = async () => true) {
+export async function selectContext(access, sha, deps, accept = async () => true) {
+  const { gh, loadContext } = deps;
   const [owner, repo] = access.repository.full_name.split('/');
   let examined = 0, exhausted = false;
   // ponytail: scan at most 10 pages/1,000 metadata rows and 30 matching contexts per call; no stale fallback.
@@ -97,7 +98,9 @@ export async function selectContext(access, sha, { gh, loadContext }, accept = a
       .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)) || Number(b.id) - Number(a.id));
     for (const artifact of candidates) {
       if (++examined > 30) throw new McpError('HISTORY_LIMIT', 'Search exceeded 30 matching contexts; narrow the requested ref or request a new review');
-      const loaded = await loadContext(owner, repo, String(artifact.id), access.token, gh);
+      // The report routes' provenance check (kicad-review.yml run of this repository) runs through this call's GitHub budget.
+      const verify = deps.verifyReport && ((ghFn) => deps.verifyReport(owner, repo, String(artifact.id), access.token, access.repository, ghFn));
+      const loaded = await loadContext(owner, repo, String(artifact.id), access.token, gh, verify);
       if (loaded.status === 429 || loaded.status === 502) throw new McpError('ARTIFACTS_UNAVAILABLE', loaded.error);
       if (loaded.status === 413) throw new McpError('CONTEXT_UNAVAILABLE', loaded.error);
       const doc = loaded.doc;
@@ -392,21 +395,20 @@ export function reviewProjects(doc, limit = 15) {
 }
 
 export async function reviewLive(access, pr, sha, limit = 15, gh) {
-  const query = { query: LIST_QUERY, variables: { owner: access.repository.owner.login, name: access.repository.name, number: pr } };
+  const owner = access.repository.owner.login, name = access.repository.name;
+  // Same paged reads as the readiness route: every review page, every thread page; a partial read is unknown, never complete.
   const [reviews, threads] = await Promise.all([
-    gh(`${access.root}/pulls/${pr}/reviews?per_page=100`, access.token).catch(() => null),
-    gh('/graphql', access.token, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(query) }).catch(() => null),
+    ghPages(gh, `${access.root}/pulls/${pr}/reviews`, access.token).catch(() => null),
+    loadReviewThreads(gh, access.token, { owner, repo: name, name, number: pr }).catch(() => null),
   ]);
-  const body = threads?.ok ? await threads.json().catch(() => null) : null;
-  const raw = body?.data?.repository?.pullRequest, rt = raw?.reviewThreads;
   let open = null;
-  const complete = !!rt && Array.isArray(rt.nodes) && !body?.errors?.length && typeof rt.totalCount === 'number' && rt.totalCount <= rt.nodes.length && raw.headRefOid === sha;
+  const complete = !!threads && !(threads instanceof Response) && threads.present && Array.isArray(threads.nodes)
+    && threads.head === sha && threads.nodes.every((node) => validComments(node?.comments));
   if (complete) {
-    try { open = parseThreads(body).filter(t => !t.resolved); } catch { /* malformed */ }
+    try { open = parseThreads({ data: { repository: { pullRequest: { reviewThreads: { nodes: threads.nodes } } } } }).filter(t => !t.resolved); } catch { /* malformed */ }
   }
   const isComplete = complete && open !== null;
-  const reviewRows = reviews?.ok ? await reviews.json().catch(() => null) : null;
-  const decisions = Array.isArray(reviewRows) && reviewRows.length < 100 ? latestDecisions(reviewRows, sha) : null;
+  const decisions = reviews?.ok ? latestDecisions(reviews.items, sha) : null;
   return {
     head: sha,
     openThreads: page((open || []).map(t => ({ id: t.id, anchor: projectLists(t.anchor, limit), comments: page(t.comments.map(c => ({ ...projectLists(c, limit), body: String(c.body).slice(0, 1000) })), limit, null, true) })), limit, open ? open.length : null, !isComplete),
@@ -427,7 +429,20 @@ export function projectTool(name, args, loaded, origin) {
   throw new McpError('UNKNOWN_TOOL', 'Unknown projection');
 }
 
+// Workers allow 50 subrequests per invocation. Every GitHub call of one tool call shares this cap, and an
+// artifact download counts twice (GitHub's redirect, then the storage fetch), leaving room for the sign-in refresh.
+export const SUBREQUEST_BUDGET = 45;
+export function budgeted(gh, limit = SUBREQUEST_BUDGET) {
+  let used = 0;
+  return (path, ...rest) => {
+    used += /\/artifacts\/\d+\/zip$/.test(String(path)) ? 2 : 1;
+    if (used > limit) return Promise.reject(new McpError('REQUEST_BUDGET', 'This call reached its GitHub request budget; narrow the requested ref or request a new review'));
+    return gh(path, ...rest);
+  };
+}
+
 export async function runTool(name, args, request, deps) {
+  deps = { ...deps, gh: budgeted(deps.gh) };
   try {
     const access = await mcpAccess(request.env, request.props, args.repo, deps);
     if (name === 'list_projects') {

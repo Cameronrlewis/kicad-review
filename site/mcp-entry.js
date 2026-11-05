@@ -1,5 +1,5 @@
 import { OAuthProvider } from '@cloudflare/workers-oauth-provider';
-import legacy, { session, open, seal, gh, allowedOwners } from './worker.js';
+import legacy, { session, open, seal, gh, allowedOwners, verifyReport } from './worker.js';
 import { loadContext } from './ask.js';
 import { consentRoute, oauthFetch } from './mcp-auth.js';
 import { mcpResponse, TOOLS, validateTool } from './mcp.js';
@@ -9,7 +9,7 @@ import { runTool } from './mcp-data.js';
 // Overrides are test-only code injection, never request parameters.
 export function makeMcpWorker(overrides = {}) {
   const { onProvider, onError = () => {}, ...dataOverrides } = overrides;
-  const deps = { gh, open, allowedOwners, loadContext, ...dataOverrides };
+  const deps = { gh, open, allowedOwners, loadContext, verifyReport, ...dataOverrides };
   const options = {
     apiRoute: '/mcp',
     apiHandler: { fetch: (request, env, ctx) => {

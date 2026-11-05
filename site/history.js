@@ -1,5 +1,5 @@
 // A PR timeline built on demand from GitHub; no event store.
-import { parseAnchor } from './threads.js';
+import { parseAnchor, ghPages } from './threads.js';
 
 // ponytail: last 100 commits/reviews, first 100 threads and first 100 comments; paginate if needed.
 export const HISTORY_QUERY = 'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){title '
@@ -56,8 +56,8 @@ export async function historyRoute(request, env, { owner, repo, number }, { acce
     }
     let artifacts = [];
     try {
-      const response = await gh(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/artifacts?per_page=100`, token);
-      if (response.ok) artifacts = (await response.json()).artifacts || [];
+      const paged = await ghPages(gh, `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/artifacts`, token, d => d?.artifacts);
+      if (paged.ok || paged.overflow) artifacts = paged.items;
     } catch { /* Artifacts only add links; keep the durable timeline when unavailable. */ }
     const events = historyEvents(data, artifacts, path, artifactName);
     return sessionResponse(historyPage({ user: allowed.s.login, owner, repo, pull: number, title: data?.data?.repository?.pullRequest?.title || `#${number}`, events, filter: new URL(request.url).searchParams.get('f') || 'all' }),
