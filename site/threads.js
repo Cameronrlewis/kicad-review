@@ -158,6 +158,9 @@ export async function loadReviewThreads(gh, token, { owner, repo, name = repo, n
   return { ok: true, nodes, head, present };
 }
 
+const validComments = c => Array.isArray(c?.nodes) && Number.isInteger(c.totalCount) && c.totalCount >= 0
+  && typeof c.pageInfo?.hasNextPage === 'boolean' && (!c.pageInfo.hasNextPage || typeof c.pageInfo.endCursor === 'string');
+
 export async function threadsRoute(request, env, { owner, repo, number, rest }, { access, gh }) {
   const url = new URL(request.url);
   if (request.method === 'POST') {
@@ -181,6 +184,7 @@ export async function threadsRoute(request, env, { owner, repo, number, rest }, 
       for (const node of nodes) {
         const c = node?.comments;
         if (!c || !Array.isArray(c.nodes) || !parseAnchor(c.nodes[0]?.body)) continue;
+        if (!validComments(c)) return json({ error: 'GitHub did not answer. Try again.' }, 502);
         if (c.pageInfo?.hasNextPage || c.totalCount > c.nodes.length) pending.push({ c, id: String(node.id), after: c.pageInfo?.endCursor });
       }
       for (let page = 1; pending.length; page++) {
@@ -191,7 +195,7 @@ export async function threadsRoute(request, env, { owner, repo, number, rest }, 
         const more = [];
         for (const [i, p] of pending.entries()) {
           const next = extra?.data?.[`t${i}`]?.comments;
-          if (!Array.isArray(next?.nodes)) return json({ error: 'GitHub did not answer. Try again.' }, 502);
+          if (!validComments(next)) return json({ error: 'GitHub did not answer. Try again.' }, 502);
           p.c.nodes.push(...next.nodes);
           if (next.pageInfo?.hasNextPage || next.totalCount > p.c.nodes.length) more.push({ ...p, after: next.pageInfo?.endCursor });
         }

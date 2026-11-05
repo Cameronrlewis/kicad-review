@@ -6193,6 +6193,31 @@ test('thread listing comment paging stops at the page cap and fails closed on ba
       assert.deepEqual(await response.json(), { error: 'GitHub did not answer. Try again.' });
     } finally { malformed.restore(); }
   }
+  const lastPage = { totalCount: 51, pageInfo: { hasNextPage: false, endCursor: 'T1@51' }, nodes: commentRange(1, 51, 51) };
+  for (const shape of [{ pageInfo: undefined }, { pageInfo: null }, { pageInfo: {} },
+    { pageInfo: { hasNextPage: 'true', endCursor: 'T1@50' } }, { pageInfo: { hasNextPage: 1, endCursor: 'T1@50' } }, { pageInfo: { hasNextPage: null, endCursor: 'T1@50' } },
+    { pageInfo: { hasNextPage: true } }, { pageInfo: { hasNextPage: true, endCursor: null } }, { pageInfo: { hasNextPage: true, endCursor: 50 } },
+    { totalCount: undefined }, { totalCount: null }, { totalCount: -1 }, { totalCount: 50.5 }, { totalCount: '51' }]) {
+    const thread = pagedThread(1, 51);
+    const firstPage = commentPagingMock({ threads: [{ ...thread, comments: { ...thread.comments, ...shape } }], pages: () => ({ comments: lastPage }) });
+    try {
+      const response = await get();
+      assert.equal(response.status, 502, `first page ${JSON.stringify(shape)}`);
+      assert.deepEqual(await response.json(), { error: 'GitHub did not answer. Try again.' });
+    } finally { firstPage.restore(); }
+    const extraPage = commentPagingMock({ threads: [pagedThread(1, 51)], pages: () => ({ comments: { ...lastPage, ...shape } }) });
+    try {
+      const response = await get();
+      assert.equal(response.status, 502, `extra page ${JSON.stringify(shape)}`);
+      assert.deepEqual(await response.json(), { error: 'GitHub did not answer. Try again.' });
+    } finally { extraPage.restore(); }
+  }
+  const valid = commentPagingMock({ threads: [pagedThread(1, 51), pagedThread(2, 3)], pages: () => ({ comments: lastPage }) });
+  try {
+    const response = await get();
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).threads.map(t => t.comments.length), [51, 3]);
+  } finally { valid.restore(); }
   const unanchored = pagedThread(9, 51, [{ ...pagedComment(9, 1), body: 'plain review comment' }]);
   const skipped = commentPagingMock({ threads: [unanchored, pagedThread(3, 3)], pages: () => assert.fail('unanchored threads are not paged') });
   try {
