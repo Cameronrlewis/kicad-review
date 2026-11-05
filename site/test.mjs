@@ -5775,6 +5775,15 @@ test('project route keys preserve literal percent text after one decode', async 
   }
 });
 
+test('truncated recursive project trees fail closed', async () => {
+  const routes = [['/git/trees/', () => json({ truncated: true, tree: [{ type: 'blob', path: 'Only/Only.kicad_pro' }] })]];
+  for (const path of ['/r/Cameronrlewis/repo/projects', '/r/Cameronrlewis/repo/design']) {
+    const response = await designGet(path, routes);
+    assert.equal(response.status, 502, path);
+    assert.match(await response.text(), /GitHub did not answer\. Try again\./);
+  }
+});
+
 test('design resolves slash branches and explicit commits per folder, and refuses bad refs before calling GitHub', async () => {
   const calls = [];
   const routes = [['/commits?', (url) => { calls.push(url); return json([{ sha: tipSha }]); }], ['/actions/artifacts?name=', () => json({ artifacts: [snap(7, 'ccccccc')] })]];

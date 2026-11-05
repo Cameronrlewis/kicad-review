@@ -203,7 +203,9 @@ export async function projectsRoute(request, env, { owner, repo }, { access, gh,
   if (allowed instanceof Response) return allowed;
   const tree = await defaultTree(gh, owner, repo, allowed);
   if (!tree.ok) return errorPage(502, 'Could not load the projects', 'GitHub did not answer. Try again.', [], allowed.s);
-  return sessionResponse(projectsPage({ user: allowed.s.login, owner, repo, projects: projectsFromTree((await tree.json()).tree) }), { headers: html }, allowed.s);
+  const data = await tree.json();
+  if (data.truncated) return errorPage(502, 'Could not load the projects', 'GitHub did not answer. Try again.', [], allowed.s);
+  return sessionResponse(projectsPage({ user: allowed.s.login, owner, repo, projects: projectsFromTree(data.tree) }), { headers: html }, allowed.s);
 }
 
 // GET /r/:owner/:repo/design[/<ref>] (repository-wide link) and GET /r/:owner/:repo/p/<key>/design[/<ref>] (one folder).
@@ -216,7 +218,9 @@ export async function designRoute(request, env, { owner, repo, key, rest }, { ac
   if (key === undefined) {
     const tree = await defaultTree(gh, owner, repo, allowed);
     if (!tree.ok) return unavailable(errorPage, allowed.s);
-    const dirs = projectsFromTree((await tree.json()).tree);
+    const data = await tree.json();
+    if (data.truncated) return unavailable(errorPage, allowed.s);
+    const dirs = projectsFromTree(data.tree);
     if (dirs.length === 0) return errorPage(404, 'No KiCad project', 'This repository has no KiCad project folder on its default branch.', [], allowed.s);
     return sessionRedirect(dirs.length === 1 ? `${path}/p/${projectKey(dirs[0])}/design${rest || ''}` : `${path}/projects`, 302, allowed.s);
   }
