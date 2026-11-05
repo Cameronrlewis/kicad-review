@@ -2050,9 +2050,9 @@ assert "uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1
 assert 'npm ci --prefix site' in wf and wf.index('npm ci --prefix site') < wf.index('node --import ./site/css-loader.mjs --test site/test.mjs'), "MCP test.yml locked site install before site test"
 assert 'npm ci --prefix site' in deploy and deploy.index('npm ci --prefix site') < deploy.index('node --import ./site/css-loader.mjs --test site/test.mjs'), "MCP site-deploy.yml locked site install before site test"
 assert 'node ui/check.mjs --no-skip "MCP unchanged identity links"' in wf, "MCP browser check in test.yml"
-assert 'OAUTH_KV' in site_docs and 'read:design' in site_docs, "MCP OAUTH_KV and read:design documented in site/README.md"
-assert re.search(r'No\s+model-provider\s+request', site_docs) and re.search(r'one\s+hour', site_docs), "MCP no model request and one hour TTL documented in site/README.md"
-assert re.search(r'Connect\s+panel', site_docs) and re.search(r'no\s+Connect\s+panel\s+is\s+shown', site_docs), "MCP Connect panel wording and absence documented in site/README.md"
+assert 'OAUTH_KV' in site_docs and 'OAUTH_KV' in root_docs and 'read:design' in root_docs, "MCP OAUTH_KV binding in site/README.md, read:design in README.md"
+assert re.search(r'No\s+model-provider\s+request', root_docs) and re.search(r'one\s+hour', root_docs), "MCP no model request and one hour TTL documented in README.md"
+assert re.search(r'Connect\s+panel', root_docs) and all(re.search(r'no\s+Connect\s+panel\s+is\s+shown', d) for d in (root_docs, site_docs)), "MCP Connect panel wording and absence documented"
 assert re.search(r'32\s+properties', root_docs) and re.search(r'200\s+code\s+points', root_docs) and 'searchFieldsComplete:false' in root_docs, "MCP property limits and searchFieldsComplete documented in README.md"
 print('ok MCP locked installation and settings docs')
 print("ok")
