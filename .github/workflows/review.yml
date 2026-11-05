@@ -10,7 +10,7 @@ on:
 env:
   # Official KiCad image, pinned by digest so a new upload under the same tag cannot change results.
   KICAD_IMAGE: kicad/kicad:10.0.6-full@sha256:e36e29b5f4a638a1a7238eba3d2fcbc8e061ffed1e99a8f39cb722706c94a58e
-  # Python 3.13 image matching KiCad 10.0.6 image Python (3.13.5 per evidence/kicad10-commands.md) for cp313 wheel ABI compatibility.
+  # Python 3.13 image matching KiCad 10.0.6 image Python (3.13.5) for cp313 wheel ABI compatibility.
   PYTHON_IMAGE: python:3.13-slim@sha256:ae14d4ce8771606477a81446e7ef429edd6762305fc50c84507c1041fa8285d1
 
 jobs:
@@ -97,8 +97,8 @@ jobs:
           path: .render-cache/${{ steps.detect.outputs.head }}
           key: renders-v1-${{ runner.os }}-${{ hashFiles('tools/kicad_review.py', 'tools/fab_limits.json', 'tools/ui/compress3d.cjs', 'base/kicad-review.toml', 'head/kicad-review.toml') }}-${{ env.KICAD_IMAGE }}-${{ steps.detect.outputs.head }}
 
-      # PcbDraw (owner decision 2026-10-26, decision 1): installed into the workspace, then imported only by the KiCad image's Python.
-      # The KiCad 10.0.6 image ships Python 3.13.5 with no pip/venv (verified in evidence/kicad10-commands.md and results-pcbdraw-10.0.6.txt).
+      # PcbDraw: installed into the workspace, then imported only by the KiCad image's Python.
+      # The KiCad 10.0.6 image ships Python 3.13.5 with no pip/venv.
       # Installing in python:3.13-slim produces cp313 wheels (lxml, numpy, Pillow) matching the KiCad Python ABI.
       # Optional: without it the render records "PcbDraw failed" (retried on the next run) and the design report shows that note.
       - name: Install PcbDraw
@@ -287,17 +287,17 @@ jobs:
         if: steps.design_downloads.outcome == 'failure'
         run: python3 tools/kicad_review.py drop-downloads --design
 
-      # ponytail: 90-day default ceiling (owner decision 2026-10-26, decision 6); set the KICAD_REVIEW_SNAPSHOT_DAYS variable to the repository's configured maximum. No retention discovery.
+      # ponytail: 90-day default ceiling; set the KICAD_REVIEW_SNAPSHOT_DAYS variable to the repository's configured maximum. No retention discovery.
       - name: Upload design snapshot
         if: steps.snapshot.outputs.built == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           archive: false
-          name: ${{ steps.snapshot.outputs.name }}   # the artifact name is the report name; 09's loadContext matches it
+          name: ${{ steps.snapshot.outputs.name }}   # the artifact name is the report name; the Ask context lookup matches it
           path: review/design/${{ steps.snapshot.outputs.name }}
           retention-days: ${{ vars.KICAD_REVIEW_SNAPSHOT_DAYS || 90 }}
 
-      # Optional Ask hook: inert in 06 (ask=false, no context name). After 06 merges and its owner gate is met, 09 owns enabling the producer and emitting ask=true with the context name. Upload failure never fails the snapshot.
+      # Optional Ask hook: off until a context producer emits ask=true with the context name; until then the snapshot step emits ask=false and no context name. Upload failure never fails the snapshot.
       - name: Upload design snapshot context
         if: steps.snapshot.outputs.ask == 'true'
         continue-on-error: true
