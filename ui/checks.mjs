@@ -2035,8 +2035,12 @@ return true;
    }
    const st=Review3D.state;
    if(fault==='worker-postMessage-throws'&&st.resourceCounts.pending!==0)return 'postMessage leaked pending job';
-   if(['worker-start','worker-error','worker-messageerror'].includes(fault)&&
-      (st.resourceCounts.urls!==liveURLs.size||liveURLs.size!==2))return 'failed worker retained blob URL: '+JSON.stringify({counts:st.resourceCounts,live:liveURLs.size});
+   if(['worker-start','worker-error','worker-messageerror'].includes(fault)) {
+     // Posters live in the page-lifetime blob cache and outlive the session; every session-owned URL must be revoked.
+     const shared=new Set(await Promise.all(['base','head'].map(side=>Review3D.blobUrl(p.board.poster3d?.[side],'image/png'))));
+     const owned=[...liveURLs].filter(url=>!shared.has(url));
+     if(st.resourceCounts.urls!==0||owned.length)return 'failed worker retained blob URL: '+JSON.stringify({counts:st.resourceCounts,owned:owned.length});
+   }
    if(st.loading)return 'failure left loading unsettled';
    if(!st.errorsBySide.head)return 'head error not recorded';
    if(fault!=='corrupt-model'&&st.firstFrame)return 'failure reported a genuine first frame';
