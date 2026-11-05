@@ -8963,8 +8963,8 @@ if bom_handoff:  # the skip is allowed only while this branch truly lacks 08: a 
     assert not any("category" in l or "refsCompressed" in l for case in bom_cases for l in kr.parts_lines(case["objects"])), \
         "08's parts_lines is merged: delete the 08 handoff block so the shared parts_lines leg runs"
 for case in bom_cases:
-    for oid, obj in case["objects"].items():
-        b = kr.bom_identity(obj)
+    for oid, object_ in case["objects"].items():
+        b = kr.bom_identity(object_)
         assert b["included"] is case["expect"]["included"][oid] and b["excludedReason"] == case["expect"]["excludedReason"][oid], (case["name"], oid, b)
     expect = sorted([(e["key"], e["refs"], e["quantity"], e["mpn"]) for e in case["expect"]["lines"]])
     ctx_lines = {}
@@ -9100,6 +9100,25 @@ with patch("kicad_review.side_context", side_effect=lambda *a,**kw: {"parts":[],
                 assert rev["revision"] == ("a" if side=="base" else "b")*40 and rev["sheets"][0]["page"] == ("1" if side=="base" else "2")
                 assert set(rev) == ASK_REVISION_FIELDS
                 assert "pins" not in rev, "the reverse connectivity index is parts[].pins, not revisions.*.pins"
+with tempfile.TemporaryDirectory() as t:
+    old = os.getcwd(); os.chdir(t)
+    try:
+        pathlib.Path("head/P").mkdir(parents=True)
+        pathlib.Path("head/P/P.kicad_sch").write_text("(kicad_sch (unbalanced", encoding="utf-8")
+        pathlib.Path("head/P/P.kicad_pcb").write_text("(kicad_pcb (unbalanced", encoding="utf-8")
+        pathlib.Path("review/P/head").mkdir(parents=True)
+        pathlib.Path("review/P/head/netlist.net").write_text("(export (components) (nets))", encoding="utf-8")
+        record = kr.project_context(
+            {"name":"P","dir":"P","status":"added"}, "review/P", {"base":{},"head":{}}, [],
+            {"base":"base/P/P.kicad_pcb","head":"head/P/P.kicad_pcb"}, [], [], ("head",), 15, 15,
+            {"base":"a"*40,"head":"b"*40}, check_settings)
+        rev = record["revisions"]["head"]
+        reasons = {item["document"]: item["reason"] for item in rev["incomplete"]}
+        assert rev["sheets"] == [] and rev["board"] is None
+        assert "malformed S-expression" in reasons["schematic"]
+        assert "malformed S-expression" in reasons["board"]
+    finally:
+        os.chdir(old)
 small = kr.fit_context(lambda nc, pc: {"version": 1, "projects": []})
 assert small["truncated"] is False
 # Typed change detail is bounded, never silently dropped: row type, channel, weight and every full count survive.

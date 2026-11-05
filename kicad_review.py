@@ -5139,6 +5139,14 @@ def label_probes(src_dir, name, work):
         if PROBE_PREFIX in text or "kicad_review_probe" in text:
             raise ValueError(f"{clip(file, 100)} already uses the reserved probe name {PROBE_PREFIX}")
         root = parse_sexpr(text)
+        for sheet in findall(root, "sheet"):
+            sheetfile = properties(sheet).get("Sheetfile") or ""
+            try:
+                child = (path.parent / sheetfile).resolve()
+            except (OSError, ValueError):
+                raise ValueError(f"sheet file outside the project folder: {clip(sheetfile, 100)}") from None
+            if pathlib.Path(sheetfile).is_absolute() or src not in child.parents:
+                raise ValueError(f"sheet file outside the project folder: {clip(sheetfile, 100)}")
         if findall(root, "bus") or findall(root, "bus_entry"):
             raise ValueError(f"{clip(file, 100)} has buses; bus membership is not resolved")  # ponytail: whole revision fails closed; expand bus members when a real design needs it
         add = []
@@ -5417,15 +5425,29 @@ def project_context(p, out, objs, sheets, pcbs, changes, checks, sides, net_cap,
             continue
         rev = side_context(f"{out}/{side}", objs[side], net_cap, pin_cap)
         rev["revision"] = revision_shas[side]
-        rev["sheets"] = [{k: pg.get(k) for k in ("path", "name", "file", "parent", "page")} for pg in sheet_pages(posixpath.join(side, p["dir"]), p["name"])]
+        incomplete = []
+        try:
+            pages = sheet_pages(posixpath.join(side, p["dir"]), p["name"])
+        except (OSError, ValueError, TypeError, IndexError, AttributeError) as exc:
+            pages = []
+            incomplete.append({"document": "schematic", "reason": f"Schematic pages unavailable: {clip(exc, 500)}"})
+        rev["sheets"] = [{k: pg.get(k) for k in ("path", "name", "file", "parent", "page")} for pg in pages]
         enrich_context(rev, objs[side], rev["sheets"])
-        rev["board"] = board_facts(f"{out}/{side}", pcbs[side]) if os.path.isfile(pcbs[side]) else None
+        rev["board"] = None
+        if os.path.isfile(pcbs[side]):
+            try:
+                rev["board"] = board_facts(f"{out}/{side}", pcbs[side])
+            except (OSError, ValueError, TypeError, IndexError, AttributeError) as exc:
+                incomplete.append({"document": "board", "reason": f"Board facts unavailable: {clip(exc, 500)}"})
+        if incomplete:
+            rev["incomplete"] = incomplete
         revisions[side] = rev
+    head_schematic = os.path.isfile(posixpath.join("head", p["dir"], p["name"] + ".kicad_sch"))
     return {"name": p["name"], "dir": p["dir"], "status": p["status"],
             "headline": clip((summary or {}).get("headline"), 200) if isinstance((summary or {}).get("headline"), str) else None,
             "net_changes": net_change_support(summary),
             "sheets": [{k: s.get(k) for k in ("path", "name", "file", "parent", "page", "status")} for s in sheets],
-            "revisions": revisions, "changes": context_changes(changes), "checks": complete_context_checks(checks, settings, bool(sheet_pages(posixpath.join("head", p["dir"]), p["name"])), os.path.isfile(pcbs["head"]))}
+            "revisions": revisions, "changes": context_changes(changes), "checks": complete_context_checks(checks, settings, head_schematic, os.path.isfile(pcbs["head"]))}
 
 
 def ask_index(side_dir):
