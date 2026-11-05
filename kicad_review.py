@@ -204,6 +204,10 @@ def board_layers(pcb_path):
             if isinstance(row, list) and len(row) > 1]
 
 
+def malformed_board(exc):
+    return f"malformed board file: {exc}".replace('\n', ' ')[:1000]
+
+
 def simplify_sheet_svg(text):
     """Join plain sibling stroke paths without changing inherited paint or coordinates."""
     root = ET.fromstring(text)
@@ -356,7 +360,7 @@ def render_side(src_dir, name, out, netlist=False):
             try:
                 layers = board_layers(pcb)
             except (OSError, ValueError) as exc:  # Skip every board export below; keep rendering the rest.
-                board_error = f"malformed board file: {exc}".replace('\n', ' ')[:1000]
+                board_error = malformed_board(exc)
                 print("::warning::" + workflow_command_escape(
                     f"{pcb}: malformed board file; board drawing not rendered: {exc}"), file=sys.stderr)
         try:
@@ -524,6 +528,14 @@ def render_fab(p, side, out, settings):
     if not source.is_file():
         pathlib.Path(out, "fab-limits.json").write_text(
             json.dumps({"sections": [], "reason": f"no {side} board"}), encoding="utf-8")
+        return
+    marker = pathlib.Path(out, "fab-limits.json.error")
+    marker.unlink(missing_ok=True)
+    try:
+        board_layers(source)
+    except (OSError, ValueError) as exc:  # Incomplete evidence: no audit for this side, only the reason.
+        pathlib.Path(out, "fab-limits.json").unlink(missing_ok=True)
+        marker.write_text("fab limits not run: " + malformed_board(exc), encoding="utf-8")
         return
     board_bytes = source.read_bytes()
     project_bytes = source.with_suffix(".kicad_pro").read_bytes() if source.with_suffix(".kicad_pro").is_file() else b""
@@ -2871,9 +2883,16 @@ def release_project(pro_path, tag, settings, out_dir, label):
     pcb, sch = f"{src}/{name}.kicad_pcb", f"{src}/{name}.kicad_sch"
     stem = f"{out_dir}/{label}-{tag}-{preset_name}"
     made = []
+    layers = None
     if os.path.exists(pcb):
-        with tempfile.TemporaryDirectory() as work:
+        marker = pathlib.Path(f"{stem}-gerbers.zip.error")
+        marker.unlink(missing_ok=True)
+        try:
             layers = [l for l in board_layers(pcb) if FAB_LAYER.search(l)]
+        except (OSError, ValueError) as exc:  # Skip the board outputs; keep the BOM.
+            marker.write_text("release package not built: " + malformed_board(exc), encoding="utf-8")
+    if layers is not None:
+        with tempfile.TemporaryDirectory() as work:
             kicad_cli("pcb", "export", "gerbers", *preset["gerbers"], "--check-zones", "-l", ",".join(layers), "-o", work, pcb)
             kicad_cli("pcb", "export", "drill", "--format", "excellon", "--excellon-units", "mm", "--excellon-zeros-format", "decimal",
                       "--excellon-oval-format", "alternate", *preset["drill"], "-o", work + "/", pcb)
@@ -3010,6 +3029,9 @@ def cmd_release(args):
     for label, pro in labels.items():
         for f in release_project(pro, args.tag, settings, "release", label):
             print(f)
+        marker = pathlib.Path(f"release/{label}-{args.tag}-{settings['fabrication']['preset']}-gerbers.zip.error")
+        if marker.is_file():
+            sys.exit(f"{label}: " + marker.read_text(encoding="utf-8"))
     os.makedirs("release", exist_ok=True)
     sums = []
     for f in sorted(os.listdir("release")):
@@ -4278,6 +4300,15 @@ FAB_VENDORS = ('jlcpcb', 'pcbway')
 FAB_VENDOR_LABELS = {'jlcpcb': 'JLCPCB', 'pcbway': 'PCBWay'}
 
 
+def output_not_run(p, out_dir, sides, output):
+    """Reason a board side has no output (rendering left <output>.error instead), else None."""
+    for s in sides:
+        marker = pathlib.Path(out_dir, s, output + ".error")
+        if os.path.exists(board_path(p, s)) and not os.path.exists(f"{out_dir}/{s}/{output}") and marker.is_file():
+            return f"{s} " + marker.read_text(encoding="utf-8").strip()
+    return None
+
+
 def fab_read_audit(out_dir, side, p, vendor):
     path = pathlib.Path(out_dir, side, 'fab-limits.json')
     if not path.is_file():
@@ -4302,6 +4333,12 @@ def fab_check(p, settings, out_dir, waivers, vendor):
     fab_regular_input(pathlib.Path(head_board))
     if not os.path.isfile(head_board):
         result = {**empty,'status':'not_run','reason':'no head board','unsupported':'no head board'}
+        if waivers is not None:
+            result['waived'] = 0
+        return result
+    reason = output_not_run(p, out_dir, ('head', 'base'), 'fab-limits.json')
+    if reason:
+        result = {**empty,'status':'not_run','reason':reason,'incomplete':True}
         if waivers is not None:
             result['waived'] = 0
         return result
@@ -4356,11 +4393,7 @@ def project_checks(p, settings, objs, waivers=None):
 
     def drc_not_run(sides):
         """Reason a board side has no DRC run (render_side left drc.json.error instead of drc.json), else None."""
-        for s in sides:
-            marker = pathlib.Path(out_dir, s, "drc.json.error")
-            if os.path.exists(board_path(p, s)) and not os.path.exists(f"{out_dir}/{s}/drc.json") and marker.is_file():
-                return f"{s} " + marker.read_text(encoding="utf-8").strip()
-        return None
+        return output_not_run(p, out_dir, sides, "drc.json")
 
     def not_run(name, reason, incomplete=False):
         if settings["checks"].get(name, "off") == "off":
@@ -4386,9 +4419,12 @@ def project_checks(p, settings, objs, waivers=None):
     if settings["checks"].get("release", "off") != "off":
         pcb = lambda s: posixpath.join(s, p["dir"], f"{p['name']}.kicad_pcb")
         preset = settings["fabrication"]["preset"]
+        release_reason = output_not_run(p, out_dir, ("head", "base"), f"fab/{p['name']}-review-{preset}-gerbers.zip")
         if not os.path.exists(pcb("head")):
             out.append({"name": "release", "title": CHECK_NAMES["release"], "level": settings["checks"]["release"], "status": "not_run",
                         "reason": "no board", "errors": 0, "new_errors": 0, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []})
+        elif release_reason:
+            out.append(not_run("release", release_reason, True))
         else:
             side = lambda s: release_findings(f"{out_dir}/{s}/fab", p["name"], preset, pcb(s), objs[s]) if os.path.exists(pcb(s)) else None
             c = run_check("release", settings, side("head"), side("base"))

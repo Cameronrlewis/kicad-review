@@ -10908,3 +10908,97 @@ def test_f7_malformed_board_report():
 
 test_f7_malformed_board_report()
 print("ok F7 malformed board gives a report with incomplete board evidence")
+
+
+def test_f7_malformed_board_fab_and_release():
+    with tempfile.TemporaryDirectory() as td:
+        old = os.getcwd(); os.chdir(td)
+        real_cli = kr.kicad_cli
+        cli_calls = []
+
+        def fake_cli(*args):
+            cli_calls.append(args)
+            out = pathlib.Path(args[list(args).index("-o") + 1])
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text("Designator\n", encoding="utf-8")
+        kr.kicad_cli = fake_cli
+        try:
+            p = {"dir": "p", "name": "p", "status": "modified"}
+            good = br03_pcb("fp", [("pad1", "1", 0, "GND")]).replace('(kicad_pcb ', '(kicad_pcb (layers (0 "F.Cu" signal)) ')
+            sch = '(kicad_sch (uuid root) (symbol (uuid r) (at 1 2 0) (property "Reference" "D1")))'
+            drc = json.dumps({"violations": [], "unconnected_items": [], "schematic_parity": []})
+            for side in ("base", "head"):
+                write(side, {"p/p.kicad_sch": sch, "p/p.kicad_pcb": good})
+                write("review/p/" + side, {"sch/p.svg": '<svg width="10mm" height="10mm" viewBox="0 0 10 10"/>',
+                                           "netlist.net": "(export (nets))", "erc.json": '{"sheets":[]}', "drc.json": drc})
+            write("base", {"kicad-review.toml": '[checks]\nrelease = "informational"\n[fabrication]\ncheck_limits = true\n'})
+            write("review", {"detect.json": json.dumps({"base": "a" * 40, "head": "b" * 40, "reason": "fixture", "projects": [p]}),
+                             "p/copper-diff.json": json.dumps({"rows": [], "incomplete": []})})
+            settings = kr.load_settings()
+            for side in ("base", "head"):
+                kr.render_fab(p, side, f"review/p/{side}", settings)
+
+            def report():
+                with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+                    try:
+                        kr.cmd_report(None)
+                    except SystemExit as exc:
+                        raise AssertionError(f"report ended: {exc}")
+                project = json.loads(pathlib.Path("review/data.json").read_text())["projects"][0]
+                return [c for c in project["checks"] if c["name"] == "fab_limits"], next(c for c in project["checks"] if c["name"] == "release")
+
+            # Valid boards: fab limits read the audits (one copper layer is outside every profile), release reads the package.
+            fab, release = report()
+            assert [c["vendor"] for c in fab] == ["jlcpcb", "pcbway"], fab
+            assert all(c["status"] == "warn" and "incomplete" not in c and c["reason"].startswith("not checked: profile covers") for c in fab), fab
+            assert release["status"] == "pass" and "incomplete" not in release, release
+            assert [v["type"] for v in release["violations"]] == ["missing_package"], release
+
+            # Head board malformed: render_fab and release_project leave markers instead of failing.
+            write("head", {"p/p.kicad_pcb": '(kicad_pcb (layers (0 "F.Cu" signal))'})
+            pathlib.Path("review/p/head/drc.json").unlink()
+            write("review/p/head", {"drc.json.error": "board DRC not run: malformed board file: malformed S-expression"})
+            kr.render_fab(p, "head", "review/p/head", settings)
+            assert not pathlib.Path("review/p/head/fab-limits.json").exists()
+            fab_marker = pathlib.Path("review/p/head/fab-limits.json.error").read_text(encoding="utf-8")
+            assert fab_marker.startswith("fab limits not run: malformed board file: "), fab_marker
+            os.makedirs("review/p/head/fab")
+            made = kr.release_project("head/p/p.kicad_pro", "review", settings, "review/p/head/fab", "p")
+            assert made == ["review/p/head/fab/p-review-jlcpcb-bom.csv"], made
+            assert [c[:3] for c in cli_calls] == [("sch", "export", "bom")], cli_calls
+            release_marker = pathlib.Path("review/p/head/fab/p-review-jlcpcb-gerbers.zip.error").read_text(encoding="utf-8")
+            assert release_marker.startswith("release package not built: malformed board file: "), release_marker
+
+            fab, release = report()
+            assert [c["vendor"] for c in fab] == ["jlcpcb", "pcbway"], fab
+            for c in fab:
+                assert c["status"] == "not_run" and c.get("incomplete") is True, c
+                assert c["reason"] == "head " + fab_marker, c
+                assert c["errors"] == c["new_errors"] == 0 and c["violations"] == [], c
+            assert release["status"] == "not_run" and release.get("incomplete") is True, release
+            assert release["reason"] == "head " + release_marker, release
+            assert release["errors"] == release["new_errors"] == 0 and release["violations"] == [], release
+
+            # Without the marker, a missing fab audit still stops the review.
+            pathlib.Path("review/p/head/fab-limits.json.error").unlink()
+            try:
+                kr.fab_checks(p, settings, "review/p")
+                raise AssertionError("missing fab audit without a marker must stop the review")
+            except SystemExit as exc:
+                assert "Fab limits output missing for p (head)" in str(exc), exc
+
+            # A tagged release still stops on a malformed board instead of shipping without Gerbers.
+            write("repo", {"p/p.kicad_pro": "{}", "p/p.kicad_sch": sch, "p/p.kicad_pcb": '(kicad_pcb (layers (0 "F.Cu" signal))'})
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    kr.cmd_release(SimpleNamespace(tag="v1"))
+                raise AssertionError("release with a malformed board must stop")
+            except SystemExit as exc:
+                assert "p: release package not built: malformed board file: " in str(exc), exc
+        finally:
+            kr.kicad_cli = real_cli
+            os.chdir(old)
+
+
+test_f7_malformed_board_fab_and_release()
+print("ok F7 malformed board reports fab limits and release as not run")
