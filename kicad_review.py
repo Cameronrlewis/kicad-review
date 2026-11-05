@@ -45,10 +45,10 @@ SNAPSHOT_REASON = "design snapshot (no comparison)"  # detect.json reason of a r
 FAB_TABLE = pathlib.Path(__file__).with_name("fab_limits.json")
 
 
-def workflow_command_escape(value, *, is_property=False, property=False):
-    """Escape GitHub workflow-command data, with extra separators for properties (either keyword spelling)."""
+def workflow_command_escape(value, *, property=False):
+    """Escape GitHub workflow-command data, with extra separators for properties."""
     value = str(value).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-    return value.replace(":", "%3A").replace(",", "%2C") if (is_property or property) else value
+    return value.replace(":", "%3A").replace(",", "%2C") if property else value
 
 
 def git(*args, check=True):

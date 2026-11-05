@@ -8101,8 +8101,6 @@ print('ok DP-P1 PcbDraw command, front and back plots, skip note')
 # DP-P2: a comparison attaches front and back plots for both revisions; a design report attaches the head side only, with no base probes.
 assert not hasattr(kr, 'put_blob'), 'put_blob alias should be removed'
 assert kr.workflow_command_escape("foo:bar,baz\nqux") == "foo:bar,baz%0Aqux"
-assert kr.workflow_command_escape("foo:bar,baz\nqux", is_property=False) == "foo:bar,baz%0Aqux"
-assert kr.workflow_command_escape("foo:bar,baz\nqux", is_property=True) == "foo%3Abar%2Cbaz%0Aqux"
 with _DpTmp() as t:
     old_cwd = os.getcwd()
     try:
