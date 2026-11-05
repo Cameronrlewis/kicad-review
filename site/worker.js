@@ -104,11 +104,43 @@ async function tokenRequest(env, fields) {
     });
     if (!response.ok) return null;
     const data = await response.json();
-    return data.error || !data.access_token || !data.refresh_token || !Number.isFinite(data.expires_in)
+    if (data?.error) return { error: String(data.error) };  // e.g. bad_refresh_token: the token was already used
+    return !data?.access_token || !data.refresh_token || !Number.isFinite(data.expires_in)
       || !Number.isFinite(data.refresh_token_expires_in) ? null : data;
   } catch {
     return null;
   }
+}
+
+// One object per rotation, named by the SHA-256 of the old refresh token, so racing requests from any
+// isolate share one exchange. In memory only: tokens are never stored at rest.
+export class RefreshCoordinator {
+  constructor(ctx, env) { this.env = env; this.pending = null; this.done = null; }
+  async fetch(request) {
+    const { r } = await request.json();
+    if (this.done?.until > Date.now()) return Response.json(this.done.value);
+    if (!this.pending) {
+      this.pending = tokenRequest(this.env, { grant_type: 'refresh_token', refresh_token: r }).then((value) => {
+        if (value && !value.error) this.done = { value, until: Date.now() + ROTATION_GRACE_MS };
+        return value;
+      }).finally(() => { this.pending = null; });
+    }
+    return Response.json(await this.pending);
+  }
+}
+
+// Exchange directly only without the coordinator (tests, local dev). With it, a lost answer may mean the object
+// already spent the one-use token: ask the object once more (it keeps a completed result) and never replay it here.
+async function coordinatedRefresh(env, r) {
+  if (!env.REFRESH) return tokenRequest(env, { grant_type: 'refresh_token', refresh_token: r });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const name = base64url(new Uint8Array(await crypto.subtle.digest('SHA-256', text.encode(r))));
+      const result = await env.REFRESH.get(env.REFRESH.idFromName(name)).fetch('https://refresh/', { method: 'POST', body: JSON.stringify({ r }) });
+      if (result.ok) return await result.json();
+    } catch {}
+  }
+  return { error: 'refresh_unavailable' };
 }
 
 const refreshing = new Map();
@@ -116,6 +148,12 @@ const refreshing = new Map();
 // Errors are never kept. ponytail: isolate-local, like `refreshing`.
 const rotated = new Map(), ROTATION_GRACE_MS = 30_000;
 export async function session(request, env) {
+  const active = await currentSession(request, env);
+  return active?.error ? null : active;
+}
+
+// Like session(), but a failed refresh returns { error } with GitHub's error code instead of null.
+async function currentSession(request, env) {
   const stored = cookies(request).s;
   if (!stored) return null;
   const value = await open(stored, env);
@@ -123,12 +161,16 @@ export async function session(request, env) {
   if (value.e > Date.now() + 5 * 60_000) return { login: value.u, token: value.t };
   if (value.re <= Date.now()) return null;
   // GitHub refresh tokens are one-use: concurrent requests in this isolate share one rotation.
-  // ponytail: isolate-local only; cross-isolate coalescing needs shared storage (KV/Durable Object).
+  // Isolate-local first; across isolates, coordinatedRefresh() shares the rotation through RefreshCoordinator.
   for (const [token, entry] of rotated) if (entry.until <= Date.now()) rotated.delete(token);
   let pending = rotated.get(value.r)?.renewed ?? refreshing.get(value.r);
   if (!pending) {
-    pending = tokenRequest(env, { grant_type: 'refresh_token', refresh_token: value.r }).then((refreshed) => {
-      if (!refreshed) return null;
+    pending = coordinatedRefresh(env, value.r).then((refreshed) => {
+      if (!refreshed?.access_token) {
+        const error = refreshed?.error ?? 'no_response';
+        console.warn('session refresh failed:', error);
+        return { error };
+      }
       const renewed = {
         t: refreshed.access_token,
         r: refreshed.refresh_token,
@@ -142,7 +184,8 @@ export async function session(request, env) {
     refreshing.set(value.r, pending);
   }
   const renewed = await pending;
-  if (!renewed || renewed.u !== value.u) return null;
+  if (renewed.error) return renewed;
+  if (renewed.u !== value.u) return null;
   return {
     login: renewed.u,
     token: renewed.t,
@@ -630,12 +673,14 @@ async function artifactList(owner, repo, token, maxPages = 10) {
 
 async function home(request, env) {
   const stored = cookies(request).s;
-  const active = await session(request, env);
-  if (!active) {
+  const active = await currentSession(request, env);
+  if (!active?.token) {
+    // bad_refresh_token: another request probably rotated this token and set a fresh cookie; keep it.
+    // refresh_unavailable: the refresh may have succeeded out of reach; keep the cookie for a later try.
     return response(signedOutPage({ sessionEnded: Boolean(stored) }), {
       headers: {
         'Content-Type': 'text/html; charset=utf-8',
-        ...(stored ? { 'Set-Cookie': clear('s', new URL(request.url).protocol === 'https:') } : {}),
+        ...(stored && !['bad_refresh_token', 'refresh_unavailable'].includes(active?.error) ? { 'Set-Cookie': clear('s', new URL(request.url).protocol === 'https:') } : {}),
       },
     });
   }
@@ -967,7 +1012,7 @@ async function callback(request, env) {
   if (!code) return errorPage(400, "Sign-in didn't complete", "GitHub didn't send a sign-in code. You may have cancelled.", [{ href: '/login', label: 'Try again' }, { href: '/', label: 'Back to the start' }], null, { headers: { 'Set-Cookie': clear('st', secure) } }, [], false);
   const token = await tokenRequest(env, { code });
   const signinError = () => errorPage(502, "Sign-in didn't complete", "GitHub didn't accept the sign-in. Try again.", [{ href: '/login', label: 'Try again' }, { href: '/', label: 'Back to the start' }], null, { headers: { 'Set-Cookie': clear('st', secure) } }, [], false);
-  if (!token) return signinError();
+  if (!token || token.error) return signinError();
   let user;
   try {
     const userResponse = await gh('/user', token.access_token);

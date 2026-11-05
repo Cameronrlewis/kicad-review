@@ -22,3 +22,12 @@ ALLOWED_OWNERS = "Cameronrlewis"
 # [[kv_namespaces]]
 # binding = "OAUTH_KV"
 # id = "<real namespace id>"
+
+# Shares one-use GitHub refresh token rotations across isolates; keeps nothing in storage.
+[[durable_objects.bindings]]
+name = "REFRESH"
+class_name = "RefreshCoordinator"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RefreshCoordinator"]

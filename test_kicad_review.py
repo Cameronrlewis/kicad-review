@@ -804,13 +804,25 @@ from kicad_review import sch_objects
 symbols = sch_objects(f"{t}/p", "H")
 assert all(symbols[path]["ref"] == "R1" and symbols[path]["props"]["Value"] == "10k" and symbols[path]["pos"] == [10, 20, 0] for path in ("/u1/u3/r1", "/u2/u4/r1")), "TS-S2 schematic symbols"
 print("ok TS-S2 schematic symbols")
-# Sibling sheets with one name share one SVG file, so neither drawing can be trusted: stop with a message.
+# Sibling sheets with one name share one SVG file: warn and skip the later sibling.
 write(t, {"p/H.kicad_sch": "(kicad_sch " + sheet("A", "a.kicad_sch", "u1") + sheet("A", "b.kicad_sch", "u2") + ")"})
-try:
-    sheet_pages(f"{t}/p", "H")
-    raise AssertionError("duplicate sibling sheet names must stop the review")
-except SystemExit as e:
-    assert "same name" in str(e), e
+import io, contextlib
+err = io.StringIO()
+with contextlib.redirect_stderr(err):
+    dup_pages = sheet_pages(f"{t}/p", "H")
+assert [p["name"] for p in dup_pages] == ["H"], dup_pages
+assert "collides with another sheet using sanitized name 'A'; all colliding sibling sheets skipped" in err.getvalue()
+# Three siblings sharing one sanitized name: the warning must not say "both".
+write(t, {"p3/H.kicad_sch": "(kicad_sch " + sheet("A/B", "a.kicad_sch", "u1") + sheet("A_B", "b.kicad_sch", "u2")
+          + sheet("A\\\\B", "c.kicad_sch", "u3") + ")"})
+err = io.StringIO()
+with contextlib.redirect_stderr(err):
+    tri_pages = sheet_pages(f"{t}/p3", "H")
+assert [p["name"] for p in tri_pages] == ["H"], tri_pages
+tri_lines = [l for l in err.getvalue().splitlines() if "sanitized name 'A_B'" in l]
+assert len(tri_lines) == 3 and all(l.startswith("::warning::") and l.endswith("; all colliding sibling sheets skipped")
+                                   for l in tri_lines), err.getvalue()
+assert "both" not in err.getvalue(), err.getvalue()
 print("ok")
 
 # SCH6: page numbers belong to the project and parent instance, not the shared file.
@@ -1077,14 +1089,14 @@ def hotspot_regressions():
         assert [v['sheet'] for v in m['views']] == ['/', '/g/'] and m['views'][1]['elements'] == []
         assert m['warnings'] == [{'sheet': '/g/', 'reason': 'sheet file missing'}], m['warnings']
 
-    # A sheet that contains itself is rejected rather than expanded forever.
+    # A sheet that contains itself is skipped with a warning rather than expanded forever.
     with TemporaryDirectory() as root:
         write(root, {'Board.kicad_sch': '(kicad_sch (uuid root) ' + sheet('Again', 'Board.kicad_sch', 'again') + ')'})
-        try:
-            kr.sheet_hotspots(root, 'Board')
-            raise AssertionError('recursive hierarchy must be rejected')
-        except ValueError as error:
-            assert 'recursive schematic hierarchy' in str(error)
+        import contextlib, io
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            m = kr.sheet_hotspots(root, 'Board')
+        assert [v['sheet'] for v in m['views']] == ['/'] and 'recursive hierarchy skipped' in err.getvalue(), err.getvalue()
 
 hotspot_regressions()
 print('ok instance-aware sheet hotspots and pins')
@@ -3386,8 +3398,8 @@ def fab(d, files, pos_rows, bom_rows, preset="jlcpcb"):
     part = "LCSC Part #" if preset == "jlcpcb" else "Mfg Part #"
     with open(f"{d}/b-review-{preset}-bom.csv", "w") as fh:
         fh.write(f"Comment,Designator,Footprint,{part}\n" + "".join(f'x,"{refs}",y,{pn}\n' for refs, pn in bom_rows))
-def pcb(d, layers):
-    open(f"{d}/b.kicad_pcb", "w").write("(kicad_pcb\n  (layers\n" + "".join(f'    (0 "{l}" signal)\n' for l in layers) + "  )\n)\n")
+def pcb(d, layers, extra=""):
+    open(f"{d}/b.kicad_pcb", "w").write("(kicad_pcb\n  (layers\n" + "".join(f'    (0 "{l}" signal)\n' for l in layers) + "  )\n" + extra + ")\n")
     return f"{d}/b.kicad_pcb"
 fpd = lambda ref, side, attrs, pads="smd": {"kind": "footprint", "ref": ref, "props": {"layer": side, "attributes": attrs, "pads_kind": pads}}
 G = "%FSLAX46Y46*%\nD10*\nX0Y0D03*\nM02*\n"
@@ -3421,8 +3433,7 @@ with tempfile.TemporaryDirectory() as d:
 print("ok pcbway drill detected")
 with tempfile.TemporaryDirectory() as d:
     fab(d, {k: v for k, v in full.items() if not k.endswith(".drl")}, [], [("J1", "C9")])
-    p = pcb(d, ["F.Cu", "B.Cu", "Edge.Cuts"])
-    open(p, "a").write('(footprint "J" (pad "1" thru_hole circle (at 0 0) (size 1 1) (drill 0.6)))\n')
+    p = pcb(d, ["F.Cu", "B.Cu", "Edge.Cuts"], '(footprint "J" (pad "1" thru_hole circle (at 0 0) (size 1 1) (drill 0.6)))\n')
     v = release_findings(d, "b", "jlcpcb", p, {"1": {"kind": "footprint", "ref": "J1", "props": {"layer": "F.Cu", "attributes": "through_hole"}}})
     assert [x["type"] for x in v] == ["missing_drill"], v
 print("ok plated pads in the board file require a drill file")
@@ -3460,8 +3471,7 @@ from kicad_review import bom_refs_expand
 assert bom_refs_expand("C1,C3-C5, R10") == {"C1", "C3", "C4", "C5", "R10"}
 with tempfile.TemporaryDirectory() as d:
     fab(d, {k: v for k, v in full.items() if "Paste" not in k and "B_Mask" not in k}, ["A1"], [("A1", "C5")])
-    p = pcb(d, ["F.Cu", "B.Cu", "Edge.Cuts"])
-    open(p, "a").write('(footprint "Sensor:TO39" (layer "B.Cu") (attr smd) (pad "1" thru_hole circle (at 0 0) (size 1 1) (drill 0.6) (layers "*.Cu" "*.Mask")))\n')
+    p = pcb(d, ["F.Cu", "B.Cu", "Edge.Cuts"], '(footprint "Sensor:TO39" (layer "B.Cu") (attr smd) (pad "1" thru_hole circle (at 0 0) (size 1 1) (drill 0.6) (layers "*.Cu" "*.Mask")))\n')
     v = release_findings(d, "b", "jlcpcb", p, {"1": {"kind": "footprint", "ref": "A1", "props": {"layer": "B.Cu", "attributes": "smd"}}})
     assert not any("Paste" in x["description"] for x in v), v
 with tempfile.TemporaryDirectory() as d:
@@ -3479,7 +3489,7 @@ from kicad_review import smd_pad_sides
 assert smd_pad_sides('(footprint "R" locked (layer "B.Cu") (pad "1" smd rect))') == {"B"}
 with tempfile.TemporaryDirectory() as d:
     fab(d, {k: v for k, v in full.items() if not k.endswith(".drl")}, [], [("J1", "C9")])
-    p = pcb(d, ["F.Cu", "B.Cu", "Edge.Cuts"]); open(p, "a").write('(footprint "H" (pad "" np_thru_hole circle (at 0 0) (size 3 3) (drill 3)))\n')
+    p = pcb(d, ["F.Cu", "B.Cu", "Edge.Cuts"], '(footprint "H" (pad "" np_thru_hole circle (at 0 0) (size 3 3) (drill 3)))\n')
     assert [x["type"] for x in release_findings(d, "b", "jlcpcb", p, {})] == ["missing_drill"]
 with tempfile.TemporaryDirectory() as d:
     fab(d, {**full, "b-GND_PLANE.g2": G}, ["R1"], [("R1", "C1")])
@@ -8970,8 +8980,8 @@ if bom_handoff:  # the skip is allowed only while this branch truly lacks 08: a 
     assert not any("category" in l or "refsCompressed" in l for case in bom_cases for l in kr.parts_lines(case["objects"])), \
         "08's parts_lines is merged: delete the 08 handoff block so the shared parts_lines leg runs"
 for case in bom_cases:
-    for oid, obj in case["objects"].items():
-        b = kr.bom_identity(obj)
+    for oid, object_ in case["objects"].items():
+        b = kr.bom_identity(object_)
         assert b["included"] is case["expect"]["included"][oid] and b["excludedReason"] == case["expect"]["excludedReason"][oid], (case["name"], oid, b)
     expect = sorted([(e["key"], e["refs"], e["quantity"], e["mpn"]) for e in case["expect"]["lines"]])
     ctx_lines = {}
@@ -9107,6 +9117,25 @@ with patch("kicad_review.side_context", side_effect=lambda *a,**kw: {"parts":[],
                 assert rev["revision"] == ("a" if side=="base" else "b")*40 and rev["sheets"][0]["page"] == ("1" if side=="base" else "2")
                 assert set(rev) == ASK_REVISION_FIELDS
                 assert "pins" not in rev, "the reverse connectivity index is parts[].pins, not revisions.*.pins"
+with tempfile.TemporaryDirectory() as t:
+    old = os.getcwd(); os.chdir(t)
+    try:
+        pathlib.Path("head/P").mkdir(parents=True)
+        pathlib.Path("head/P/P.kicad_sch").write_text("(kicad_sch (unbalanced", encoding="utf-8")
+        pathlib.Path("head/P/P.kicad_pcb").write_text("(kicad_pcb (unbalanced", encoding="utf-8")
+        pathlib.Path("review/P/head").mkdir(parents=True)
+        pathlib.Path("review/P/head/netlist.net").write_text("(export (components) (nets))", encoding="utf-8")
+        record = kr.project_context(
+            {"name":"P","dir":"P","status":"added"}, "review/P", {"base":{},"head":{}}, [],
+            {"base":"base/P/P.kicad_pcb","head":"head/P/P.kicad_pcb"}, [], [], ("head",), 15, 15,
+            {"base":"a"*40,"head":"b"*40}, check_settings)
+        rev = record["revisions"]["head"]
+        reasons = {item["document"]: item["reason"] for item in rev["incomplete"]}
+        assert rev["sheets"] == [] and rev["board"] is None
+        assert "malformed S-expression" in reasons["schematic"]
+        assert "malformed S-expression" in reasons["board"]
+    finally:
+        os.chdir(old)
 small = kr.fit_context(lambda nc, pc: {"version": 1, "projects": []})
 assert small["truncated"] is False
 # Typed change detail is bounded, never silently dropped: row type, channel, weight and every full count survive.
@@ -10581,6 +10610,7 @@ with tempfile.TemporaryDirectory() as d:
     os.chdir(d)
     try:
         os.makedirs("review"); os.makedirs("base/p"); os.makedirs("head/p")
+        pathlib.Path("head/p/b.kicad_pcb").write_text("(kicad_pcb (version 20240108))", encoding="utf-8")
         json.dump({"base": "a" * 40, "head": "b" * 40, "reason": "t", "projects": [{"dir": "p", "name": "b", "status": "modified"}]}, open("review/detect.json", "w"))
         pathlib.Path("base/kicad-review.toml").write_text("[downloads]\nenabled = true\n[3d]\nenabled = false\n")
         glb_calls = []
@@ -10955,3 +10985,1021 @@ assert "docs/superpowers" not in readme, "plan paths stay out of shipped assets"
 assert "02's" not in readme, "plan numbers stay out of shipped assets"
 print("ok downloads documented")
 
+# F2: Multi-unit symbols split across sheets preserve net membership, proven pins, and project net diff.
+def test_f2_cross_sheet_multi_unit():
+    from kicad_review import candidate_identity_valid, electrical_changes, net_members, schematic_pin_ids
+    base_net = (
+        "(export"
+        " (components (comp (ref U1) (libsource (lib Device) (part Dual)))"
+        "  (comp (ref R1) (libsource (lib Device) (part R))))"
+        " (libparts (libpart (lib Device) (part Dual) (pins (pin (num 1)) (pin (num 2)) (pin (num 3))))"
+        "  (libpart (lib Device) (part R) (pins (pin (num 1)) (pin (num 2)))))"
+        " (nets (net (name SIG) (node (ref U1) (pin 1)) (node (ref R1) (pin 1)))"
+        "  (net (name VCC) (node (ref U1) (pin 2)))))"
+    )
+    head_net = base_net.replace("(node (ref R1) (pin 1))", "(node (ref R1) (pin 2))")
+    root_sch = (
+        '(kicad_sch (uuid root-uuid)'
+        ' (symbol (lib_id "Device:Dual") (uuid ua) (unit 1) (at 10 20 0) (property "Reference" "U1"))'
+        ' (symbol (lib_id "Device:R") (uuid r1) (unit 1) (at 30 20 0) (property "Reference" "R1"))'
+        ' (sheet (at 50 50) (size 10 10) (uuid power-sheet)'
+        '  (property "Sheetname" "power") (property "Sheetfile" "power.kicad_sch")))'
+    )
+    power_sch = (
+        '(kicad_sch (uuid power-uuid)'
+        ' (symbol (lib_id "Device:Dual") (uuid ub) (unit 2) (at 15 25 0) (property "Reference" "U1")))'
+    )
+
+    with tempfile.TemporaryDirectory() as td:
+        old = os.getcwd()
+        os.chdir(td)
+        try:
+            p = {"dir": "p", "name": "p"}
+            out = pathlib.Path("review/p")
+            for side, net_text, pad_net in (("base", base_net, ""), ("head", head_net, "VCC")):
+                write(side, {
+                    "p/p.kicad_sch": root_sch,
+                    "p/power.kicad_sch": power_sch,
+                    "p/p.kicad_pcb": br03_pcb("fp", [("pad", "3", 0, pad_net)]).replace('"D1"', '"U1"'),
+                })
+                write(str(out / side), {"netlist.net": net_text})
+            write(str(out), {"copper-diff.json": json.dumps({"rows": [], "incomplete": []})})
+            sch_objs = kr.sch_objects("base/p", "p")
+            nets, anchors, issues = net_members(base_net, sch_objs, "a" * 40)
+            assert nets == {"SIG": {"U1.1", "R1.1"}, "VCC": {"U1.2"}} and not issues, (nets, issues)
+            assert [(a["unit"], a["sheet"], a["uuid"]) for a in anchors["U1.1"]] == [
+                ("1", "/", "ua"),
+                ("2", "/power-sheet/", "ub"),
+            ], anchors["U1.1"]
+            assert schematic_pin_ids(base_net, sch_objs) == {"U1.1", "U1.2", "U1.3", "R1.1", "R1.2"}
+
+            objs = {
+                side: {**kr.pcb_objects(pathlib.Path(side, "p/p.kicad_pcb")), **kr.sch_objects(f"{side}/p", "p")}
+                for side in ("base", "head")
+            }
+            rows, issues = electrical_changes(p, str(out), objs, {"base": "b" * 40, "head": "h" * 40})
+            assert not issues, issues
+            net_rows = [r for r in rows if r["kind"] == "net-members"]
+            assert len(net_rows) == 1 and net_rows[0]["ref"] == "SIG", net_rows
+            assert net_rows[0]["detail"]["added"] == ["R1.2"] and net_rows[0]["detail"]["removed"] == ["R1.1"]
+            pad_rows = [r for r in rows if r["kind"] == "board-pad-net"]
+            assert len(pad_rows) == 1 and pad_rows[0]["detail"]["boardOnly"] is True, pad_rows
+        finally:
+            os.chdir(old)
+
+    # Duplicate unit numbers across different sheets remain ambiguous.
+    dup_cross_sheet = {"/logic/ua": obj("U1", "1", "/logic/"), "/power/ub": obj("U1", "1", "/power/")}
+    dup_nets, dup_anchors, dup_issues = net_members(base_net, dup_cross_sheet, "a" * 40)
+    assert dup_nets == {"SIG": None, "VCC": None} and not dup_anchors, (dup_nets, dup_anchors)
+    assert all(i["unknown"] for i in dup_issues) and len(dup_issues) == 2, dup_issues
+    assert schematic_pin_ids(base_net, dup_cross_sheet) == set()
+
+    # Shared candidate_identity_valid predicate handles both symbol objects and (uid, obj) tuples.
+    assert candidate_identity_valid([]) is False
+    assert candidate_identity_valid([obj("U1", "1", "/")]) is True
+    assert candidate_identity_valid([("ua", obj("U1", "1", "/"))]) is True
+    assert candidate_identity_valid([obj("U1", "1", None)]) is False
+    assert candidate_identity_valid([("ua", obj("U1", "1", None))]) is False
+    assert candidate_identity_valid([obj("U1", "1", "/"), obj("U1", "2", "/power/")]) is True
+    assert candidate_identity_valid([("ua", obj("U1", "1", "/")), ("ub", obj("U1", "2", "/power/"))]) is True
+    assert candidate_identity_valid([obj("U1", "1", "/"), obj("U1", "1", "/power/")]) is False
+    assert candidate_identity_valid([("ua", obj("U1", "1", "/")), ("ub", obj("U1", "1", "/power/"))]) is False
+
+
+test_f2_cross_sheet_multi_unit()
+print("ok F2 cross-sheet multi-unit net comparison")
+
+
+# F3: Malformed S-expressions raise ValueError, and validate_netlist delegates balance/root checking to parse_sexpr.
+def test_f3_malformed_sexpr():
+    import inspect
+    from kicad_review import parse_sexpr, validate_netlist, export_netlist, electrical_changes
+
+    bad_sexprs = [
+        "",
+        "   \n\t  ",
+        "atom",
+        '"quoted"',
+        ")",
+        "(()",
+        "(kicad_pcb",
+        "(kicad_pcb))",
+        "(kicad_pcb) (extra)",
+        "(kicad_pcb) trailing",
+        "leading (kicad_pcb)",
+        '(kicad_pcb "unterminated)',
+        '(kicad_pcb "unterminated\\")',
+        '(kicad_pcb (setup (stackup "unclosed)',
+    ]
+    for text in bad_sexprs:
+        try:
+            parse_sexpr(text)
+            raise AssertionError(f"F3 malformed S-expression accepted: {text!r}")
+        except ValueError:
+            pass
+
+    assert parse_sexpr(' \n (kicad_pcb (layers (0 "F.Cu" signal)) (paper "A4 \\"x\\"\\n")) \t ') == [
+        "kicad_pcb",
+        ["layers", ["0", "F.Cu", "signal"]],
+        ["paper", 'A4 "x"\n'],
+    ]
+
+    # validate_netlist uses parse_sexpr for S-expression balance/root checking without a duplicated character scanner.
+    src = inspect.getsource(validate_netlist)
+    assert "for index, char in enumerate" not in src, "duplicated balance scanner still in validate_netlist"
+
+    for text in bad_sexprs:
+        try:
+            validate_netlist(text)
+            raise AssertionError(f"F3 malformed netlist accepted: {text!r}")
+        except ValueError:
+            pass
+
+    # Callers that handle parse failures record incomplete evidence instead of crashing on malformed S-expressions.
+    with tempfile.TemporaryDirectory() as td:
+        old = os.getcwd()
+        os.chdir(td)
+        try:
+            def truncated_netlist(cmd, **kw):
+                pathlib.Path(cmd[cmd.index("-o") + 1]).write_text("(export (nets", encoding="utf-8")
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+            with patch("kicad_review.subprocess.run", side_effect=truncated_netlist), \
+                 _contextlib.redirect_stderr(io.StringIO()):
+                export_netlist("p.kicad_sch", "review/p/base")
+            assert pathlib.Path("review/p/base/netlist.net.error").is_file()
+            assert not pathlib.Path("review/p/base/netlist.net").exists()
+
+            p = {"dir": "p", "name": "p"}
+            write("base", {"p/p.kicad_sch": "(kicad_sch", "p/p.kicad_pcb": "(kicad_pcb"})
+            write("head", {"p/p.kicad_sch": "(kicad_sch)", "p/p.kicad_pcb": '(kicad_pcb (setup (stackup (layer "F.Cu"))))'})
+            write("review/p/base", {"netlist.net": "(export (nets"})
+            write("review/p/head", {"netlist.net": "(export (nets))"})
+            write("review/p", {"copper-diff.json": json.dumps({"rows": [], "incomplete": []})})
+            rows, issues = electrical_changes(p, "review/p", {"base": {}, "head": {}}, {"base": "b" * 40, "head": "h" * 40})
+            assert not [r for r in rows if r["kind"] in ("rule", "stackup", "board-pad-net")], rows
+            assert any(i["channel"] == "wiring" and i["document"] == "schematic" and "base netlist unavailable" in i["reason"] for i in issues), issues
+            assert any(i["channel"] == "wiring" and i["document"] == "board" and i["reason"] == "Board pad evidence missing or malformed: malformed S-expression" for i in issues), issues
+            assert any(i["channel"] == "rules" and i["document"] == "board" and i["reason"] == "Rules evidence missing or malformed: malformed S-expression" for i in issues), issues
+
+            # Logic bugs in diff_board_pins and diff_rules are not swallowed as malformed evidence
+            write("base", {"p/p.kicad_pcb": '(kicad_pcb (layers (0 "F.Cu" signal)))'})
+            try:
+                with patch("kicad_review.diff_board_pins", side_effect=TypeError("diff_board_pins logic bug")):
+                    electrical_changes(p, "review/p", {"base": {}, "head": {}}, {"base": "b" * 40, "head": "h" * 40})
+                raise AssertionError("diff_board_pins logic bug was swallowed")
+            except TypeError as exc:
+                assert str(exc) == "diff_board_pins logic bug"
+
+            try:
+                with patch("kicad_review.diff_rules", side_effect=TypeError("diff_rules logic bug")):
+                    electrical_changes(p, "review/p", {"base": {}, "head": {}}, {"base": "b" * 40, "head": "h" * 40})
+                raise AssertionError("diff_rules logic bug was swallowed")
+            except TypeError as exc:
+                assert str(exc) == "diff_rules logic bug"
+
+            settings = kr.load_settings()
+            settings["checks"]["interfaces"] = "required"
+            ic = kr.interface_check(p, settings, {"base": {}, "head": {}}, "review/p")
+            assert ic["status"] == "not_run" and ic["incomplete"] is True and "base netlist unavailable" in ic["reason"], ic
+
+            cache = pathlib.Path(td, "cache")
+            cache.mkdir(parents=True, exist_ok=True)
+            (cache / ".complete").write_text("{}", encoding="utf-8")
+            with patch.object(kr, "IMAGE_RENDERER", "kicad-cli-10.0.6"):
+                assert kr.image_cache_complete(cache, p, "base") is False
+
+            # Direct board_layers call on malformed PCB surfaces ValueError (finding 3) instead of IndexError
+            bad_pcb = pathlib.Path(td, "bad.kicad_pcb")
+            bad_pcb.write_text("(kicad_pcb\n  (layers\n", encoding="utf-8")
+            try:
+                kr.board_layers(str(bad_pcb))
+                raise AssertionError("malformed PCB accepted by board_layers")
+            except ValueError as exc:
+                assert "malformed S-expression" in str(exc)
+
+            # Malformed PCB records incomplete evidence and warning; refused as cacheable
+            p_bad = {"dir": "p_bad", "name": "bad"}
+            write("base", {"p_bad/bad.kicad_pcb": "(kicad_pcb\n  (layers\n"})
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                bad_ident = kr.image_export_identity(p_bad, "base")
+            assert bad_ident.get("incomplete") is not None
+            assert "Board layers unavailable: malformed S-expression" in bad_ident["incomplete"]
+            assert bad_ident["layers"] is None
+            assert "bad: malformed board file in base; layer evidence unavailable" in err.getvalue()
+
+            # Warning deduplication on subsequent calls
+            err2 = io.StringIO()
+            with contextlib.redirect_stderr(err2):
+                kr.image_export_identity(p_bad, "base")
+            assert err2.getvalue() == ""
+
+            det_bad = {"base": "a" * 40, "head": "b" * 40, "projects": [p_bad]}
+            assert kr.render_cache(p_bad, "base", det_bad, settings) is None
+            assert kr.image_cache_complete(cache, p_bad, "base") is False
+            assert kr.render_cache_complete(cache, p_bad, "base", settings) is False
+
+            # render_side on a malformed PCB warns with the file name and skips only the board drawing.
+            write("head", {"p_bad/bad.kicad_pcb": "(kicad_pcb (layers (0 \"F.Cu\" signal))"})
+            err = io.StringIO()
+            with patch.object(kr, "kicad_cli") as cli, patch.object(kr, "export_board_stats", return_value=None), \
+                 contextlib.redirect_stderr(err):
+                kr.render_side("head/p_bad", "bad", str(pathlib.Path(td, "render_bad")))
+            calls = [c.args for c in cli.call_args_list]
+            assert not any(c[0] == "pcb" for c in calls), calls
+            assert "::warning::head/p_bad/bad.kicad_pcb: malformed board file; board drawing not rendered" in err.getvalue(), err.getvalue()
+            assert all(line.startswith("::warning::") for line in err.getvalue().splitlines()), err.getvalue()
+            assert "malformed board file" in pathlib.Path(td, "render_bad", "drc.json.error").read_text(encoding="utf-8")
+            assert not pathlib.Path(td, "render_bad", "drc.json").exists()
+
+            # A failing kicad-cli (real kicad_cli exit path) must not end rendering for a malformed board.
+            pcb_runs = []
+            def failing_run(cmd, *a, **kw):
+                if cmd[:2] == ["kicad-cli", "pcb"]:
+                    pcb_runs.append(cmd)
+                return subprocess.CompletedProcess(cmd, 1, "", "parse error")
+            err = io.StringIO()
+            with patch.object(kr.subprocess, "run", side_effect=failing_run), contextlib.redirect_stderr(err):
+                try:
+                    kr.render_side("head/p_bad", "bad", str(pathlib.Path(td, "render_bad_cli")))
+                except SystemExit as exc:
+                    raise AssertionError(f"malformed board ended rendering: {exc}")
+            assert pcb_runs == [], pcb_runs
+            assert pathlib.Path(td, "render_bad_cli", "drc.json.error").is_file()
+
+            # cache_renders does not persist incomplete identity for malformed PCB
+            write("review", {"detect.json": json.dumps(det_bad)})
+            out_bad = pathlib.Path("review/p_bad/base")
+            out_bad.mkdir(parents=True, exist_ok=True)
+            # Force a real cache path so the incomplete-identity guard inside cache_renders is what decides.
+            bad_cache = pathlib.Path(".render-cache", "a" * 40, kr.project_id(p_bad["dir"]), "forced")
+            with patch.object(kr, "load_settings", return_value=settings), \
+                 patch.object(kr, "render_cache", return_value=bad_cache):
+                kr.cache_renders()
+            assert not bad_cache.exists() and not list(pathlib.Path(".render-cache").rglob(".complete")), \
+                list(pathlib.Path(".render-cache").rglob("*"))
+        finally:
+            os.chdir(old)
+
+
+test_f3_malformed_sexpr()
+print("ok F3 malformed S-expressions raise ValueError")
+
+
+# F4: Cache correctness for render and release products (findings 4, 7, 10).
+def test_f4_render_and_release_cache():
+    import copy, json, os, pathlib, tempfile, zipfile
+    from unittest.mock import patch
+    import kicad_review as kr
+
+    old = os.getcwd()
+    with tempfile.TemporaryDirectory() as td, patch.object(kr, "IMAGE_RENDERER", "verified-10.0.6"):
+        os.chdir(td)
+        try:
+            prj = {"dir": "p", "name": "P", "status": "modified"}
+            det = {"base": "a" * 40, "head": "b" * 40, "projects": [prj]}
+            for side in ("base", "head"):
+                src = pathlib.Path(side, "p")
+                src.mkdir(parents=True)
+                (src / "P.kicad_pro").write_text("{}", encoding="utf-8")
+                (src / "P.kicad_sch").write_text("(kicad_sch)", encoding="utf-8")
+                (src / "P.kicad_pcb").write_text('(kicad_pcb (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user)))', encoding="utf-8")
+
+            def seed_cache(side="head"):
+                c = pathlib.Path(td, f"cache-{side}")
+                if c.exists():
+                    shutil.rmtree(c)
+                c.mkdir(parents=True)
+                (c / ".complete").write_text(json.dumps(kr.image_export_identity(prj, side), sort_keys=True), encoding="utf-8")
+                return c
+
+            def seed_fab_package(fab_dir, preset="jlcpcb"):
+                fab_dir = pathlib.Path(fab_dir)
+                fab_dir.mkdir(parents=True, exist_ok=True)
+                stem = fab_dir / f"P-review-{preset}"
+                with zipfile.ZipFile(f"{stem}-gerbers.zip", "w") as z:
+                    z.writestr("P-F_Cu.gtl", "G04*\n")
+                    z.writestr("P-B_Cu.gbl", "G04*\n")
+                    z.writestr("P.drl", "M48\n")
+                pathlib.Path(f"{stem}-positions.csv").write_text(
+                    "Designator,Val,Package,Mid X,Mid Y,Rotation,Layer\nR1,10k,R_0603,10,20,90,Top\n", encoding="utf-8")
+                pathlib.Path(f"{stem}-bom.csv").write_text(
+                    ",".join(label for _, label in kr.PRESETS[preset]["bom"]) + "\n", encoding="utf-8")
+
+            # Finding 4a: 3D viewer enabled requires nonempty board.glb as well as board.raw.glb when no .failed marker exists.
+            s3d = copy.deepcopy(kr.DEFAULT_SETTINGS)
+            s3d["3d"]["enabled"] = True
+            c3d = seed_cache("head")
+            (c3d / "board.raw.glb").write_bytes(b"glTF-raw")
+            (c3d / "poster.png").write_bytes(br02_png())
+            assert not kr.render_cache_complete(c3d, prj, "head", s3d), "missing board.glb must invalidate 3D cache"
+            (c3d / "board.glb").write_bytes(b"")
+            assert not kr.render_cache_complete(c3d, prj, "head", s3d), "empty board.glb must invalidate 3D cache"
+            (c3d / "board.glb").write_bytes(b"glTF-viewer")
+            assert kr.render_cache_complete(c3d, prj, "head", s3d), "nonempty board.raw.glb + board.glb + poster accepted"
+            (c3d / "board.raw.glb").unlink()
+            (c3d / "board.glb").unlink()
+            (c3d / "board.raw.glb.failed").write_text("failed", encoding="utf-8")
+            assert kr.render_cache_complete(c3d, prj, "head", s3d), "raw export failure marker accepted without board.glb"
+
+            # Finding 4b: Fabrication-limit checks enabled requires parseable fab-limits.json with vendor sections.
+            sfab = copy.deepcopy(kr.DEFAULT_SETTINGS)
+            sfab["fabrication"]["check_limits"] = True
+            sfab["checks"]["fab_limits"] = "required"
+            cfab = seed_cache("head")
+            assert not kr.render_cache_complete(cfab, prj, "head", sfab), "missing fab-limits.json must invalidate cache"
+            (cfab / "fab-limits.json").write_text("{malformed", encoding="utf-8")
+            assert not kr.render_cache_complete(cfab, prj, "head", sfab), "malformed fab-limits.json must invalidate cache"
+            (cfab / "fab-limits.json").write_text(json.dumps({"sections": [{"vendor": "jlcpcb"}]}), encoding="utf-8")
+            assert not kr.render_cache_complete(cfab, prj, "head", sfab), "incomplete vendor sections must invalidate cache"
+            (cfab / "fab-limits.json").write_text(json.dumps({"sections": [{"vendor": "jlcpcb"}, {"vendor": "pcbway"}]}), encoding="utf-8")
+            assert kr.render_cache_complete(cfab, prj, "head", sfab), "valid fab-limits.json with both vendors accepted"
+            # Absent board revision accepts empty sections list
+            pathlib.Path("base/p/P.kicad_pcb").unlink()
+            cbase = seed_cache("base")
+            (cbase / "fab-limits.json").write_text(json.dumps({"sections": [], "reason": "no base board"}), encoding="utf-8")
+            assert kr.render_cache_complete(cbase, prj, "base", sfab), "absent board fab-limits.json accepted"
+            pathlib.Path("base/p/P.kicad_pcb").write_text('(kicad_pcb (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user)))', encoding="utf-8")
+            assert not kr.render_cache_complete(cbase, prj, "base", sfab), "present board rejects empty sections"
+
+            # Finding 7: Transient release-export failures are not cached as complete and retry only missing release products.
+            srel = copy.deepcopy(kr.DEFAULT_SETTINGS)
+            srel["checks"]["release"] = "informational"
+            crel = seed_cache("head")
+            assert not kr.render_cache_complete(crel, prj, "head", srel), "missing fab/ package must invalidate release cache"
+            seed_fab_package(crel / "fab", "jlcpcb")
+            assert kr.render_cache_complete(crel, prj, "head", srel), "valid fab/ package accepted in release cache"
+
+            pathlib.Path("review").mkdir(exist_ok=True)
+            pathlib.Path("review/detect.json").write_text(json.dumps(det), encoding="utf-8")
+            render_side_calls = []
+            release_calls = []
+            download_calls = []
+            fail_head_once = {"failed": False}
+
+            def fake_release(pro_path, tag, settings, out_dir, label):
+                release_calls.append((pro_path, out_dir, settings["fabrication"]["preset"]))
+                if pro_path.startswith("head/") and not fail_head_once["failed"]:
+                    fail_head_once["failed"] = True
+                    raise OSError("transient release failure")
+                seed_fab_package(out_dir, settings["fabrication"]["preset"])
+                return []
+
+            with patch.object(kr, "load_settings", return_value=srel), \
+                 patch.object(kr, "render_tool_identity", return_value="KiCad 10.0.6"), \
+                 patch.object(kr, "render_side", side_effect=lambda src, name, out, **kw: render_side_calls.append((src, out))), \
+                 patch.object(kr, "release_project", side_effect=fake_release), \
+                 patch.object(kr, "export_downloads", side_effect=lambda *a: download_calls.append(a[2])):
+                kr.cmd_render(None)
+                base_cache = kr.render_cache(prj, "base", det, srel)
+                head_cache = kr.render_cache(prj, "head", det, srel)
+                assert kr.render_cache_complete(base_cache, prj, "base", srel), "base release succeeded and is complete"
+                assert not kr.render_cache_complete(head_cache, prj, "head", srel), "transient head release failure must not be cached as complete"
+                assert len(render_side_calls) == 2
+
+                # Next identical run: base is a full cache hit; head reuses cached non-release outputs and retries only release + downloads.
+                kr.cmd_render(None)
+                assert len(render_side_calls) == 2, f"render_side should not re-run when only release is missing: {render_side_calls}"
+                assert [c[0] for c in release_calls] == [
+                    "base/p/P.kicad_pro", "head/p/P.kicad_pro", "head/p/P.kicad_pro"
+                ], release_calls
+                assert len(download_calls) == 2
+                assert kr.render_cache_complete(head_cache, prj, "head", srel), "retried head release is now cached as complete"
+
+                # Third identical run: full cache hit on both sides, nothing runs.
+                kr.cmd_render(None)
+                assert len(render_side_calls) == 2 and len(release_calls) == 3 and len(download_calls) == 2
+
+                # Direct unit test: restore_renders clears stale review/<p>/<side>/fab before copying cache
+                stale_restore_fab = pathlib.Path("review/p/head/fab/stale-restore.txt")
+                stale_restore_fab.parent.mkdir(parents=True, exist_ok=True)
+                stale_restore_fab.write_text("stale-restore", encoding="utf-8")
+                assert stale_restore_fab.is_file()
+                kr.restore_renders(None)
+                assert not stale_restore_fab.exists(), "restore_renders must remove stale review/<p>/<side>/fab"
+                assert (pathlib.Path("review/p/head/fab/P-review-jlcpcb-positions.csv")).is_file(), "restore_renders copies cached fab"
+
+                # Direct unit test: cache_renders rmtree removes stale files from an existing cache directory
+                stale_cache_file = head_cache / "stale-cache-leftover.txt"
+                stale_cache_file.write_text("stale-cache", encoding="utf-8")
+                assert stale_cache_file.is_file()
+                assert not (pathlib.Path("review/p/head") / "stale-cache-leftover.txt").exists()
+                kr.cache_renders(None)
+                assert not stale_cache_file.exists(), "cache_renders must rmtree existing cache directory so stale files are removed"
+                assert (head_cache / ".complete").is_file()
+
+                # Direct unit test: cmd_render partial-hit path clears stale fab and skips render_side
+                shutil.rmtree(head_cache / "fab")
+                assert not kr.render_cache_complete(head_cache, prj, "head", srel), "missing fab invalidates full cache"
+                assert kr.render_cache_complete(head_cache, prj, "head", srel, check_release=False), "non-release cache is complete"
+                stale_partial_fab = pathlib.Path("review/p/head/fab/stale-partial.txt")
+                stale_partial_fab.parent.mkdir(parents=True, exist_ok=True)
+                stale_partial_fab.write_text("stale-partial", encoding="utf-8")
+                render_side_calls.clear()
+                release_calls.clear()
+                download_calls.clear()
+                kr.cmd_render(None)
+                assert len(render_side_calls) == 0, f"partial-hit path must not call render_side: {render_side_calls}"
+                assert [c[0] for c in release_calls] == ["head/p/P.kicad_pro"], f"only head release was retried: {release_calls}"
+                assert not stale_partial_fab.exists(), "cmd_render partial-hit must clear stale fab directory before release rebuild"
+                assert kr.render_cache_complete(head_cache, prj, "head", srel), "head cache is complete after partial-hit release rebuild"
+
+            # Finding 10: Re-running with another fabrication preset clears stale package files in fab/.
+            spcbway = copy.deepcopy(srel)
+            spcbway["fabrication"]["preset"] = "pcbway"
+            pcbway_cached_files = {}
+            with patch.object(kr, "load_settings", return_value=spcbway), \
+                 patch.object(kr, "render_tool_identity", return_value="KiCad 10.0.6"), \
+                 patch.object(kr, "render_side"), \
+                 patch.object(kr, "release_project", side_effect=fake_release), \
+                 patch.object(kr, "export_downloads"):
+                kr.cmd_render(None)
+                for side in ("base", "head"):
+                    summary = kr.package_summary(f"review/p/{side}/fab")
+                    paths = [f["path"] for f in summary["files"]]
+                    assert paths and all("pcbway" in name and "jlcpcb" not in name for name in paths), (side, paths)
+                    cached_fab = kr.render_cache(prj, side, det, spcbway) / "fab"
+                    cached_names = sorted(f.name for f in cached_fab.iterdir())
+                    assert cached_names and all("pcbway" in name and "jlcpcb" not in name for name in cached_names), (side, cached_names)
+                    pcbway_cached_files[side] = cached_names
+
+            # Re-running with checks.release off clears stale package files from review.
+            sreloff = copy.deepcopy(spcbway)
+            sreloff["checks"]["release"] = "off"
+            with patch.object(kr, "load_settings", return_value=sreloff), \
+                 patch.object(kr, "render_tool_identity", return_value="KiCad 10.0.6"), \
+                 patch.object(kr, "render_side"), \
+                 patch.object(kr, "export_downloads"):
+                kr.cmd_render(None)
+                for side in ("base", "head"):
+                    assert not pathlib.Path(f"review/p/{side}/fab").exists(), f"stale fab/ must be removed when release check is off on {side}"
+                    # Assert on the pcbway-keyed cache dir: prior pcbway cache fab directory exists and file names match earlier run.
+                    cached_pcbway_fab = kr.render_cache(prj, side, det, spcbway) / "fab"
+                    assert cached_pcbway_fab.is_dir(), f"pcbway-keyed cache fab directory should exist on {side}"
+                    assert sorted(f.name for f in cached_pcbway_fab.iterdir()) == pcbway_cached_files[side], (
+                        f"pcbway-keyed cache fab file names on {side} should match earlier pcbway run"
+                    )
+
+            # Missing-project .kicad_pro branch: with release on and no .kicad_pro, stale fab/ is removed.
+            snopro = copy.deepcopy(srel)
+            shutil.rmtree(".render-cache", ignore_errors=True)
+            for side in ("base", "head"):
+                stale_fab = pathlib.Path(f"review/p/{side}/fab")
+                stale_fab.mkdir(parents=True, exist_ok=True)
+                (stale_fab / "stale.txt").write_text("stale", encoding="utf-8")
+                assert (stale_fab / "stale.txt").is_file()
+                pathlib.Path(f"{side}/p/P.kicad_pro").unlink(missing_ok=True)
+
+            with patch.object(kr, "load_settings", return_value=snopro), \
+                 patch.object(kr, "render_tool_identity", return_value="KiCad 10.0.6"), \
+                 patch.object(kr, "render_side"), \
+                 patch.object(kr, "export_downloads"):
+                kr.cmd_render(None)
+                for side in ("base", "head"):
+                    assert not pathlib.Path(f"review/p/{side}/fab").exists(), f"stale fab/ must be removed when project file is missing on {side}"
+        finally:
+            os.chdir(old)
+
+
+test_f4_render_and_release_cache()
+print("ok F4 render and release cache completeness and preset cleanup")
+
+
+def test_f5_optional_evidence_survives_bad_project_json_and_hotspot_errors():
+    import contextlib
+    import io
+    import os
+    import pathlib
+    import tempfile
+
+    def put(root, files):
+        for rel, text in files.items():
+            path = pathlib.Path(root, rel)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+
+    bad_projects = ["[]", "null", '{"board": []}', '{"board": {"design_settings": []}}', '{"net_settings": []}',
+                    '{"board": {"design_settings": 5}}']
+    with tempfile.TemporaryDirectory() as td:
+        old = os.getcwd()
+        os.chdir(td)
+        try:
+            # Finding 5: valid JSON of the wrong shape marks only project rules unavailable.
+            for bad in bad_projects:
+                put("bad", {"p/p.kicad_pro": bad})
+                try:
+                    values = kr.rule_values("bad/p", "p")
+                except Exception as exc:
+                    raise AssertionError(f"rule_values crashed on {bad}: {exc!r}")
+                assert values.get("_unavailable", "").startswith("Project rules unavailable"), (bad, values)
+                try:
+                    kr.pro_objects("bad/p/p.kicad_pro")
+                except ValueError:
+                    pass  # project_objects records unreadable evidence for ValueError
+                else:
+                    raise AssertionError(f"expected ValueError from pro_objects for bad shape {bad}")
+            put("bad", {"p/p.kicad_pro": '{"board": {"design_settings": {"rules": {"min_clearance": 0.2}}}}'})
+            assert kr.rule_values("bad/p", "p") == {"rules.min_clearance": 0.2}
+            put("bad", {"p/p.kicad_pro": '{"board": null, "net_settings": null}'})
+            assert kr.rule_values("bad/p", "p") == {}
+
+            # A non-object project file never poisons project_objects either.
+            issues = []
+            put("bad", {"p/p.kicad_pro": "[]", "p/p.kicad_sch": "(kicad_sch (uuid root))"})
+            with contextlib.redirect_stderr(io.StringIO()):
+                kr.project_objects("bad/p", "p", issues)
+            assert any(i.get("unknownMeta") == "meta:pro" for i in issues), issues
+
+            # electrical_changes keeps the independent .kicad_dru and stackup diffs.
+            p = {"dir": "p", "name": "p"}
+            for side, thickness, dru in (("base", ".2", "(version 1)\n"),
+                                         ("head", ".3", '(version 1)\n(rule "r" (constraint clearance (min 0.3mm)))\n')):
+                put(side, {"p/p.kicad_pro": "[]", "p/p.kicad_dru": dru,
+                           "p/p.kicad_pcb": f'(kicad_pcb (setup (stackup (layer "d" (thickness {thickness})))))'})
+            put("review/p", {"copper-diff.json": json.dumps({"rows": [], "incomplete": []})})
+            rows, issues = kr.electrical_changes(p, "review/p", {"base": {}, "head": {}},
+                                                 {"base": "b" * 40, "head": "h" * 40})
+            refs = {r["ref"] for r in rows}
+            assert {"custom rules", "stackup"} <= refs, refs
+            assert any(r["detail"].get("kind") == "unavailable" for r in rows), rows
+            assert not [i for i in issues if i["channel"] == "rules"], issues
+
+            # Finding 6: a symbol-geometry error keeps the symbol, with a warning.
+            cycle_sch = ('(kicad_sch (uuid root) (lib_symbols (symbol "L:A" (extends "B")) (symbol "L:B" (extends "A")))'
+                         ' (symbol (uuid s1) (lib_id "L:A") (at 10 10 0) (property "Reference" "U1")))')
+            put("hot", {"Board.kicad_sch": cycle_sch})
+            m = kr.sheet_hotspots("hot", "Board")
+            assert [w["reason"] for w in m["warnings"]] == ["symbol geometry unavailable"], m["warnings"]
+            assert m["views"][0]["elements"][0]["confidence"] == "approximate"
+
+            # ... and a hotspot failure in build_project keeps the schematic SVGs.
+            for side in ("base", "head"):
+                put(side, {"H/H.kicad_sch": "(kicad_sch (uuid root))"})
+                put(f"review/H/{side}", {"erc.json": '{"sheets": []}',
+                                         "sch/H.svg": '<svg viewBox="0 0 320 213"><path d="M10 10H310"/></svg>'})
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), \
+                 patch.object(kr, "sheet_hotspots", side_effect=ValueError("recursive schematic hierarchy")):
+                report = kr.build_project({"dir": "H", "name": "H", "status": "modified"}, {}, kr.DEFAULT_SETTINGS)
+            root_page = next(pg for pg in report["sheets"] if pg["path"] == "/")
+            assert root_page["svg"]["base"] and root_page["svg"]["head"], root_page
+            assert root_page["hotspots"] == {"base": None, "head": None}, root_page["hotspots"]
+            assert "::warning::" in err.getvalue() and "hotspots unavailable" in err.getvalue(), err.getvalue()
+        finally:
+            os.chdir(old)
+
+
+test_f5_optional_evidence_survives_bad_project_json_and_hotspot_errors()
+print("ok F5 optional evidence survives bad project JSON and hotspot errors")
+
+
+def test_f6_downloads_guards_and_fab_tempdir_leak():
+    old = os.getcwd()
+    with tempfile.TemporaryDirectory() as root:
+        os.chdir(root)
+        try:
+            # 1. Finding 8: Schematic-only project with downloads enabled must NOT call export_glb or write glb failure markers.
+            det_sch = {
+                "base": "a" * 40, "head": "b" * 40, "reason": "t",
+                "projects": [{"dir": "sch_prj", "name": "S", "status": "modified"}]
+            }
+            pathlib.Path("review").mkdir(parents=True, exist_ok=True)
+            pathlib.Path("review/detect.json").write_text(json.dumps(det_sch), encoding="utf-8")
+            pathlib.Path("base/sch_prj").mkdir(parents=True, exist_ok=True)
+            pathlib.Path("head/sch_prj").mkdir(parents=True, exist_ok=True)
+            pathlib.Path("base/sch_prj/S.kicad_sch").write_text("(kicad_sch (uuid s-base))", encoding="utf-8")
+            pathlib.Path("head/sch_prj/S.kicad_sch").write_text("(kicad_sch (uuid s-head))", encoding="utf-8")
+
+            s_dl = copy.deepcopy(kr.DEFAULT_SETTINGS)
+            s_dl["downloads"]["enabled"] = True
+            s_dl["3d"]["enabled"] = False
+
+            glb_calls = []
+            with patch.object(kr, "load_settings", return_value=s_dl), \
+                 patch.object(kr, "render_tool_identity", return_value="KiCad 10.0.6"), \
+                 patch.object(kr, "render_side"), \
+                 patch.object(kr, "export_downloads"), \
+                 patch.object(kr, "export_glb", side_effect=lambda p, side, out, **kw: glb_calls.append((side, kw))):
+                kr.cmd_render(None)
+
+            assert len(glb_calls) == 0, f"schematic-only project must not invoke export_glb: {glb_calls}"
+            assert not pathlib.Path("review/sch_prj/head/board.raw.glb.failed").exists()
+            assert not pathlib.Path("review/sch_prj/head/glb.log").exists()
+
+            # 2. Finding 8: Board project with downloads and 3D enabled on byte-identical revisions reuses base 3D artifacts without a second export_glb.
+            det_3d = {
+                "base": "a" * 40, "head": "b" * 40, "reason": "t",
+                "projects": [{"dir": "pcb_prj", "name": "B", "status": "modified"}]
+            }
+            pathlib.Path("review/detect.json").write_text(json.dumps(det_3d), encoding="utf-8")
+            pathlib.Path("base/pcb_prj").mkdir(parents=True, exist_ok=True)
+            pathlib.Path("head/pcb_prj").mkdir(parents=True, exist_ok=True)
+            pcb_content = '(kicad_pcb (version 20240108) (generator kicad-review))'
+            pathlib.Path("base/pcb_prj/B.kicad_pcb").write_text(pcb_content, encoding="utf-8")
+            pathlib.Path("head/pcb_prj/B.kicad_pcb").write_text(pcb_content, encoding="utf-8")
+
+            s_3d_dl = copy.deepcopy(kr.DEFAULT_SETTINGS)
+            s_3d_dl["downloads"]["enabled"] = True
+            s_3d_dl["3d"]["enabled"] = True
+
+            glb_calls_3d = []
+            def fake_export_glb(p, side, out, **kw):
+                glb_calls_3d.append((side, kw))
+                folder = pathlib.Path(out)
+                folder.mkdir(parents=True, exist_ok=True)
+                (folder / "board.raw.glb").write_bytes(b"glTF-raw-content")
+                (folder / "board.glb").write_bytes(b"glTF-viewer-content")
+                (folder / "poster.png").write_bytes(b"poster-png-content")
+
+            with patch.object(kr, "load_settings", return_value=s_3d_dl), \
+                 patch.object(kr, "render_tool_identity", return_value="KiCad 10.0.6"), \
+                 patch.object(kr, "render_side"), \
+                 patch.object(kr, "export_downloads"), \
+                 patch.object(kr, "export_glb", side_effect=fake_export_glb):
+                kr.cmd_render(None)
+
+            assert [side for side, kw in glb_calls_3d] == ["base"], f"head must reuse base 3D artifacts, not export twice: {glb_calls_3d}"
+            head_out = pathlib.Path("review/pcb_prj/head")
+            assert (head_out / "board.raw.glb").read_bytes() == b"glTF-raw-content"
+            assert (head_out / "board.glb").read_bytes() == b"glTF-viewer-content"
+            assert (head_out / "poster.png").read_bytes() == b"poster-png-content"
+
+            # Finding 8: Board project with downloads enabled, 3D viewer off, and shared revisions (e.g. design/still enabled).
+            # The "shared_3d and downloads enabled and not export_3d" branch must cause head to do its own raw-GLB export instead of copying base.
+            shutil.rmtree("review/pcb_prj", ignore_errors=True)
+            s_dl_no3d = copy.deepcopy(kr.DEFAULT_SETTINGS)
+            s_dl_no3d["downloads"]["enabled"] = True
+            s_dl_no3d["3d"]["enabled"] = False
+            s_dl_no3d.setdefault("design", {})["enabled"] = True
+
+            glb_calls_dl_no3d = []
+            with patch.object(kr, "load_settings", return_value=s_dl_no3d), \
+                 patch.object(kr, "render_tool_identity", return_value="KiCad 10.0.6"), \
+                 patch.object(kr, "render_side"), \
+                 patch.object(kr, "export_downloads"), \
+                 patch.object(kr, "export_glb", side_effect=lambda p, side, out, **kw: glb_calls_dl_no3d.append((side, kw))):
+                kr.cmd_render(None)
+
+            assert glb_calls_dl_no3d == [
+                ("base", {"model": False}),
+                ("head", {"model": True, "poster": True, "viewer": False}),
+            ], f"head must do its own raw-GLB export when shared_3d and downloads enabled and not export_3d: {glb_calls_dl_no3d}"
+
+            # 3. Finding 9: release_project cleans up temporary fabrication directory on success and on error.
+            pro_dir = pathlib.Path("fab_test")
+            pro_dir.mkdir(parents=True, exist_ok=True)
+            pro_path = pro_dir / "T.kicad_pro"
+            pro_path.write_text("{}", encoding="utf-8")
+            (pro_dir / "T.kicad_pcb").write_text('(kicad_pcb (version 20240108) (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user)))', encoding="utf-8")
+            fab_out = pathlib.Path("fab_out")
+            fab_out.mkdir(parents=True, exist_ok=True)
+
+            created_dirs = []
+            orig_tempdir = tempfile.TemporaryDirectory
+
+            class TrackingTempDir(orig_tempdir):
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    created_dirs.append(self.name)
+
+            def fake_kicad_cli(*args):
+                kind = args[2] if args[1] == "export" else args[1]
+                out_idx = args.index("-o") + 1
+                out_path = pathlib.Path(args[out_idx])
+                if kind == "gerbers":
+                    (out_path / "T-F_Cu.gbr").write_bytes(b"gerber")
+                elif kind == "drill":
+                    (out_path / "T.drl").write_bytes(b"drill")
+                elif kind == "pos":
+                    out_path.write_text("Designator,Val,Package,Mid X,Mid Y,Rotation,Side\nR1,10k,0603,0,0,0,top\n", encoding="utf-8")
+
+            with patch("tempfile.TemporaryDirectory", TrackingTempDir), \
+                 patch.object(kr, "kicad_cli", side_effect=fake_kicad_cli):
+                made = kr.release_project(str(pro_path), "v1", kr.DEFAULT_SETTINGS, str(fab_out), "T")
+                assert len(created_dirs) == 1, "release_project must use tempfile.TemporaryDirectory"
+                assert not os.path.exists(created_dirs[0]), f"temp dir {created_dirs[0]} leaked after success"
+                expected_made = [f"{fab_out}/T-v1-jlcpcb-gerbers.zip", f"{fab_out}/T-v1-jlcpcb-positions.csv"]
+                assert made == expected_made, f"unexpected release artifacts: {made} != {expected_made}"
+                for path in made:
+                    assert os.path.isfile(path), f"release artifact missing: {path}"
+                    assert os.path.getsize(path) > 0, f"release artifact empty: {path}"
+                with zipfile.ZipFile(made[0]) as z:
+                    assert sorted(z.namelist()) == ["T-F_Cu.gbr", "T.drl"]
+                with open(made[1], encoding="utf-8") as fh:
+                    assert "Designator" in fh.read()
+
+            # Failure during fabrication also cleans up the temp dir
+            created_dirs_err = []
+            class TrackingTempDirErr(orig_tempdir):
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    created_dirs_err.append(self.name)
+
+            def failing_kicad_cli(*args):
+                raise RuntimeError("simulated fabrication failure")
+
+            with patch("tempfile.TemporaryDirectory", TrackingTempDirErr), \
+                 patch.object(kr, "kicad_cli", side_effect=failing_kicad_cli):
+                try:
+                    kr.release_project(str(pro_path), "v1", kr.DEFAULT_SETTINGS, str(fab_out), "T")
+                except RuntimeError:
+                    pass
+                assert len(created_dirs_err) == 1
+                assert not os.path.exists(created_dirs_err[0]), f"temp dir {created_dirs_err[0]} leaked after error"
+
+        finally:
+            os.chdir(old)
+
+
+test_f6_downloads_guards_and_fab_tempdir_leak()
+print("ok F6 downloads guards and temp-dir leak")
+
+
+# F1: Sheetfile paths stay inside the revision; bad sheets warn instead of crashing.
+def test_f1_sheetfile_containment_and_hierarchy():
+    import contextlib, io
+    old = os.getcwd()
+    with TemporaryDirectory() as t:
+        os.chdir(t)
+        kr._sheet_warnings.clear()
+        try:
+            secret = '(kicad_sch (symbol (uuid "leak") (property "Reference" "SECRET")))'
+            write(t, {'base/P/private.kicad_sch': secret, 'outside.kicad_sch': secret,
+                      'head/Shared/common.kicad_sch': '(kicad_sch (symbol (uuid "c1") (property "Reference" "C1")))',
+                      'head/P/dir/keep.txt': ''})
+            os.symlink(f'{t}/outside.kicad_sch', 'head/P/link.kicad_sch')
+            write(t, {'head/P/H.kicad_sch': '(kicad_sch (uuid "root") '
+                      + sheet('Shared', '../Shared/common.kicad_sch', 'shared')
+                      + sheet('Up', '../../base/P/private.kicad_sch', 'up')
+                      + sheet('Abs', f'{t}/outside.kicad_sch', 'abs')
+                      + sheet('Link', 'link.kicad_sch', 'link')
+                      + sheet('Dir', 'dir', 'dir')
+                      + '(sheet (uuid "nofile") (property "Sheetname" "NoFile"))'
+                      + '(sheet (property "Sheetname" "NoUuid") (property "Sheetfile" "../Shared/common.kicad_sch"))'
+                      + sheet('Again', 'H.kicad_sch', 'again') + ')'})
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                pages = kr.sheet_pages('head/P', 'H')
+                objs = kr.sch_objects('head/P', 'H')
+                hot = kr.sheet_hotspots('head/P', 'H')
+            assert [(p['path'], p['file']) for p in pages] == [
+                ('/', 'H.kicad_sch'), ('/shared/', '../Shared/common.kicad_sch'), ('/dir/', 'dir')], pages
+            assert objs['/shared/c1']['ref'] == 'C1' and not any(o.get('ref') == 'SECRET' for o in objs.values()), objs
+            assert [v['sheet'] for v in hot['views']] == ['/', '/shared/', '/dir/'], hot['views']
+            text = err.getvalue()
+            for needle in ("'Up'", "'Abs'", "'Link'", "'NoFile'", "'NoUuid'", "'Again'", 'head/P/dir'):
+                assert needle in text, (needle, text)
+            assert all(line.startswith('::warning::') for line in text.splitlines()), text
+            # Sibling names that sanitize to one SVG stem: kicad-cli writes one SVG for both, so
+            # neither drawing is trustworthy. Both are dropped and the schematic review is incomplete.
+            write(t, {'head/P/H.kicad_sch': '(kicad_sch ' + sheet('A/B', 'a.kicad_sch', 'u1') + sheet('A_B', 'b.kicad_sch', 'u2') + ')',
+                      'head/P/a.kicad_sch': '(kicad_sch (symbol (uuid "ra") (property "Reference" "RA") (property "Value" "1k")))',
+                      'head/P/b.kicad_sch': '(kicad_sch (symbol (uuid "rb") (property "Reference" "RB") (property "Value" "2k")))'})
+            kr._sheet_warnings.clear()
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                collide_pages = kr.sheet_pages('head/P', 'H')
+                issues = []
+                kr.project_objects('head/P', 'H', issues)
+            assert [p['name'] for p in collide_pages] == ['H'], collide_pages
+            assert "sheet 'A_B' collides with another sheet using sanitized name 'A_B'; all colliding sibling sheets skipped" in err.getvalue(), err.getvalue()
+            assert all(line.startswith('::warning::') for line in err.getvalue().splitlines()), err.getvalue()
+            reasons = {(i['document'], i['channel']) for i in issues}
+            assert {('schematic', 'components'), ('schematic', 'visual')} <= reasons, issues
+            # A malformed sibling (no uuid) does not claim the name, so a valid sibling named A still renders.
+            write(t, {'head/P/H.kicad_sch': '(kicad_sch (sheet (property "Sheetname" "A") (property "Sheetfile" "a.kicad_sch"))'
+                      + sheet('A', 'b.kicad_sch', 'u2') + ')'})
+            kr._sheet_warnings.clear()
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                lone_pages = kr.sheet_pages('head/P', 'H')
+                issues = []
+                kr.project_objects('head/P', 'H', issues)
+            assert [(p['name'], p['file']) for p in lone_pages] == [('H', 'H.kicad_sch'), ('A', 'b.kicad_sch')], lone_pages
+            assert 'collides' not in err.getvalue() and not issues, (err.getvalue(), issues)
+
+            # Relative proj_dir with leading './' still bounds containment to the revision root.
+            write(t, {'head/P/H.kicad_sch': '(kicad_sch (uuid "root") '
+                      + sheet('Escape', '../../base/P/private.kicad_sch', 'esc') + ')'})
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                dot_pages = kr.sheet_pages('./head/P', 'H')
+            assert [p['name'] for p in dot_pages] == ['H'], dot_pages
+            assert "sheet 'Escape' file '../../base/P/private.kicad_sch' is outside the revision; skipped" in err.getvalue()
+
+            # NUL byte in Sheetfile warns and skips instead of crashing realpath.
+            write(t, {'head/P/H.kicad_sch': '(kicad_sch (uuid "root") '
+                      + sheet('NullByte', 'sub\x00file.kicad_sch', 'null1') + ')'})
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                null_pages = kr.sheet_pages('head/P', 'H')
+            assert [p['name'] for p in null_pages] == ['H'], null_pages
+            assert "sheet 'NullByte' file 'sub\\x00file.kicad_sch' contains a null byte; skipped" in err.getvalue()
+
+            # Warning deduplication does not suppress warnings across distinct revisions/projects.
+            write(t, {'base/P/B.kicad_sch': '(kicad_sch (uuid "broot") '
+                      + sheet('Outside', '../../outside.kicad_sch', 'out1') + ')'})
+            write(t, {'head/P/H2.kicad_sch': '(kicad_sch (uuid "hroot") '
+                      + sheet('Outside', '../../outside.kicad_sch', 'out2') + ')'})
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                kr.sheet_pages('base/P', 'B')
+                kr.sheet_pages('head/P', 'H2')
+            assert err.getvalue().count("is outside the revision; skipped") == 2, err.getvalue()
+
+            # Nested 'base' or 'head' segment in proj_dir uses the revision prefix, not the last segment.
+            assert kr.revision_root('head/hw/head/P') == os.path.realpath('head')
+            assert kr.revision_root('./head/hw/head/P') == os.path.realpath('head')
+            assert kr.revision_root('base/hw/base/P') == os.path.realpath('base')
+            write(t, {
+                'head/hw/Shared/common.kicad_sch': '(kicad_sch (symbol (uuid "s1") (property "Reference" "S1")))',
+                'head/hw/head/P/H.kicad_sch': '(kicad_sch (uuid "root") '
+                    + sheet('Shared', '../../Shared/common.kicad_sch', 'shared') + ')'
+            })
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                nested_pages = kr.sheet_pages('head/hw/head/P', 'H')
+            assert [p['name'] for p in nested_pages] == ['H', 'Shared'], nested_pages
+            assert 'outside the revision' not in err.getvalue()
+
+            # Escaping out of the revision root from a nested project directory is still blocked.
+            write(t, {
+                'head/hw/head/P/H2.kicad_sch': '(kicad_sch (uuid "root") '
+                    + sheet('Escape', '../../../../base/P/private.kicad_sch', 'esc') + ')'
+            })
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                esc_pages = kr.sheet_pages('head/hw/head/P', 'H2')
+            assert [p['name'] for p in esc_pages] == ['H2'], esc_pages
+            assert "sheet 'Escape' file '../../../../base/P/private.kicad_sch' is outside the revision; skipped" in err.getvalue()
+        finally:
+            os.chdir(old)
+
+
+test_f1_sheetfile_containment_and_hierarchy()
+print("ok F1 sheetfile containment and hierarchy")
+
+
+# F7: a malformed head board still produces a report with incomplete board evidence.
+def test_f7_malformed_board_report():
+    with tempfile.TemporaryDirectory() as td:
+        old = os.getcwd(); os.chdir(td)
+        try:
+            p = {"dir": "p", "name": "p", "status": "modified"}
+            good = br03_pcb("fp", [("pad1", "1", 0, "GND")]).replace('(kicad_pcb ', '(kicad_pcb (layers (0 "F.Cu" signal)) ')
+            drc = json.dumps({"violations": [{"type": "clearance", "severity": "error", "description": "x", "items": []}],
+                              "unconnected_items": [], "schematic_parity": []})
+            for side in ("base", "head"):
+                write(side, {"p/p.kicad_sch": '(kicad_sch (uuid root) (symbol (uuid r) (at 1 2 0) (property "Reference" "D1")))',
+                             "p/p.kicad_pcb": good})
+                write("review/p/" + side, {"sch/p.svg": '<svg width="10mm" height="10mm" viewBox="0 0 10 10"/>',
+                                           "netlist.net": "(export (nets))", "erc.json": '{"sheets":[]}', "drc.json": drc})
+            write("review", {"detect.json": json.dumps({"base": "a" * 40, "head": "b" * 40, "reason": "fixture", "projects": [p]}),
+                             "p/copper-diff.json": json.dumps({"rows": [], "incomplete": []})})
+
+            def report():
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                    try:
+                        kr.cmd_report(None)
+                    except SystemExit as exc:
+                        raise AssertionError(f"report ended: {exc}")
+                return json.loads(pathlib.Path("review/data.json").read_text())["projects"][0], err.getvalue()
+
+            # A fully valid project: DRC runs, board objects compared, no board incompleteness.
+            valid, _ = report()
+            checks = {c["name"]: c for c in valid["checks"]}
+            assert checks["drc"]["status"] == "pass" and checks["drc"]["errors"] == 1 and checks["drc"]["new_errors"] == 0, checks["drc"]
+            assert checks["parity"]["status"] == "pass", checks["parity"]
+            assert not any("malformed" in i["reason"] for i in valid["summary"]["incomplete"]), valid["summary"]
+            assert not any(r["kind"] == "footprint" for r in valid["changes"]), valid["changes"]
+
+            # Head board malformed: render_side left only the marker.
+            write("head", {"p/p.kicad_pcb": '(kicad_pcb (layers (0 "F.Cu" signal))'})
+            pathlib.Path("review/p/head/drc.json").unlink()
+            write("review/p/head", {"drc.json.error": "board DRC not run: malformed board file: malformed S-expression"})
+            project, err = report()
+            assert "::warning::head/p/p.kicad_pcb: malformed board file; board objects left out" in err, err
+            board = next(d for d in project["summary"]["documents"] if d["document"] == "board")
+            marked = {i["channel"] for i in board["incomplete"] if "malformed" in i["reason"]}
+            assert {"components", "routing", "rules", "board", "visual"} <= marked, board["incomplete"]
+            assert all(c["status"] == "incomplete" for c in board["channels"] if c["channel"] in marked), board["channels"]
+            # The readable base board is not reported as removed against a missing head board.
+            assert not any(r.get("document") == "board" and r["action"] == "removed" for r in project["changes"]), project["changes"]
+            checks = {c["name"]: c for c in project["checks"]}
+            for name in ("drc", "parity"):
+                c = checks[name]
+                assert c["status"] == "not_run" and c.get("incomplete") is True, c
+                assert c["reason"] == "head board DRC not run: malformed board file: malformed S-expression", c
+                assert c["errors"] == c["new_errors"] == c["fixed"] == 0 and c["violations"] == [], c
+            assert checks["erc"]["status"] == "pass", checks["erc"]
+
+            # Without the marker, a missing drc.json still stops the review.
+            pathlib.Path("review/p/head/drc.json.error").unlink()
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    kr.project_checks(p, kr.load_settings(), {"base": {}, "head": {}})
+                raise AssertionError("missing drc.json without a marker must stop the review")
+            except SystemExit as exc:
+                assert "kicad-cli wrote no drc.json" in str(exc), exc
+        finally:
+            os.chdir(old)
+
+
+test_f7_malformed_board_report()
+print("ok F7 malformed board gives a report with incomplete board evidence")
+
+
+def test_f7_malformed_board_fab_and_release():
+    with tempfile.TemporaryDirectory() as td:
+        old = os.getcwd(); os.chdir(td)
+        real_cli = kr.kicad_cli
+        cli_calls = []
+
+        def fake_cli(*args):
+            cli_calls.append(args)
+            out = pathlib.Path(args[list(args).index("-o") + 1])
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text("Designator\n", encoding="utf-8")
+        kr.kicad_cli = fake_cli
+        try:
+            p = {"dir": "p", "name": "p", "status": "modified"}
+            good = br03_pcb("fp", [("pad1", "1", 0, "GND")]).replace('(kicad_pcb ', '(kicad_pcb (layers (0 "F.Cu" signal)) ')
+            sch = '(kicad_sch (uuid root) (symbol (uuid r) (at 1 2 0) (property "Reference" "D1")))'
+            drc = json.dumps({"violations": [], "unconnected_items": [], "schematic_parity": []})
+            for side in ("base", "head"):
+                write(side, {"p/p.kicad_sch": sch, "p/p.kicad_pcb": good})
+                write("review/p/" + side, {"sch/p.svg": '<svg width="10mm" height="10mm" viewBox="0 0 10 10"/>',
+                                           "netlist.net": "(export (nets))", "erc.json": '{"sheets":[]}', "drc.json": drc})
+            write("base", {"kicad-review.toml": '[checks]\nrelease = "informational"\n[fabrication]\ncheck_limits = true\n'})
+            write("review", {"detect.json": json.dumps({"base": "a" * 40, "head": "b" * 40, "reason": "fixture", "projects": [p]}),
+                             "p/copper-diff.json": json.dumps({"rows": [], "incomplete": []})})
+            settings = kr.load_settings()
+            for side in ("base", "head"):
+                kr.render_fab(p, side, f"review/p/{side}", settings)
+
+            def report():
+                with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+                    try:
+                        kr.cmd_report(None)
+                    except SystemExit as exc:
+                        raise AssertionError(f"report ended: {exc}")
+                project = json.loads(pathlib.Path("review/data.json").read_text())["projects"][0]
+                return [c for c in project["checks"] if c["name"] == "fab_limits"], next(c for c in project["checks"] if c["name"] == "release")
+
+            # Valid boards: fab limits read the audits (one copper layer is outside every profile), release reads the package.
+            fab, release = report()
+            assert [c["vendor"] for c in fab] == ["jlcpcb", "pcbway"], fab
+            assert all(c["status"] == "warn" and "incomplete" not in c and c["reason"].startswith("not checked: profile covers") for c in fab), fab
+            assert release["status"] == "pass" and "incomplete" not in release, release
+            assert [v["type"] for v in release["violations"]] == ["missing_package"], release
+
+            # Head board malformed: render_fab and release_project leave markers instead of failing.
+            write("head", {"p/p.kicad_pcb": '(kicad_pcb (layers (0 "F.Cu" signal))'})
+            pathlib.Path("review/p/head/drc.json").unlink()
+            write("review/p/head", {"drc.json.error": "board DRC not run: malformed board file: malformed S-expression"})
+            kr.render_fab(p, "head", "review/p/head", settings)
+            assert not pathlib.Path("review/p/head/fab-limits.json").exists()
+            fab_marker = pathlib.Path("review/p/head/fab-limits.json.error").read_text(encoding="utf-8")
+            assert fab_marker.startswith("fab limits not run: malformed board file: "), fab_marker
+            os.makedirs("review/p/head/fab")
+            made = kr.release_project("head/p/p.kicad_pro", "review", settings, "review/p/head/fab", "p")
+            assert made == ["review/p/head/fab/p-review-jlcpcb-bom.csv"], made
+            assert [c[:3] for c in cli_calls] == [("sch", "export", "bom")], cli_calls
+            release_marker = pathlib.Path("review/p/head/fab/p-review-jlcpcb-gerbers.zip.error").read_text(encoding="utf-8")
+            assert release_marker.startswith("release package not built: malformed board file: "), release_marker
+
+            fab, release = report()
+            assert [c["vendor"] for c in fab] == ["jlcpcb", "pcbway"], fab
+            for c in fab:
+                assert c["status"] == "not_run" and c.get("incomplete") is True, c
+                assert c["reason"] == "head " + fab_marker, c
+                assert c["errors"] == c["new_errors"] == 0 and c["violations"] == [], c
+            assert release["status"] == "not_run" and release.get("incomplete") is True, release
+            assert release["reason"] == "head " + release_marker, release
+            assert release["errors"] == release["new_errors"] == 0 and release["violations"] == [], release
+
+            # Without the marker, a missing fab audit still stops the review.
+            pathlib.Path("review/p/head/fab-limits.json.error").unlink()
+            try:
+                kr.fab_checks(p, settings, "review/p")
+                raise AssertionError("missing fab audit without a marker must stop the review")
+            except SystemExit as exc:
+                assert "Fab limits output missing for p (head)" in str(exc), exc
+
+            # A tagged release still stops on a malformed board instead of shipping without Gerbers.
+            write("repo", {"p/p.kicad_pro": "{}", "p/p.kicad_sch": sch, "p/p.kicad_pcb": '(kicad_pcb (layers (0 "F.Cu" signal))'})
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    kr.cmd_release(SimpleNamespace(tag="v1"))
+                raise AssertionError("release with a malformed board must stop")
+            except SystemExit as exc:
+                assert "p: release package not built: malformed board file: " in str(exc), exc
+        finally:
+            kr.kicad_cli = real_cli
+            os.chdir(old)
+
+
+test_f7_malformed_board_fab_and_release()
+print("ok F7 malformed board reports fab limits and release as not run")
