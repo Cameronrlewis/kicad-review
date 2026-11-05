@@ -204,6 +204,10 @@ def board_layers(pcb_path):
             if isinstance(row, list) and len(row) > 1]
 
 
+def malformed_board(exc):
+    return f"malformed board file: {exc}".replace('\n', ' ')[:1000]
+
+
 def simplify_sheet_svg(text):
     """Join plain sibling stroke paths without changing inherited paint or coordinates."""
     root = ET.fromstring(text)
@@ -350,6 +354,15 @@ def render_side(src_dir, name, out, netlist=False):
         previous = os.environ.get('KICAD_CONFIG_HOME')
         os.environ['KICAD_CONFIG_HOME'] = cfg
         mapping = {}
+        layers = None
+        board_error = None
+        if os.path.exists(pcb):
+            try:
+                layers = board_layers(pcb)
+            except (OSError, ValueError) as exc:  # Skip every board export below; keep rendering the rest.
+                board_error = malformed_board(exc)
+                print("::warning::" + workflow_command_escape(
+                    f"{pcb}: malformed board file; board drawing not rendered: {exc}"), file=sys.stderr)
         try:
             for theme in ('light', 'dark'):
                 suffix = '' if theme == 'light' else '-dark'
@@ -367,15 +380,15 @@ def render_side(src_dir, name, out, netlist=False):
                         resolved.add(path)
                         path.write_text(simplify_sheet_svg(path.read_text(encoding='utf-8')), encoding='utf-8')
                         mapping.setdefault(pg['path'], {})[theme] = str(path.relative_to(out))
-                if os.path.exists(pcb):
+                if layers is not None:
                     # Drill marks off; page coordinates keep both revisions aligned in mm.
                     kicad_cli('pcb', 'export', 'svg', '--mode-multi', '--exclude-drawing-sheet',
                               '--page-size-mode', '1', '--drill-shape-opt', '0', '--check-zones',
-                              '--layers', ','.join(board_layers(pcb)), '--theme', 'kicad-review-' + theme,
+                              '--layers', ','.join(layers), '--theme', 'kicad-review-' + theme,
                               '-o', f'{out}/pcb{suffix}', pcb)
             pathlib.Path(out).mkdir(parents=True, exist_ok=True)
             pathlib.Path(out, 'sheet-images.json').write_text(json.dumps(mapping, sort_keys=True), encoding='utf-8')
-            if os.path.exists(pcb):
+            if os.path.exists(pcb) and board_error is None:
                 export_board_stats(pcb, out)  # Shared optional facts, once per revision, outside the theme loop.
         finally:
             if previous is None:
@@ -386,7 +399,12 @@ def render_side(src_dir, name, out, netlist=False):
         kicad_cli("sch", "erc", "--format", "json", "--severity-all", "-o", f"{out}/erc.json", sch)
         if netlist:
             export_netlist(sch, out)
-    if os.path.exists(pcb):
+    if board_error is not None:
+        # Incomplete evidence: no DRC report for this side, only the reason.
+        pathlib.Path(out, 'drc.json').unlink(missing_ok=True)
+        pathlib.Path(out, 'drc.json.error').write_text('board DRC not run: ' + board_error, encoding='utf-8')
+    elif os.path.exists(pcb):
+        pathlib.Path(out, 'drc.json.error').unlink(missing_ok=True)
         parity = ["--schematic-parity"] if os.path.exists(sch) else []
         kicad_cli("pcb", "drc", "--format", "json", "--severity-all", *parity, "-o", f"{out}/drc.json", pcb)
 
@@ -510,6 +528,14 @@ def render_fab(p, side, out, settings):
     if not source.is_file():
         pathlib.Path(out, "fab-limits.json").write_text(
             json.dumps({"sections": [], "reason": f"no {side} board"}), encoding="utf-8")
+        return
+    marker = pathlib.Path(out, "fab-limits.json.error")
+    marker.unlink(missing_ok=True)
+    try:
+        board_layers(source)
+    except (OSError, ValueError) as exc:  # Incomplete evidence: no audit for this side, only the reason.
+        pathlib.Path(out, "fab-limits.json").unlink(missing_ok=True)
+        marker.write_text("fab limits not run: " + malformed_board(exc), encoding="utf-8")
         return
     board_bytes = source.read_bytes()
     project_bytes = source.with_suffix(".kicad_pro").read_bytes() if source.with_suffix(".kicad_pro").is_file() else b""
@@ -859,24 +885,46 @@ def render_tool_identity():
     return "local-kicad-unavailable"
 
 
-def render_cache_complete(cache, p, side, settings):
+def render_cache_complete(cache, p, side, settings, *, check_release=True):
     if not cache or not image_cache_complete(cache, p, side):
         return False
+    board_exists = pathlib.Path(board_path(p, side)).is_file()
+    if fab_enabled(settings):
+        try:
+            doc = json.loads((cache / "fab-limits.json").read_text(encoding="utf-8"))
+            sections = doc.get("sections") if isinstance(doc, dict) else None
+            if not isinstance(sections, list):
+                return False
+            if board_exists:
+                if any(sum(1 for s in sections if isinstance(s, dict) and s.get("vendor") == v) != 1 for v in FAB_VENDORS):
+                    return False
+        except (OSError, ValueError):
+            return False
     # board.raw.glb is required for head only when downloads.enabled is True (spec lines 27-28,
     # plan-context.md line 7). Release-only renders stage fab files but never produce raw GLB,
     # so requiring raw GLB for release-only would cause permanent cache misses.
-    if side == "head" and settings.get("downloads", {}).get("enabled") and pathlib.Path(board_path(p, side)).is_file():
+    if side == "head" and settings.get("downloads", {}).get("enabled") and board_exists:
         raw = cache / "board.raw.glb"
         if (not raw.is_file() or not raw.stat().st_size) and not (cache / "board.raw.glb.failed").is_file():
             return False
     need_still = settings["3d"]["enabled"] or settings.get("design", {}).get("enabled", False)
-    if need_still and pathlib.Path(board_path(p, side)).is_file():
+    if need_still and board_exists:
         if settings["3d"]["enabled"]:
             raw = cache / "board.raw.glb"
-            if (not raw.is_file() or not raw.stat().st_size) and not (cache / "board.raw.glb.failed").is_file():
-                return False
+            glb = cache / "board.glb"
+            if not (cache / "board.raw.glb.failed").is_file():
+                if not raw.is_file() or not raw.stat().st_size or not glb.is_file() or not glb.stat().st_size:
+                    return False
         poster = cache / "poster.png"
-        return poster_size(poster) == (1600, 1000) or (cache / "poster.png.failed").is_file()
+        if not (poster_size(poster) == (1600, 1000) or (cache / "poster.png.failed").is_file()):
+            return False
+    if check_release and settings["checks"].get("release", "off") != "off":
+        pro = posixpath.join(side, p["dir"], f"{p['name']}.kicad_pro")
+        if os.path.exists(pro) and (board_exists or os.path.isfile(posixpath.join(side, p["dir"], f"{p['name']}.kicad_sch"))):
+            try:
+                fab_parts(pro, p["name"], settings, str(pathlib.Path(cache) / "fab"))
+            except (SystemExit, OSError, ValueError, ArithmeticError, IndexError, KeyError, csv.Error, zipfile.BadZipFile):
+                return False
     return True
 
 
@@ -892,11 +940,29 @@ def glb_input_digest(p, side):
     return digest.hexdigest()
 
 
+_board_warnings = set()
+
+
 def image_export_identity(p, side):
     """Explicit image inputs shared by host restore and the pinned renderer."""
     pcb = board_path(p, side)
-    return {'renderer': IMAGE_RENDERER, 'options': IMAGE_EXPORT_OPTIONS,
-            'layers': board_layers(pcb) if os.path.isfile(pcb) else [], 'palettes': IMAGE_PALETTES}
+    layers = []
+    incomplete = None
+    if os.path.isfile(pcb):
+        try:
+            layers = board_layers(pcb)
+        except (OSError, ValueError) as exc:
+            layers = None
+            incomplete = f"Board layers unavailable: {exc}"
+            key = (posixpath.join(side, p.get("dir", "")), p.get("name", ""))
+            if key not in _board_warnings:
+                _board_warnings.add(key)
+                print("::warning::" + workflow_command_escape(f"{p['name']}: malformed board file in {side}; layer evidence unavailable"), file=sys.stderr)
+    identity = {'renderer': IMAGE_RENDERER, 'options': IMAGE_EXPORT_OPTIONS,
+                'layers': layers, 'palettes': IMAGE_PALETTES}
+    if incomplete is not None:
+        identity['incomplete'] = incomplete
+    return identity
 
 
 def image_cache_complete(cache, p, side):
@@ -904,7 +970,10 @@ def image_cache_complete(cache, p, side):
     if IMAGE_RENDERER == 'local-unverified':
         return False
     try:
-        return json.loads((cache / '.complete').read_text(encoding='utf-8')) == image_export_identity(p, side)
+        ident = image_export_identity(p, side)
+        if ident.get('incomplete'):
+            return False
+        return json.loads((cache / '.complete').read_text(encoding='utf-8')) == ident
     except (OSError, ValueError):
         return False
 
@@ -919,7 +988,10 @@ def render_cache(p, side, det, settings):
               "glb": glb_argv("PCB", pathlib.Path(".")), "poster": poster_argv("PCB", pathlib.Path(".")),
               "board_models": glb_input_digest(p, side)}
     identity = pathlib.Path(__file__).read_bytes() + json.dumps(inputs, sort_keys=True).encode()
-    identity += json.dumps(image_export_identity(p, side), sort_keys=True, separators=(',', ':')).encode()
+    img_ident = image_export_identity(p, side)
+    if img_ident.get("incomplete"):
+        return None
+    identity += json.dumps(img_ident, sort_keys=True, separators=(',', ':')).encode()
     needs_downloads = side == "head" and (settings.get("downloads", {}).get("enabled") or settings["checks"].get("release", "off") != "off")
     if needs_downloads:
         identity += b"\0head-downloads-v1"
@@ -941,7 +1013,9 @@ def restore_renders(args=None):
     if any(not render_cache_complete(cache, p, side, settings) for p, side, cache in entries):
         raise SystemExit(1)
     for p, side, cache in entries:
-        shutil.copytree(cache, f"review/{project_id(p['dir'])}/{side}", dirs_exist_ok=True)
+        out = f"review/{project_id(p['dir'])}/{side}"
+        shutil.rmtree(f"{out}/fab", ignore_errors=True)
+        shutil.copytree(cache, out, dirs_exist_ok=True)
         print(f"{p['name']}: {side} render cache hit ({det[side]})")
 
 
@@ -954,8 +1028,13 @@ def cache_renders(args=None):
             cache = render_cache(p, side, det, settings)
             out = pathlib.Path(f"review/{project_id(p['dir'])}/{side}")
             if cache and out.is_dir():
+                ident = image_export_identity(p, side)
+                if ident.get("incomplete"):
+                    continue
+                if cache.exists():
+                    shutil.rmtree(cache)
                 shutil.copytree(out, cache, dirs_exist_ok=True)
-                (cache / '.complete').write_text(json.dumps(image_export_identity(p, side), sort_keys=True), encoding='utf-8')
+                (cache / '.complete').write_text(json.dumps(ident, sort_keys=True), encoding='utf-8')
 
 
 def cmd_copper(args):
@@ -982,6 +1061,8 @@ def cmd_copper(args):
 
 
 def cmd_render(args):
+    _sheet_warnings.clear()
+    _board_warnings.clear()
     with open("review/detect.json", encoding="utf-8") as fh:
         det = json.load(fh)
     settings = load_settings()
@@ -995,37 +1076,45 @@ def cmd_render(args):
             out = f"review/{project_id(p['dir'])}/{side}"
             cache = render_cache(p, side, det, settings)
             if render_cache_complete(cache, p, side, settings):
+                shutil.rmtree(f"{out}/fab", ignore_errors=True)
                 shutil.copytree(cache, out, dirs_exist_ok=True)
                 print(f"{p['name']}: {side} render cache hit ({det[side]})")
                 continue
-            # Connectivity evidence for every present schematic, whatever the check settings.
-            render_side(posixpath.join(side, p["dir"]), p["name"], out, netlist=True)
-            if fab_enabled(settings):
-                try:
-                    render_fab(p, side, out, settings)
-                except (OSError, ValueError, RuntimeError) as exc:
-                    sys.exit(f"Fab limits could not run for {p['name']}: {exc}")
-            if side == "head" and settings["downloads"]["enabled"]:
-                export_glb(p, side, out, model=True, poster=need_still, viewer=export_3d)
-            elif need_still and pathlib.Path(board_path(p, side)).is_file():
-                if side == "head" and shared_3d:
-                    os.makedirs(out, exist_ok=True)
-                    for name in ("board.raw.glb", "board.glb", "poster.png", "glb.log", "poster.log", "board.raw.glb.failed", "poster.png.failed"):
-                        source = pathlib.Path(f"review/{project_id(p['dir'])}/base/{name}")
-                        dest = pathlib.Path(out) / name
-                        dest.unlink(missing_ok=True)
-                        if source.is_file():
-                            shutil.copyfile(source, dest)
-                else:
-                    export_glb(p, side, out, model=export_3d)
+            if render_cache_complete(cache, p, side, settings, check_release=False):
+                shutil.rmtree(f"{out}/fab", ignore_errors=True)
+                shutil.copytree(cache, out, dirs_exist_ok=True)
+            else:
+                # Connectivity evidence for every present schematic, whatever the check settings.
+                render_side(posixpath.join(side, p["dir"]), p["name"], out, netlist=True)
+                if fab_enabled(settings):
+                    try:
+                        render_fab(p, side, out, settings)
+                    except (OSError, ValueError, RuntimeError) as exc:
+                        sys.exit(f"Fab limits could not run for {p['name']}: {exc}")
+                if pathlib.Path(board_path(p, side)).is_file():
+                    if side == "head" and shared_3d and (export_3d or not settings["downloads"]["enabled"]):
+                        os.makedirs(out, exist_ok=True)
+                        for name in ("board.raw.glb", "board.glb", "poster.png", "glb.log", "poster.log", "board.raw.glb.failed", "poster.png.failed"):
+                            source = pathlib.Path(f"review/{project_id(p['dir'])}/base/{name}")
+                            dest = pathlib.Path(out) / name
+                            dest.unlink(missing_ok=True)
+                            if source.is_file():
+                                shutil.copyfile(source, dest)
+                    elif side == "head" and settings["downloads"]["enabled"]:
+                        export_glb(p, side, out, model=True, poster=need_still, viewer=export_3d)
+                    elif need_still:
+                        export_glb(p, side, out, model=export_3d)
             if settings["checks"].get("release", "off") != "off":
                 pro = posixpath.join(side, p["dir"], f"{p['name']}.kicad_pro")
+                shutil.rmtree(f"{out}/fab", ignore_errors=True)
                 if os.path.exists(pro):
                     os.makedirs(f"{out}/fab", exist_ok=True)
                     try:
                         release_project(pro, "review", settings, f"{out}/fab", p["name"])
                     except (SystemExit, OSError, ValueError, IndexError, KeyError, csv.Error, zipfile.BadZipFile):
                         print("::warning::" + workflow_command_escape(f"{p['name']}: release outputs incomplete; continuing other exports"))
+            else:
+                shutil.rmtree(f"{out}/fab", ignore_errors=True)
             if side == "head" and det.get("head") and (settings["downloads"]["enabled"] or settings["checks"].get("release", "off") != "off"):
                 export_downloads(p, posixpath.join(side, p["dir"]), out, settings, det["head"])
             print(f"{p['name']}: rendered {side}")
@@ -1069,17 +1158,24 @@ def is_net_number(token):
 
 def parse_sexpr(text):
     """KiCad S-expression text to nested lists of strings, preserving quoted tokens."""
-    stack = [[]]
+    stack, pos = [[]], 0
     for m in TOKEN.finditer(text):
+        if m.start() != pos:
+            raise ValueError("malformed S-expression")
+        pos = m.end()
         if m.group(1):
             stack.append([])
         elif m.group(2):
+            if len(stack) < 2:
+                raise ValueError("malformed S-expression")
             node = stack.pop()
             stack[-1].append(node)
         elif m.group(3) is not None:
             stack[-1].append(Quoted(re.sub(r"\\(.)", lambda e: "\n" if e.group(1) == "n" else e.group(1), m.group(3))))
         elif m.group(4):
             stack[-1].append(m.group(4))
+    if len(stack) != 1 or len(stack[0]) != 1 or not isinstance(stack[0][0], list) or text[pos:].strip():
+        raise ValueError("malformed S-expression")
     return stack[0][0]
 
 
@@ -1105,9 +1201,28 @@ def sheet_instance_page(node, project, parent_uuid_path):
     return None
 
 
+def revision_root(proj_dir):
+    """Return the absolute path of the revision root containing proj_dir.
+
+    In production, kicad-review passes relative project directories prefixed with the
+    revision: 'base/<dir>' or 'head/<dir>' (and may have leading './').
+    For relative paths starting with 'base' or 'head', that first segment is the revision
+    prefix and defines the revision root, preventing sheets from escaping into sibling
+    revisions or the workspace root.
+    If no 'base' or 'head' prefix exists (e.g. standalone tests) or proj_dir is an
+    absolute path, the containment root is the realpath of proj_dir itself.
+    """
+    if not os.path.isabs(proj_dir):
+        parts = pathlib.Path(os.path.normpath(proj_dir)).parts
+        if parts and parts[0] in ("base", "head"):
+            return os.path.realpath(parts[0])
+    return os.path.realpath(proj_dir)
+
+
 def sheet_pages(proj_dir, name):
     """Schematic pages in hierarchy order, with instance page numbers and UUID paths."""
     root_file = posixpath.join(proj_dir, f"{name}.kicad_sch")
+    _sheet_collisions.pop(os.path.realpath(proj_dir), None)
     if not os.path.exists(root_file):
         return []
     with open(root_file, encoding="utf-8") as fh:
@@ -1119,33 +1234,71 @@ def sheet_pages(proj_dir, name):
         if page and len(page) > 1 and str(page[1]).strip():
             legacy[instance[1].rstrip("/") or "/"] = str(page[1])
     pages = []
+    top = revision_root(proj_dir)
+
+    def warn(message):
+        key = (os.path.realpath(proj_dir), message)
+        if key not in _sheet_warnings:  # sheet_pages runs several times per revision
+            _sheet_warnings.add(key)
+            print("::warning::" + workflow_command_escape(message), file=sys.stderr)
 
     # stem: the file name kicad-cli gives the page's SVG, the sheet names along its path joined by "-".
-    def walk(file, path, sheet_name, parent, depth, stem, page=None):
+    def walk(file, path, sheet_name, parent, depth, stem, ancestors, page=None):
         pages.append({"path": path, "name": sheet_name, "file": file, "parent": parent, "stem": stem,
                       "page": page or legacy.get(path.rstrip("/") or "/") or str(len(pages) + 1)})
         full = posixpath.join(proj_dir, file)
-        if depth > 32 or not os.path.exists(full):
+        if depth > 32:
+            return
+        if not os.path.isfile(full):
+            warn(f"{full}: sheet file missing or not a regular file; its drawing is not read")
             return
         with open(full, encoding="utf-8") as fh:
             node = parse_sexpr(fh.read())
-        names = set()
+        children = []
         for s in findall(node, "sheet"):
             props = properties(s)
             child = props.get("Sheetname", "?")
-            if child in names:
-                sys.exit(f"{file} has two sheets with the same name {child!r}; kicad-cli renders both to one file, "
-                         "so neither drawing can be shown. Rename one of them.")
-            names.add(child)
             safe = re.sub(r"[\\/]", "_", child)
-            child_path = f"{path}{find(s, 'uuid')[1]}/"
+            uid, sheetfile = val(s, "uuid"), props.get("Sheetfile") or ""
+            if not uid or not sheetfile:
+                warn(f"{full}: sheet {child!r} has no uuid or Sheetfile; skipped")
+                continue
+            if "\0" in sheetfile:
+                warn(f"{full}: sheet {child!r} file {sheetfile!r} contains a null byte; skipped")
+                continue
+            child_file = posixpath.normpath(posixpath.join(posixpath.dirname(file), sheetfile))
+            try:
+                real = os.path.realpath(posixpath.join(proj_dir, child_file))
+            except ValueError:
+                warn(f"{full}: sheet {child!r} file {sheetfile!r} path is invalid; skipped")
+                continue
+            if posixpath.isabs(sheetfile) or os.path.commonpath([top, real]) != top:
+                warn(f"{full}: sheet {child!r} file {sheetfile!r} is outside the revision; skipped")
+            elif child_file in ancestors:
+                warn(f"{full}: sheet {child!r} includes {sheetfile!r}, which contains it; recursive hierarchy skipped")
+            else:
+                children.append((s, uid, child, safe, child_file))
+        # kicad-cli names SVGs after the sanitized name, so A/B and A_B write one file and
+        # neither drawing can be shown: drop every colliding sibling and mark the review incomplete.
+        names = {}
+        for *_, safe, _ in children:
+            names[safe] = names.get(safe, 0) + 1
+        for s, uid, child, safe, child_file in children:
+            if names[safe] > 1:
+                message = f"{full}: sheet {child!r} collides with another sheet using sanitized name {safe!r}; all colliding sibling sheets skipped"
+                warn(message)
+                _sheet_collisions.setdefault(os.path.realpath(proj_dir), set()).add(message)
+                continue
             parent_uuid_path = f'/{root_uuid}{path.rstrip("/")}'
-            child_page = sheet_instance_page(s, name, parent_uuid_path)
-            walk(posixpath.normpath(posixpath.join(posixpath.dirname(file), props.get("Sheetfile", ""))),
-                 child_path, child, path, depth + 1, f"{stem}-{safe}", child_page)
+            walk(child_file, f"{path}{uid}/", child, path, depth + 1, f"{stem}-{safe}",
+                 ancestors | {child_file}, sheet_instance_page(s, name, parent_uuid_path))
 
-    walk(f"{name}.kicad_sch", "/", name, None, 0, name)
+    walk(f"{name}.kicad_sch", "/", name, None, 0, name, {f"{name}.kicad_sch"})
     return pages
+
+
+_sheet_warnings = set()
+_sheet_collisions = {}  # realpath(proj_dir) -> collision messages; the schematic review there is incomplete
 
 
 # ---- Object model: every reviewable object as {kind, ref, props, pos, box, where}, keyed by UUID. ----
@@ -1273,7 +1426,7 @@ def sch_objects(proj_dir, name):
     root_uuid = None
     for page in sheet_pages(proj_dir, name):
         full = posixpath.join(proj_dir, page["file"])
-        if not os.path.exists(full):
+        if not os.path.isfile(full):
             continue
         with open(full, encoding="utf-8") as fh:
             root = parse_sexpr(fh.read())
@@ -1364,8 +1517,6 @@ def sheet_hotspots(proj_dir, name):
     """Per-sheet-instance hotspot manifest: symbols with bounding boxes and pin endpoints, labels, no-connects, wires (mm)."""
     views, warnings = [], []
     pages = sheet_pages(proj_dir, name)
-    if any(p['path'].count('/') > 33 for p in pages):
-        raise ValueError('recursive schematic hierarchy')
     root_uuid = None
     for page in pages:
         view = {'sheet': page['path'], 'file': page['file'], 'viewBox': None,
@@ -1412,6 +1563,10 @@ def sheet_hotspots(proj_dir, name):
                 except KeyError:
                     coords, pins, approximate = [], [], True
                     warnings.append({'sheet': page['path'], 'uuid': uid, 'reason': 'library unavailable'})
+                except (ValueError, TypeError, IndexError, AttributeError):
+                    # Inheritance cycle or malformed primitive: keep the symbol as an approximate box.
+                    coords, pins, approximate = [], [], True
+                    warnings.append({'sheet': page['path'], 'uuid': uid, 'reason': 'symbol geometry unavailable'})
                 if not coords:
                     coords, approximate = [[-1, -1], [1, 1]], True
                 placed_pins = []
@@ -2188,9 +2343,24 @@ def pro_objects(path):
         return {}
     with open(path, encoding="utf-8") as fh:
         pro = json.load(fh)
-    keep = {"net_settings": pro.get("net_settings")}
-    keep["board"] = (pro.get("board") or {}).get("design_settings")
-    keep["erc"] = (pro.get("erc") or {}).get("rule_severities")
+
+    def section(parent, key):
+        if not isinstance(parent, dict):
+            return None
+        val = parent.get(key)
+        if val is not None and not isinstance(val, dict):
+            raise ValueError(f"{posixpath.basename(path)}: {key} is not a JSON object")
+        return val
+
+    if not isinstance(pro, dict):
+        raise ValueError(f"{posixpath.basename(path)}: project settings are not JSON objects")
+    net_settings = section(pro, "net_settings")
+    board = section(pro, "board")
+    design_settings = section(board, "design_settings")
+    erc = section(pro, "erc")
+    rule_severities = section(erc, "rule_severities")
+
+    keep = {"net_settings": net_settings, "board": design_settings, "erc": rule_severities}
     return {"meta:pro": {"kind": "design rules", "ref": posixpath.basename(path), "where": None,
                          "props": {k: v for k, v in flatten(keep).items() if v != "None"}}}
 
@@ -2225,18 +2395,26 @@ def rule_values(root: str, name: str) -> dict[str, object]:
     if pro.exists():
         try:
             data = json.loads(pro.read_text(encoding="utf-8"))
+            # Valid JSON of the wrong shape is as unknown as invalid JSON; null sections are simply empty.
+            def section(parent, key):
+                value = parent.get(key)
+                if value is not None and not isinstance(value, dict):
+                    raise ValueError(f"{key} is not an object")
+                return value or {}
+
+            if not isinstance(data, dict):
+                raise ValueError("project is not an object")
+            net_settings = section(data, "net_settings")
+            design_settings = section(section(data, "board"), "design_settings")
         except ValueError:
             out["_unavailable"] = f"Project rules unavailable: malformed {pro.name}"
-            data = {}
-        board = data.get("board") or {}
-        design_settings = board.get("design_settings") or {}
-        walk(design_settings.get("rules") or {}, "rules")
-        net_settings = data.get("net_settings") or {}
-        if "classes" in net_settings:
-            walk(net_settings["classes"], "net_settings.classes")
-        # Pattern order is meaningful, unlike named class order. Keep assignments intact.
-        if "netclass_patterns" in net_settings:
-            out["net_settings.netclass_patterns"] = net_settings["netclass_patterns"]
+        else:
+            walk(design_settings.get("rules") or {}, "rules")
+            if "classes" in net_settings:
+                walk(net_settings["classes"], "net_settings.classes")
+            # Pattern order is meaningful, unlike named class order. Keep assignments intact.
+            if "netclass_patterns" in net_settings:
+                out["net_settings.netclass_patterns"] = net_settings["netclass_patterns"]
     dru = pathlib.Path(root) / (name + ".kicad_dru")
     if dru.exists():
         out["custom rules"] = dru.read_text(encoding="utf-8").replace("\r\n", "\n")
@@ -2249,9 +2427,10 @@ def rule_values(root: str, name: str) -> dict[str, object]:
     return out
 
 
-def diff_rules(base_root, head_root, name) -> list[dict]:
+def diff_rules(base_root, head_root, name, b=None, h=None) -> list[dict]:
     """Describe dimensional constraints, ordered assignments, custom text and stackup."""
-    b, h = rule_values(base_root, name), rule_values(head_root, name)
+    b = dict(rule_values(base_root, name) if b is None else b)
+    h = dict(rule_values(head_root, name) if h is None else h)
     rows = []
     unavailable = {"before": b.pop("_unavailable", None), "after": h.pop("_unavailable", None)}
     if any(unavailable.values()):
@@ -2285,9 +2464,20 @@ def project_objects(proj_dir, name, issues=None):
     if not os.path.isdir(proj_dir):
         return {}
     objs = sch_objects(proj_dir, name)
+    if issues is not None and _sheet_collisions.get(os.path.realpath(proj_dir)):
+        reason = "Sibling sheets share one drawing name; colliding sheets left out"
+        issues += [{"channel": c, "document": "schematic", "reason": reason} for c in ("components", "visual")]
     pcb = posixpath.join(proj_dir, f"{name}.kicad_pcb")
     if os.path.exists(pcb):
-        objs.update(pcb_objects(pcb))
+        try:
+            objs.update(pcb_objects(pcb))
+        except (OSError, ValueError) as exc:
+            print("::warning::" + workflow_command_escape(
+                f"{pcb}: malformed board file; board objects left out: {exc}"), file=sys.stderr)
+            if issues is not None:
+                reason = "Board file malformed; board objects left out"
+                issues += [{"channel": c, "document": "board", "reason": reason, "unknownBoard": True}
+                           for c in ("components", "routing", "rules", "board", "visual")]
     for key, suffix, load in (
         ("meta:pro", ".kicad_pro", pro_objects),
         ("meta:dru", ".kicad_dru", lambda path: {"meta:dru": {
@@ -2312,6 +2502,10 @@ def project_pair(p):
     for key in {i["unknownMeta"] for i in issues if "unknownMeta" in i}:
         for side in objs:
             objs[side].pop(key, None)
+    if any(i.get("unknownBoard") for i in issues):  # one unreadable board leaves the board pair out on both sides
+        for side in objs:
+            objs[side] = {k: o for k, o in objs[side].items() if not (o.get("where") or {}).get("board")
+                          and k not in ("meta:setup", "meta:title_block:board")}
     return objs, issues
 
 
@@ -2689,24 +2883,31 @@ def release_project(pro_path, tag, settings, out_dir, label):
     pcb, sch = f"{src}/{name}.kicad_pcb", f"{src}/{name}.kicad_sch"
     stem = f"{out_dir}/{label}-{tag}-{preset_name}"
     made = []
+    layers = None
     if os.path.exists(pcb):
-        work = tempfile.mkdtemp()
-        layers = [l for l in board_layers(pcb) if FAB_LAYER.search(l)]
-        kicad_cli("pcb", "export", "gerbers", *preset["gerbers"], "--check-zones", "-l", ",".join(layers), "-o", work, pcb)
-        kicad_cli("pcb", "export", "drill", "--format", "excellon", "--excellon-units", "mm", "--excellon-zeros-format", "decimal",
-                  "--excellon-oval-format", "alternate", *preset["drill"], "-o", work + "/", pcb)
-        with zipfile.ZipFile(f"{stem}-gerbers.zip", "w", zipfile.ZIP_DEFLATED) as z:
-            for f in sorted(os.listdir(work)):
-                z.write(f"{work}/{f}", f)
-        kicad_cli("pcb", "export", "pos", "--format", "csv", "--units", "mm", "--side", "both", "--exclude-dnp",
-                  "-o", f"{work}/pos.csv", pcb)
-        with open(f"{work}/pos.csv", newline="", encoding="utf-8") as fh, open(f"{stem}-positions.csv", "w", newline="", encoding="utf-8") as out:
-            rows = list(csv.reader(fh))
-            w = csv.writer(out)
-            w.writerow([POS_COLUMNS.get(h, h) for h in rows[0]])
-            side = rows[0].index("Side")
-            w.writerows([*r[:side], r[side].capitalize(), *r[side + 1:]] for r in rows[1:])
-        made += [f"{stem}-gerbers.zip", f"{stem}-positions.csv"]
+        marker = pathlib.Path(f"{stem}-gerbers.zip.error")
+        marker.unlink(missing_ok=True)
+        try:
+            layers = [l for l in board_layers(pcb) if FAB_LAYER.search(l)]
+        except (OSError, ValueError) as exc:  # Skip the board outputs; keep the BOM.
+            marker.write_text("release package not built: " + malformed_board(exc), encoding="utf-8")
+    if layers is not None:
+        with tempfile.TemporaryDirectory() as work:
+            kicad_cli("pcb", "export", "gerbers", *preset["gerbers"], "--check-zones", "-l", ",".join(layers), "-o", work, pcb)
+            kicad_cli("pcb", "export", "drill", "--format", "excellon", "--excellon-units", "mm", "--excellon-zeros-format", "decimal",
+                      "--excellon-oval-format", "alternate", *preset["drill"], "-o", work + "/", pcb)
+            with zipfile.ZipFile(f"{stem}-gerbers.zip", "w", zipfile.ZIP_DEFLATED) as z:
+                for f in sorted(os.listdir(work)):
+                    z.write(f"{work}/{f}", f)
+            kicad_cli("pcb", "export", "pos", "--format", "csv", "--units", "mm", "--side", "both", "--exclude-dnp",
+                      "-o", f"{work}/pos.csv", pcb)
+            with open(f"{work}/pos.csv", newline="", encoding="utf-8") as fh, open(f"{stem}-positions.csv", "w", newline="", encoding="utf-8") as out:
+                rows = list(csv.reader(fh))
+                w = csv.writer(out)
+                w.writerow([POS_COLUMNS.get(h, h) for h in rows[0]])
+                side = rows[0].index("Side")
+                w.writerows([*r[:side], r[side].capitalize(), *r[side + 1:]] for r in rows[1:])
+            made += [f"{stem}-gerbers.zip", f"{stem}-positions.csv"]
     if os.path.exists(sch):
         fields = [f.replace("{part}", part) for f, _ in preset["bom"]]
         group = [f for f in ("Value", "Footprint", part) if f in fields]
@@ -2828,6 +3029,9 @@ def cmd_release(args):
     for label, pro in labels.items():
         for f in release_project(pro, args.tag, settings, "release", label):
             print(f)
+        marker = pathlib.Path(f"release/{label}-{args.tag}-{settings['fabrication']['preset']}-gerbers.zip.error")
+        if marker.is_file():
+            sys.exit(f"{label}: " + marker.read_text(encoding="utf-8"))
     os.makedirs("release", exist_ok=True)
     sums = []
     for f in sorted(os.listdir("release")):
@@ -4096,6 +4300,15 @@ FAB_VENDORS = ('jlcpcb', 'pcbway')
 FAB_VENDOR_LABELS = {'jlcpcb': 'JLCPCB', 'pcbway': 'PCBWay'}
 
 
+def output_not_run(p, out_dir, sides, output):
+    """Reason a board side has no output (rendering left <output>.error instead), else None."""
+    for s in sides:
+        marker = pathlib.Path(out_dir, s, output + ".error")
+        if os.path.exists(board_path(p, s)) and not os.path.exists(f"{out_dir}/{s}/{output}") and marker.is_file():
+            return f"{s} " + marker.read_text(encoding="utf-8").strip()
+    return None
+
+
 def fab_read_audit(out_dir, side, p, vendor):
     path = pathlib.Path(out_dir, side, 'fab-limits.json')
     if not path.is_file():
@@ -4120,6 +4333,12 @@ def fab_check(p, settings, out_dir, waivers, vendor):
     fab_regular_input(pathlib.Path(head_board))
     if not os.path.isfile(head_board):
         result = {**empty,'status':'not_run','reason':'no head board','unsupported':'no head board'}
+        if waivers is not None:
+            result['waived'] = 0
+        return result
+    reason = output_not_run(p, out_dir, ('head', 'base'), 'fab-limits.json')
+    if reason:
+        result = {**empty,'status':'not_run','reason':reason,'incomplete':True}
         if waivers is not None:
             result['waived'] = 0
         return result
@@ -4171,25 +4390,41 @@ def project_checks(p, settings, objs, waivers=None):
         if os.path.exists(src) and not os.path.exists(f"{out_dir}/{s}/{f}"):  # never drop a check because its output is missing
             sys.exit(f"kicad-cli wrote no {f} for {src}")
         return load_violations(f"{out_dir}/{s}/{f}", k, objs[s])
+
+    def drc_not_run(sides):
+        """Reason a board side has no DRC run (render_side left drc.json.error instead of drc.json), else None."""
+        return output_not_run(p, out_dir, sides, "drc.json")
+
+    def not_run(name, reason, incomplete=False):
+        if settings["checks"].get(name, "off") == "off":
+            return None
+        return {"name": name, "title": CHECK_NAMES[name], "level": settings["checks"][name], "status": "not_run", "reason": reason,
+                **({"incomplete": True} if incomplete else {}),
+                "errors": 0, "new_errors": 0, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []}
     fields = settings["bom"]["required_fields"]
+    drc_reason = drc_not_run(("head", "base"))
+    parity_reason = drc_not_run([s for s in ("head", "base") if sch(s)]) if sch("head") else None
     checks = [
         run_check("erc", settings, side("head", "erc.json", "erc"), side("base", "erc.json", "erc"), waivers),
+        not_run("drc", drc_reason, True) if drc_reason else
         run_check("drc", settings, side("head", "drc.json", "drc"), side("base", "drc.json", "drc"), waivers),
+        not_run("parity", parity_reason, True) if parity_reason else
         run_check("parity", settings, side("head", "drc.json", "parity") if sch("head") else None,
                   side("base", "drc.json", "parity") if sch("base") else None, waivers),
         run_check("bom", settings, bom_violations(objs["head"], fields) if sch("head") else None,
                   bom_violations(objs["base"], fields) if sch("base") else None),
     ]
     out = [c for c in checks if c] + [
-        {"name": name, "title": CHECK_NAMES[name], "level": settings["checks"][name], "status": "not_run", "reason": "no schematic",
-         "errors": 0, "new_errors": 0, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []}
-        for name in ("parity", "bom") if not sch("head") and settings["checks"].get(name, "off") != "off"]
+        not_run(name, "no schematic") for name in ("parity", "bom") if not sch("head") and settings["checks"].get(name, "off") != "off"]
     if settings["checks"].get("release", "off") != "off":
         pcb = lambda s: posixpath.join(s, p["dir"], f"{p['name']}.kicad_pcb")
         preset = settings["fabrication"]["preset"]
+        release_reason = output_not_run(p, out_dir, ("head", "base"), f"fab/{p['name']}-review-{preset}-gerbers.zip")
         if not os.path.exists(pcb("head")):
             out.append({"name": "release", "title": CHECK_NAMES["release"], "level": settings["checks"]["release"], "status": "not_run",
                         "reason": "no board", "errors": 0, "new_errors": 0, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []})
+        elif release_reason:
+            out.append(not_run("release", release_reason, True))
         else:
             side = lambda s: release_findings(f"{out_dir}/{s}/fab", p["name"], preset, pcb(s), objs[s]) if os.path.exists(pcb(s)) else None
             c = run_check("release", settings, side("head"), side("base"))
@@ -4215,6 +4450,17 @@ def parse_netlist(text):
     nets = {val(n, "name"): [{"ref": val(x, "ref"), "pin": val(x, "pin"), "function": val(x, "pinfunction", ""), "type": val(x, "pintype", "")}
                              for x in findall(n, "node")] for n in findall(find(root, "nets") or [], "net")}
     return comps, nets
+
+
+def candidate_identity_valid(candidates):
+    """True when symbol candidates have known sheets and distinct unit numbers."""
+    if not candidates:
+        return False
+    objs = [c[1] if isinstance(c, tuple) else c for c in candidates]
+    units = [o.get("props", {}).get("unit", "1") for o in objs]
+    if len(units) != len(set(units)):
+        return False
+    return not any((o.get("where") or {}).get("sheet") is None for o in objs)
 
 
 def net_members(text, objects, commit):
@@ -4247,14 +4493,10 @@ def net_members(text, objects, commit):
             if ref.startswith("#"):  # Power symbols and flags (ref starts with '#') are skipped; they are not fabricated as component pins
                 continue
             candidates = by_ref.get(ref, [])
-            units = [((o.get("where") or {}).get("sheet"), o["props"].get("unit", "1"))
-                     for _, o in candidates]
             invalid = not ref or "?" in ref
             # A missing or unannotated reference has no UUID in the netlist node, so only a single matching symbol candidate can be disambiguated.
-            ambiguous = (not pin or not candidates
-                         or any(s is None for s, _ in units)
-                         or len(units) != len(set(units))
-                         or len({s for s, _ in units}) != 1
+            ambiguous = (not pin
+                         or not candidate_identity_valid(candidates)
                          or (invalid and len(candidates) != 1))
             if ambiguous:
                 unknown = True
@@ -4277,25 +4519,6 @@ def net_members(text, objects, commit):
 
 def validate_netlist(text):
     """Raise ValueError unless text is exactly one usable netlist export."""
-    # parse_sexpr returns only the first expression, so reject truncated or trailing content here.
-    depth, quoted, escaped, roots, end = 0, False, False, 0, None
-    for index, char in enumerate(text):
-        if quoted:
-            if escaped: escaped = False
-            elif char == "\\": escaped = True
-            elif char == '"': quoted = False
-        elif char == '"': quoted = True
-        elif char == "(":
-            if depth == 0:
-                roots += 1
-                if roots != 1: raise ValueError("trailing netlist expression")
-            depth += 1
-        elif char == ")":
-            depth -= 1
-            if depth < 0: raise ValueError("unbalanced netlist")
-            if depth == 0: end = index + 1
-    if quoted or depth != 0 or roots != 1 or text[end:].strip():
-        raise ValueError("incomplete or trailing netlist content")
     root = parse_sexpr(text)
     if not isinstance(root, list) or not root or root[0] != "export":
         raise ValueError("not a netlist export")
@@ -4608,11 +4831,7 @@ def schematic_pin_ids(text, objects):
     for comp in components:
         ref = val(comp, "ref")
         candidates = refs.get(ref, [])
-        identities = [((o.get("where") or {}).get("sheet"), o["props"].get("unit", "1")) for o in candidates]
-        if not ref or "?" in ref or not candidates or len(identities) != len(set(identities)):
-            continue
-        sheets = {sheet for sheet, _ in identities}
-        if len(sheets) != 1 or None in sheets:
+        if not ref or "?" in ref or not candidate_identity_valid(candidates):
             continue
         if sum(val(c, "ref") == ref for c in components) != 1:
             continue
@@ -4653,7 +4872,15 @@ def electrical_changes(p, out, objs, commits):
         first = next(iter(r["anchors"]["head"] or r["anchors"]["base"]), None)
         r["where"] = {"sheet": first["sheet"]} if first else None
     pcbs = {s: pathlib.Path(root, p["name"] + ".kicad_pcb") for s, root in roots.items()}
-    padrows = diff_board_pins(objs["base"], objs["head"], board_pads(pcbs["base"]), board_pads(pcbs["head"]), commits)
+    try:
+        base_pads = board_pads(pcbs["base"])
+        head_pads = board_pads(pcbs["head"])
+    except (OSError, ValueError, TypeError, AttributeError, IndexError, KeyError) as exc:
+        padrows = []
+        issues.append({"channel": "wiring", "document": "board",
+                       "reason": f"Board pad evidence missing or malformed: {str(exc)[:500]}"})
+    else:
+        padrows = diff_board_pins(objs["base"], objs["head"], base_pads, head_pads, commits)
 
     def pin_net(side, key):
         """Schematic net of a pin: None means unknown; "" means a proven pin with no net assignment."""
@@ -4676,10 +4903,14 @@ def electrical_changes(p, out, objs, commits):
     copperrows, found = read_copper(pathlib.Path(out) / "copper-diff.json") if any(f.is_file() for f in pcbs.values()) else ([], [])
     issues += [{**i, "document": "board"} for i in found]
     try:
-        rulerows = diff_rules(roots["base"], roots["head"], p["name"])
-    except (OSError, ValueError, TypeError, AttributeError, IndexError):
+        base_rules = rule_values(roots["base"], p["name"])
+        head_rules = rule_values(roots["head"], p["name"])
+    except (OSError, ValueError, TypeError, AttributeError, IndexError, KeyError) as exc:
         rulerows = []
-        issues.append({"channel": "rules", "document": "board", "reason": "Rules evidence missing or malformed"})
+        issues.append({"channel": "rules", "document": "board",
+                       "reason": f"Rules evidence missing or malformed: {str(exc)[:500]}"})
+    else:
+        rulerows = diff_rules(roots["base"], roots["head"], p["name"], b=base_rules, h=head_rules)
     return netrows + diff_wires(objs["base"], objs["head"]) + padrows + copperrows + rulerows, issues
 
 
@@ -5125,19 +5356,22 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0, bom_sink=No
         src = posixpath.join(side, p['dir'])
         source = pathlib.Path(src, p['name'] + '.kicad_sch')
         # Legacy fixtures may lack a root identity. Keep artwork without inventing anchors.
-        if source.is_file() and val(parse_sexpr(source.read_text()), 'uuid'):
-            manifest = sheet_hotspots(src, p['name'])
-            page_by_path = {page['path']: page for page in pages_by_side[side]}
-            for view in manifest['views']:
-                rel = theme_paths[side].get(view['sheet'], {}).get('light')
-                page = page_by_path.get(view['sheet'])
-                path = str(pathlib.Path(out, side, rel)) if rel else page_svg(f'{out}/{side}', p['name'], page)
-                text = svg_body(path)
-                if text:
-                    view['viewBox'] = svg_viewbox(text)
-            payload = json.dumps(manifest, separators=(',', ':'), sort_keys=True)
-            pathlib.Path(out, side, 'sheet-hotspots.json').write_text(payload)
-            hotspot_ids[side] = add_blob(blobs, payload)
+        try:
+            if source.is_file() and val(parse_sexpr(source.read_text()), 'uuid'):
+                manifest = sheet_hotspots(src, p['name'])
+                page_by_path = {page['path']: page for page in pages_by_side[side]}
+                for view in manifest['views']:
+                    rel = theme_paths[side].get(view['sheet'], {}).get('light')
+                    page = page_by_path.get(view['sheet'])
+                    path = str(pathlib.Path(out, side, rel)) if rel else page_svg(f'{out}/{side}', p['name'], page)
+                    text = svg_body(path)
+                    if text:
+                        view['viewBox'] = svg_viewbox(text)
+                payload = json.dumps(manifest, separators=(',', ':'), sort_keys=True)
+                pathlib.Path(out, side, 'sheet-hotspots.json').write_text(payload)
+                hotspot_ids[side] = add_blob(blobs, payload)
+        except Exception as exc:  # optional evidence: any hotspot failure keeps the schematic SVGs
+            print('::warning::' + workflow_command_escape(f'{source}: hotspots unavailable; retaining schematic SVGs: {exc!r}'), file=sys.stderr)
     pages = {}
     for side in sides:
         for pg in pages_by_side[side]:
@@ -5460,6 +5694,8 @@ def merge_supplier(projects, lookup):
 
 
 def cmd_report(args):
+    _sheet_warnings.clear()
+    _board_warnings.clear()
     with open("review/detect.json", encoding="utf-8") as fh:
         det = json.load(fh)
     blobs = {}
