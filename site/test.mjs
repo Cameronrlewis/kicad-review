@@ -6197,7 +6197,8 @@ test('thread listing comment paging stops at the page cap and fails closed on ba
   for (const shape of [{ pageInfo: undefined }, { pageInfo: null }, { pageInfo: {} },
     { pageInfo: { hasNextPage: 'true', endCursor: 'T1@50' } }, { pageInfo: { hasNextPage: 1, endCursor: 'T1@50' } }, { pageInfo: { hasNextPage: null, endCursor: 'T1@50' } },
     { pageInfo: { hasNextPage: true } }, { pageInfo: { hasNextPage: true, endCursor: null } }, { pageInfo: { hasNextPage: true, endCursor: 50 } },
-    { totalCount: undefined }, { totalCount: null }, { totalCount: -1 }, { totalCount: 50.5 }, { totalCount: '51' }]) {
+    { totalCount: undefined }, { totalCount: null }, { totalCount: -1 }, { totalCount: 50.5 }, { totalCount: '51' },
+    { nodes: undefined }, { nodes: null }, { nodes: 'x' }]) {
     const thread = pagedThread(1, 51);
     const firstPage = commentPagingMock({ threads: [{ ...thread, comments: { ...thread.comments, ...shape } }], pages: () => ({ comments: lastPage }) });
     try {

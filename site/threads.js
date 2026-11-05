@@ -183,8 +183,8 @@ export async function threadsRoute(request, env, { owner, repo, number, rest }, 
       let pending = [];
       for (const node of nodes) {
         const c = node?.comments;
-        if (!c || !Array.isArray(c.nodes) || !parseAnchor(c.nodes[0]?.body)) continue;
         if (!validComments(c)) return json({ error: 'GitHub did not answer. Try again.' }, 502);
+        if (!parseAnchor(c.nodes[0]?.body)) continue;
         if (c.pageInfo?.hasNextPage || c.totalCount > c.nodes.length) pending.push({ c, id: String(node.id), after: c.pageInfo?.endCursor });
       }
       for (let page = 1; pending.length; page++) {
