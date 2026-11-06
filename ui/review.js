@@ -3156,8 +3156,8 @@ async function raster(side, view, W, H) {
     if (!t) continue;
     const url = URL.createObjectURL(new Blob([t], { type: "image/svg+xml" }));
     const img = new Image();
-    img.src = url;
-    try { await img.decode(); ctx.drawImage(img, 0, 0, W, H); } catch (_) {}
+    // load, not decode(): Chrome's decode() can reject a valid SVG under load, which silently dropped a layer.
+    try { await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; img.src = url; }); ctx.drawImage(img, 0, 0, W, H); } catch (_) {}
     URL.revokeObjectURL(url);
   }
   return ctx.getImageData(0, 0, W, H).data;
