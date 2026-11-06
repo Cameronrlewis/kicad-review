@@ -26,7 +26,7 @@ cd site
 npx wrangler dev
 ```
 
-`wrangler` is fetched by `npx`; nothing is added to the repository. Put local secrets in `site/.dev.vars`, which is git-ignored:
+`wrangler` is fetched by `npx`. The MCP server's two locked dependencies install with `npm ci --prefix site` from the repository root; run it before the site tests. Put local secrets in `site/.dev.vars`, which is git-ignored:
 
 ```text
 GITHUB_CLIENT_ID=…
@@ -73,6 +73,64 @@ Writers see **Share…** on a review page. Links grant read-only access to that 
 **Revoke all links for this repository** replaces the repository Actions variable `KICAD_REVIEW_SHARE_GEN` with a fresh opaque numeric generation. Every previous generation stops working; individual-link revocation is not supported. **Never delete the `KICAD_REVIEW_SHARE_GEN` variable:** a missing variable reads as generation 0 and revives links created before the first revoke. Never reset it to a previous value. To kill all links, rotate `SHARE_KEY`. State read/write errors fail closed rather than claiming revocation succeeded.
 
 Installation tokens are cached only in worker-isolate memory, until five minutes before their GitHub expiry. The bounded cache separates App, installation, owner, repository and permission scopes. Tokens are never persisted or sent to guests. Guest tokens have only Actions read and Variables read, scoped to the single repository. Revocation uses a separate repository-scoped Variables-write token. Generation state is checked on every guest request and is never cached, so token reuse does not delay revocation. A wrapper view uses four GitHub calls (three with a cached token); its report frame uses six (five cached), including the artifact storage download. No database or KV is added.
+
+## Design pages (optional)
+
+`GET /r/<owner>/<repo>/projects` lists the project folders; `GET /r/<owner>/<repo>/p/<folder>/design[/<ref>]` opens the newest `kicad-design-<sha7>.html` artifact of that folder at a branch, tag or commit (the default branch when `<ref>` is omitted), or the tag's `design-snapshot.html` release asset after expiry; `GET /r/<owner>/<repo>/p/<folder>/designs?ref=&cursor=` lists that folder's KiCad changes 25 at a time; `POST /r/<owner>/<repo>/design/render` dispatches `kicad-review.yml` with `snapshot_only` for one commit (write access, same `Origin` check as Compare). No storage is added: the snapshot is a workflow artifact read with the signed-in person's own token, exactly like a review. They need no new App permission. After artifact expiry, `/r/<owner>/<repo>/p/<folder>/design/<tag>` opens the tag's release asset `design-snapshot.html` in the same wrapper (at `/r/<owner>/<repo>/design-release/<tag>`), authenticated with the signed-in person's token. That release HTML stays downloadable and usable offline after Actions retention expires: `gh release download TAG --repo OWNER/REPO --pattern design-snapshot.html`. Retention defaults to 90 days; set the `KICAD_REVIEW_SNAPSHOT_DAYS` Actions variable to the repository's configured maximum to keep snapshots that long. See the README's "Design page".
+
+## Ask
+
+Ask needs the API-key secret and KV binding on the Worker, plus repository opt-in. Missing Worker setup answers 503; the embedded tab stays disabled. The fail-closed opt-in reader supports the complete shipped `examples/kicad-review.toml`, including `bom.required_fields = ["Value", "Footprint"]`: bare single-level tables/keys, boolean/decimal/string scalars and flat scalar arrays, including multiline arrays, trailing commas and comments. `[ask].enabled` must be the literal boolean `true`; false, quoted booleans, malformed input and duplicate tables/keys never opt in. Inline/dotted/quoted tables, nested arrays and multiline strings remain outside this deliberately constrained subset and refuse Ask without sending design data; configurations needing these forms require an owner-approved TOML parser before deployment. Keep the full-example enabled/false/malformed route test passing after editing the example.
+
+```sh
+cd site
+npx wrangler secret put ANTHROPIC_API_KEY
+npx wrangler kv namespace create ASK_KV
+```
+Add the printed id to `wrangler.toml`:
+
+```toml
+[[kv_namespaces]]
+binding = "ASK_KV"
+id = "<the printed id>"
+```
+Optional variables under `[vars]`: `ASK_DAILY_LIMIT` (questions per user per day, default 50), `ASK_MODEL` (default `claude-sonnet-5-5`) and `ASK_SUMMARY_MODEL` (defaults to `ASK_MODEL`, or `claude-sonnet-5-5`; set `ASK_SUMMARY_MODEL` to a smaller model to cut cost). KV holds only the per-user daily counter and the cached summaries; it is a cache, not a store. The daily counter is a best-effort UX cap, not a billing bound: concurrent requests and eventually consistent reads can overshoot without a fixed bound or lose increments. KV permits only one write per second to the same key; if a daily-counter write fails after the provider starts an answer, Ask continues that answer without retrying the model and emits a status explaining that the remaining count is an estimate. The increment may be lost. Configure provider billing limits before deployment; a hard quota needs owner-approved serialized storage. Locally, put `ANTHROPIC_API_KEY` in `site/.dev.vars` and add the same `[[kv_namespaces]]` stanza.
+
+## Remote MCP (optional)
+
+What Remote MCP does, its limits and how to connect are in the [main README](../README.md#remote-mcp-optional); this section covers the Worker binding only.
+
+Remote MCP needs the `OAUTH_KV` binding. Create the namespace:
+
+```sh
+cd site
+npx --yes wrangler@4.148.0 kv namespace create OAUTH_KV
+```
+
+Add the printed id to `wrangler.toml` (the commented block there). Never bind a placeholder and never leave `id` out, or Wrangler can try to provision a namespace itself on deploy:
+
+```toml
+[[kv_namespaces]]
+binding = "OAUTH_KV"
+id = "<the printed id>"
+```
+
+Without the binding, `/mcp` returns a configuration error and no Connect panel is shown; the rest of the site is unchanged.
+
+## MCP dependencies (verified 2026-11-02)
+
+`site/package.json` pins `@cloudflare/workers-oauth-provider` 1.2.4 and `@modelcontextprotocol/sdk` 1.32.2 exactly; `site/package-lock.json` locks the rest. The SDK's `WebStandardStreamableHTTPServerTransport` runs stateless (`sessionIdGenerator: undefined`, `enableJsonResponse: true`) in workerd and Node and negotiates protocol `2025-03-26`. Discovery in this SDK is `discoverOAuthProtectedResourceMetadata(url, opts, fetchFn)` (fetch is the third argument, so callers pass all three) and `discoverAuthorizationServerMetadata(url, {fetchFn})`.
+
+OAuth provider facts the MCP code relies on, checked against the installed types and source:
+
+- `env.OAUTH_PROVIDER` is set for both `apiHandler` and `defaultHandler`; `apiHandler.fetch(request, env, ctx)` gets the decrypted grant props as `ctx.props`.
+- PKCE is S256 only (plain is refused), redirect URIs match exactly, an access token is bound to `resourceMetadata.resource`, and a replayed code fails with `invalid_grant` and revokes that grant's tokens.
+- Tokens are `<userId>:<grantId>:<secret>`; KV keeps only hashes and encrypted props.
+- Refresh tokens are on by default. `refreshTokenTTL: 0` turns them off.
+- Helpers: `listUserGrants(userId: string, options?) -> Promise<{items: GrantSummary[], cursor?: string}>` (each item has `id`), and `revokeGrant(grantId: string, userId: string) -> Promise<void>`, which deletes the grant and every token under it. The next bearer call returns 401 `invalid_token`.
+- Public revocation (RFC 7009) uses the token endpoint, which metadata advertises as `revocation_endpoint`. Send `POST` with `Content-Type: application/x-www-form-urlencoded` and the body `token=<access or refresh token>&token_type_hint=access_token&client_id=<client id>`; a confidential client authenticates the way it does at the token endpoint. The response is always 200. Revoking an access token deletes only that token; revoking a refresh token revokes the whole grant. After revocation the revoked bearer gets 401 with `WWW-Authenticate: Bearer ... error="invalid_token"`.
+
+The provider imports `cloudflare:workers`, so `site/css-loader.mjs` defines a Node `resolve` hook stubbing `cloudflare:workers` (providing `WorkerEntrypoint`) so Node test suites can load the real OAuth provider.
 
 ## Settings
 

@@ -10,11 +10,15 @@ on:
 env:
   # Official KiCad image, pinned by digest so a new upload under the same tag cannot change results.
   KICAD_IMAGE: kicad/kicad:10.0.6-full@sha256:e36e29b5f4a638a1a7238eba3d2fcbc8e061ffed1e99a8f39cb722706c94a58e
+  # Python 3.13 image matching KiCad 10.0.6 image Python (3.13.5) for cp313 wheel ABI compatibility.
+  PYTHON_IMAGE: python:3.13-slim@sha256:ae14d4ce8771606477a81446e7ef429edd6762305fc50c84507c1041fa8285d1
 
 jobs:
   review:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    outputs:
+      thumbnails: ${{ steps.snapshot.outputs.thumbnails }}
     # Only pull request runs share a group, so a newer PR run replaces the older one; every push, tag and manual run has its own group, because each push reviews only its own commits.
     concurrency:
       group: kicad-review-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
@@ -65,6 +69,8 @@ jobs:
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
           IN_BASE: ${{ github.event.inputs.base }}
           IN_HEAD: ${{ github.event.inputs.head }}
+          SNAPSHOT_ONLY: ${{ github.event.inputs.snapshot_only }}
+          REF_NAME: ${{ github.ref_name }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: python3 ../tools/kicad_review.py detect
 
@@ -91,11 +97,24 @@ jobs:
           path: .render-cache/${{ steps.detect.outputs.head }}
           key: renders-v1-${{ runner.os }}-${{ hashFiles('tools/kicad_review.py', 'tools/fab_limits.json', 'tools/ui/compress3d.cjs', 'base/kicad-review.toml', 'head/kicad-review.toml') }}-${{ env.KICAD_IMAGE }}-${{ steps.detect.outputs.head }}
 
+      # PcbDraw: installed into the workspace, then imported only by the KiCad image's Python.
+      # The KiCad 10.0.6 image ships Python 3.13.5 with no pip/venv.
+      # Installing in python:3.13-slim produces cp313 wheels (lxml, numpy, Pillow) matching the KiCad Python ABI.
+      # Optional: without it the render records "PcbDraw failed" (retried on the next run) and the design report shows that note.
+      - name: Install PcbDraw
+        if: steps.detect.outputs.changed == 'true' && steps.detect.outputs.design == 'true'
+        continue-on-error: true
+        run: |
+          rm -rf .pydeps
+          docker run -q --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/w" -w /w "$PYTHON_IMAGE" \
+            pip install -q --target /w/.pydeps pcbdraw==1.3.0 ||
+            { rm -rf .pydeps; python3 -c "import sys; sys.path.insert(0, 'tools'); import kicad_review as kr; print('::warning::' + kr.workflow_command_escape('PcbDraw could not be installed; design reports show a note in place of its plots.'))"; exit 1; }
+
       - name: Render both revisions and run ERC/DRC
         if: steps.detect.outputs.changed == 'true'
         run: |
           if ! python3 tools/kicad_review.py restore-renders; then
-            docker run -q --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -e KICAD_IMAGE -v "$PWD:/w" -w /w "$KICAD_IMAGE" \
+            docker run -q --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -e KICAD_IMAGE -e PYTHONPATH=/w/.pydeps -v "$PWD:/w" -w /w "$KICAD_IMAGE" \
               python3 tools/kicad_review.py render
           fi
           docker run -q --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -e KICAD_IMAGE -v "$PWD:/w" -w /w "$KICAD_IMAGE" \
@@ -121,9 +140,17 @@ jobs:
         run: |
           set -euo pipefail
           DEPS="$HOME/.cache/kicad-review-meshopt"
-          mkdir -p "$DEPS"
-          if [ ! -d "$DEPS/node_modules/meshoptimizer" ]; then
-            npm install --prefix "$DEPS" --no-save --package-lock=false @gltf-transform/core@4.2.1 @gltf-transform/extensions@4.2.1 @gltf-transform/functions@4.2.1 meshoptimizer@0.22.0 || { echo "::warning::3D compression dependencies unavailable; keeping raw GLBs."; exit 0; }
+          if [ ! -f "$DEPS/.complete" ]; then
+            rm -rf "$DEPS"
+            mkdir -p "$DEPS"
+            if npm install --prefix "$DEPS" --no-save --package-lock=false @gltf-transform/core@4.2.1 @gltf-transform/extensions@4.2.1 @gltf-transform/functions@4.2.1 meshoptimizer@0.22.0 \
+               && NODE_PATH="$DEPS/node_modules" node -e "require('@gltf-transform/core'); require('@gltf-transform/extensions'); require('@gltf-transform/functions'); require('meshoptimizer')"; then
+              touch "$DEPS/.complete"
+            else
+              rm -rf "$DEPS"
+              python3 -c "import sys; sys.path.insert(0, 'tools'); import kicad_review as kr; print('::warning::' + kr.workflow_command_escape('3D compression dependencies unavailable; keeping raw GLBs.'))"
+              exit 0
+            fi
           fi
 
       - name: Compress 3D board models
@@ -151,7 +178,7 @@ jobs:
             else
               cp "$dir/board.raw.glb" "$dir/board.glb"
               rm -f "$dir/board-parts.json" "$dir/board-stats.json" "$dir/board-processed.json"
-              echo "::warning::3D processing failed for $dir; keeping the raw GLB."
+              python3 -c "import sys; sys.path.insert(0, 'tools'); import kicad_review as kr; print('::warning::' + kr.workflow_command_escape('3D processing failed for ' + sys.argv[1] + '; keeping the raw GLB.'))" "$dir"
             fi
           done < <(find review -name board-3d-input.json -print0)
 
@@ -171,12 +198,30 @@ jobs:
 
       - name: Build comparison report and checks
         id: report
-        if: steps.detect.outputs.changed == 'true'
+        if: steps.detect.outputs.review == 'true'
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           # Read the live PR target tip; non-PR runs use the default branch, not the pushed branch.
           WAIVERS_REF: origin/${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}
         run: python3 tools/kicad_review.py report
+
+      # One archived artifact per run holds every project's exported files (<project index>/<file>). Entries are
+      # stored, not recompressed: STEP and GLB are the bulk, and the review site reads one entry by byte range.
+      # Uploaded before the report, so a rejected upload can still be reflected in it.
+      - name: Upload downloads
+        id: downloads
+        if: steps.report.outputs.downloads == 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.report.outputs.downloads_name }}
+          path: review/downloads
+          compression-level: 0
+          retention-days: 90
+
+      - name: Drop unstored downloads from the report
+        if: steps.downloads.outcome == 'failure'
+        run: python3 tools/kicad_review.py drop-downloads
 
       # Threads live on the pull request as review comments; the summary only counts them.
       - name: Collect review threads
@@ -189,7 +234,7 @@ jobs:
           # ponytail: first 100 threads only; gate fails closed above that ceiling; paginate if needed.
           gh api graphql -f owner="${GITHUB_REPOSITORY%/*}" -f name="${GITHUB_REPOSITORY#*/}" -F number="$PR" \
             -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){totalCount nodes{isResolved comments(first:1){nodes{body}}}}}}}' \
-            > review/threads.json || { rm -f review/threads.json; echo "::warning::Could not read review threads"; }
+            > review/threads.json || { rm -f review/threads.json; python3 -c "import sys; sys.path.insert(0, 'tools'); import kicad_review as kr; print('::warning::' + kr.workflow_command_escape('Could not read review threads'))"; }
 
       # Optional; opted-in callers must grant issues: read. Existing v1 callers are unchanged.
       - name: Collect anchored issues
@@ -200,38 +245,83 @@ jobs:
         run: |
           # ponytail: first 100 open issues; paginate if a repository ever anchors more.
           gh api "repos/$GITHUB_REPOSITORY/issues?state=open&per_page=100" > review/issues.json \
-            || { rm -f review/issues.json; echo "::warning::Could not read issues. Add 'issues: read' to the caller's permissions."; }
+            || { rm -f review/issues.json; python3 -c "import sys; sys.path.insert(0, 'tools'); import kicad_review as kr; print('::warning::' + kr.workflow_command_escape(\"Could not read issues. Add 'issues: read' to the caller's permissions.\"))"; }
 
       - name: Copy named report
-        if: steps.detect.outputs.changed == 'true'
+        if: steps.detect.outputs.review == 'true'
         env:
           REPORT_NAME: ${{ steps.report.outputs.name }}
         run: cp review/kicad-review.html "review/$REPORT_NAME"
 
       - name: Upload report
         id: upload
-        if: steps.detect.outputs.changed == 'true'
+        if: steps.detect.outputs.review == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           archive: false
           path: review/${{ steps.report.outputs.name }}
           retention-days: 90
 
-      # One archived artifact per run holds every project's exported files (<project index>/<file>). Entries are
-      # stored, not recompressed: STEP and GLB are the bulk, and the review site reads one entry by byte range.
-      - name: Upload downloads
-        if: steps.report.outputs.downloads == 'true'
+      # The design as it is at head, made from the renders above. Pushes to the default branch and version tags leave one; so does a snapshot-only manual run.
+      - name: Build design snapshot
+        id: snapshot
+        if: steps.detect.outputs.snapshot == 'true'
+        env:
+          WAIVERS_REF: origin/${{ github.event.repository.default_branch }}
+        run: python3 tools/kicad_review.py snapshot
+
+      # The snapshot's own downloads bundle (<project index>/<file>, never the comparison's), kept as long as the snapshot.
+      # Uploaded before the snapshot, so a rejected upload can still be reflected in it.
+      - name: Upload design downloads
+        id: design_downloads
+        if: steps.snapshot.outputs.downloads == 'true'
         continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: ${{ steps.report.outputs.downloads_name }}
-          path: review/downloads
+          name: ${{ steps.snapshot.outputs.downloads_name }}
+          path: review/design-downloads
           compression-level: 0
-          retention-days: 90
+          retention-days: ${{ vars.KICAD_REVIEW_SNAPSHOT_DAYS || 90 }}
+
+      - name: Drop unstored design downloads from the snapshot
+        if: steps.design_downloads.outcome == 'failure'
+        run: python3 tools/kicad_review.py drop-downloads --design
+
+      # ponytail: 90-day default ceiling; set the KICAD_REVIEW_SNAPSHOT_DAYS variable to the repository's configured maximum. No retention discovery.
+      - name: Upload design snapshot
+        if: steps.snapshot.outputs.built == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          archive: false
+          name: ${{ steps.snapshot.outputs.name }}   # the artifact name is the report name; the Ask context lookup matches it
+          path: review/design/${{ steps.snapshot.outputs.name }}
+          retention-days: ${{ vars.KICAD_REVIEW_SNAPSHOT_DAYS || 90 }}
+
+      # Optional Ask hook: off until a context producer emits ask=true with the context name; until then the snapshot step emits ask=false and no context name. Upload failure never fails the snapshot.
+      - name: Upload design snapshot context
+        if: steps.snapshot.outputs.ask == 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          archive: false
+          name: ${{ steps.snapshot.outputs.context_name }}   # loadContext looks up kicad-design-<sha7>.context.json by the HTML name with .context.json
+          path: review/design/${{ steps.snapshot.outputs.context_name }}
+          retention-days: ${{ vars.KICAD_REVIEW_SNAPSHOT_DAYS || 90 }}   # same retention as the HTML it belongs to
+
+      # Straight after the snapshot: a later failing step must not leave the thumbnail jobs without their input.
+      - name: Upload thumbnail input
+        if: steps.snapshot.outputs.thumbnails == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: design-thumbnail-input
+          path: |
+            review/design/thumbnail-plan.json
+            review/design/thumb-src
+          retention-days: 1
+          overwrite: true
 
       - name: Upload digest-keyed 3D assets
         if: steps.detect.outputs.changed == 'true' && hashFiles('review/3d/kicad-3d-*.gz') != ''
-        continue-on-error: true
         # A node action receives Actions runtime credentials; a plain run step does not.
         uses: ./tools/.github/actions/upload-3d-assets
         env:
@@ -251,6 +341,23 @@ jobs:
               rm -f "$output"
             done
 
+      # Optional: the design data behind Ask. A failure here must not fail the review.
+      - name: Copy design context
+        if: steps.report.outputs.ask == 'true'
+        continue-on-error: true
+        env:
+          CONTEXT_NAME: ${{ steps.report.outputs.context_name }}
+        run: cp review/design-context.json "review/$CONTEXT_NAME"
+
+      - name: Upload design context
+        if: steps.report.outputs.ask == 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          archive: false
+          path: review/${{ steps.report.outputs.context_name }}
+          retention-days: 90
+
       - name: Upload image assets
         if: steps.detect.outputs.changed == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -262,7 +369,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Screenshots of changed drawings
-        if: steps.detect.outputs.changed == 'true'
+        if: steps.detect.outputs.review == 'true'
         continue-on-error: true
         run: python3 tools/kicad_review.py shots
 
@@ -288,7 +395,7 @@ jobs:
       # which repository members' browsers can load. Project branches are never written to.
       - name: Publish screenshots
         id: images
-        if: steps.detect.outputs.changed == 'true'
+        if: steps.detect.outputs.review == 'true'
         continue-on-error: true
         env:
           TOKEN: ${{ github.token }}
@@ -340,7 +447,7 @@ jobs:
 
       - name: Job summary
         id: summary
-        if: steps.detect.outputs.changed == 'true'
+        if: steps.detect.outputs.review == 'true'
         env:
           IMAGES: ${{ steps.images.outputs.base }}
           ARTIFACT: ${{ steps.upload.outputs.artifact-url }}
@@ -358,11 +465,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           HEAD: ${{ steps.detect.outputs.head }}
         run: |
-          [ -f review/check-runs.json ] || { echo "::warning::review/check-runs.json missing; no check runs published."; exit 0; }
+          [ -f review/check-runs.json ] || { python3 -c "import sys; sys.path.insert(0, 'tools'); import kicad_review as kr; print('::warning::' + kr.workflow_command_escape('review/check-runs.json missing; no check runs published.'))"; exit 0; }
           jq -c '.[]' review/check-runs.json | while read -r run; do
             printf '%s\n' "$run" | jq --arg sha "$HEAD" '. + {head_sha: $sha, status: "completed"}' \
               | gh api "repos/$GITHUB_REPOSITORY/check-runs" --input - > /dev/null \
-              || { echo "::warning::Could not publish check runs. Add 'checks: write' to the permissions of .github/workflows/kicad-review.yml."; exit 0; }
+              || { python3 -c "import sys; sys.path.insert(0, 'tools'); import kicad_review as kr; print('::warning::' + kr.workflow_command_escape(\"Could not publish check runs. Add 'checks: write' to the permissions of .github/workflows/kicad-review.yml.\"))"; exit 0; }
           done
 
       - name: Pull request comment
@@ -401,8 +508,8 @@ jobs:
           FAILED: ${{ steps.report.outputs.failed }}
           THREADS: ${{ steps.summary.outputs.threads_failed }}
         run: |
-          [ -z "$FAILED" ] || echo "::error::Required checks failed: $FAILED"
-          [ -z "$THREADS" ] || echo "::error::Merge blocked: $THREADS"
+          [ -z "$FAILED" ] || python3 -c "import sys; sys.path.insert(0, 'tools'); import kicad_review as kr; print('::error::' + kr.workflow_command_escape('Required checks failed: ' + sys.argv[1]))" "$FAILED"
+          [ -z "$THREADS" ] || python3 -c "import sys; sys.path.insert(0, 'tools'); import kicad_review as kr; print('::error::' + kr.workflow_command_escape('Merge blocked: ' + sys.argv[1]))" "$THREADS"
           exit 1
 
       - name: Fabrication outputs for the version tag
@@ -422,6 +529,17 @@ jobs:
             gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
           gh release upload "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --clobber release/*
 
+      - name: Attach the design snapshot to the GitHub release
+        id: attach-snapshot
+        if: ${{ always() && !cancelled() && startsWith(github.ref, 'refs/tags/') && steps.snapshot.outcome == 'success' && steps.snapshot.outputs.built == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1 ||
+            gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
+          test -f review/design/design-snapshot.html &&
+            gh release upload "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --clobber review/design/design-snapshot.html
+
       - name: Write release notes
         if: ${{ always() && !cancelled() && startsWith(github.ref, 'refs/tags/') && steps.detect.outputs.changed == 'true' && steps.report.outcome == 'success' && steps.attach.outcome == 'success' }}
         continue-on-error: true
@@ -435,7 +553,85 @@ jobs:
           # ponytail: GitHub has no conditional release edit; re-read narrows the remaining race window.
           gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --json body -q .body > review/release-body-current.md
           if ! cmp -s review/release-body.md review/release-body-current.md; then
-            echo "::warning::Release notes changed while the review section was built; skipping the edit."
+            python3 -c "import sys; sys.path.insert(0, 'tools'); import kicad_review as kr; print('::warning::' + kr.workflow_command_escape('Release notes changed while the review section was built; skipping the edit.'))"
             exit 0
           fi
           gh release edit "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --notes-file review/release-notes.md
+
+  # Making a commit's thumbnails is never serialized: each run stages its own file (thumb-<sha>-<run id>.json) on the
+  # design-thumbs release. GitHub keeps one pending job per concurrency group and cancels the older one, so only the fold
+  # below is serialized, and every fold merges every staged file, including one a cancelled pending fold left behind.
+  design-thumbnails:
+    needs: review
+    # A failed review job (a required check) still made and uploaded its snapshot, so its thumbnail is still merged.
+    if: ${{ !cancelled() && needs.review.outputs.thumbnails == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check out review tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: tools
+          persist-credentials: false
+
+      - name: Download thumbnail input
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: design-thumbnail-input
+          path: review/design
+
+      - name: Stage this commit's thumbnails on the design-thumbs release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 tools/kicad_review.py thumbs --plan review/design/thumbnail-plan.json --stage review/thumbs/staged
+          # Another run may create the release between the view and the create; the second view settles it.
+          gh release view design-thumbs -R "$GITHUB_REPOSITORY" > /dev/null 2>&1 ||
+            gh release create design-thumbs -R "$GITHUB_REPOSITORY" --prerelease --title "Design thumbnails" --notes "Small board previews for the review site, written by the design snapshot job. Not a design." ||
+            gh release view design-thumbs -R "$GITHUB_REPOSITORY" > /dev/null
+          gh release upload design-thumbs -R "$GITHUB_REPOSITORY" --clobber review/thumbs/staged/*.json
+
+  design-thumbnail-index:
+    needs: design-thumbnails
+    if: ${{ !cancelled() && needs.design-thumbnails.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      group: kicad-design-thumbs-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - name: Check out review tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: tools
+          persist-credentials: false
+
+      - name: Fold staged thumbnails into the design-thumbs release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p review/thumbs/staged
+          assets=$(gh release view design-thumbs -R "$GITHUB_REPOSITORY" --json assets -q '.assets[].name')
+          staged=$(echo "$assets" | grep -E '^thumb-[0-9a-f]{40}-[0-9]{1,20}\.json$' || true)
+          [ -n "$staged" ] || exit 0   # an earlier fold already merged this run's file
+          if echo "$assets" | grep -qx thumbs.json; then
+            gh release download design-thumbs -R "$GITHUB_REPOSITORY" --pattern thumbs.json --dir review/thumbs --clobber
+          else
+            echo '{}' > review/thumbs/thumbs.json
+          fi
+          for name in $staged; do
+            gh release download design-thumbs -R "$GITHUB_REPOSITORY" --pattern "$name" --dir review/thumbs/staged --clobber
+          done
+          python3 tools/kicad_review.py thumbs --index review/thumbs/thumbs.json --pending review/thumbs/staged
+          gh release upload design-thumbs -R "$GITHUB_REPOSITORY" --clobber review/thumbs/thumbs.json
+          for name in $staged; do   # only after the index that holds them is uploaded
+            gh release delete-asset design-thumbs "$name" -R "$GITHUB_REPOSITORY" -y
+          done

@@ -11,11 +11,15 @@ on:
   workflow_dispatch:
     inputs:
       base:
-        description: Base revision (commit, branch or tag)
-        required: true
+        description: Base revision (commit, branch or tag); leave empty with snapshot_only
+        required: false
       head:
         description: Head revision (commit, branch or tag)
         required: true
+      snapshot_only:
+        description: Only make the design snapshot of head (needs [design] enabled = true)
+        type: boolean
+        default: false
 permissions:
   # issues: read        # only with [issues] enabled = true
   contents: write       # release assets and the kicad-review-assets screenshot branch

@@ -51,6 +51,12 @@ review = false
 enabled = false
 block_merge = false  # fail the review while a blocking thread is open; needs enabled = true
 
+[ask]
+# "Ask about this design": questions answered by Claude from a compact summary of the design. Needs the review site.
+# Your questions and the design's contents (parts, nets, check results, changes) are sent to a third-party model provider. Off by default.
+# Write it as a [ask] table on the default branch: the site reads only that spelling.
+enabled = false
+
 [github]
 # One GitHub check run per check, for branch protection. Needs "checks: write" in the caller workflow. Off by default.
 check_runs = false
@@ -78,4 +84,9 @@ enabled = false
 [issues]
 # Track findings and threads as anchored GitHub issues; show open issues on later reviews.
 # App: Issues read/write; opted-in workflow caller: issues: read. Independent of threads.
+enabled = false
+
+[design]
+# A single-revision report of the design at every push to the default branch and every v* tag (artifact kicad-design-<sha>.html,
+# attached to the release as design-snapshot.html), plus manual runs with snapshot_only. Reached from the review site's "Latest design".
 enabled = false

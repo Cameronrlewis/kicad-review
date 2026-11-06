@@ -12,10 +12,10 @@
 <!-- KR_ICONS -->
 <div class="report-chrome"><header class="report-head"><svg class="bench-mark" aria-hidden="true"><use href="#kr-mark"></use></svg><span class="bench-product">KiCad review</span><nav id="hdr" aria-label="Breadcrumb"></nav><span id="report-state" class="bench-state" role="status"></span><details class="bench-menu account"><summary aria-label="User menu">Offline ▾</summary><div class="bench-popover"><span class="bench-label">Theme</span><div class="bench-themes"><button data-theme-set="dark" aria-pressed="false">Dark</button><button data-theme-set="light" aria-pressed="false">Light</button><button data-theme-set="system" aria-pressed="false">System</button></div><span class="muted">Offline report · not signed in</span></div></details></header><nav id="report-review-bar" class="review-bar" aria-label="Review navigation"></nav></div>
 <div id="toolbar" role="toolbar" aria-label="Review tools">
-  <div class="tb-grp" role="group" aria-label="View"><span class="cap">View</span><div id="modes" role="group" aria-label="Comparison mode"></div></div>
-  <div class="tb-grp" id="change-nav" role="group" aria-label="Change navigation"><span class="cap">Change</span><button type="button" data-step="-1" aria-label="Previous change" title="Previous change (k)"><svg class="i" aria-hidden="true" focusable="false"><use href="#kr-i-prev"></use></svg></button><span id="change-count" class="pct" title="Selected change / total" aria-label="Selected change of total"></span><button type="button" data-step="1" aria-label="Next change" title="Next change (j)"><svg class="i" aria-hidden="true" focusable="false"><use href="#kr-i-next"></use></svg></button></div>
+  <div class="tb-grp" data-compare role="group" aria-label="View"><span class="cap">View</span><div id="modes" role="group" aria-label="Comparison mode"></div></div>
+  <div class="tb-grp" id="change-nav" data-compare role="group" aria-label="Change navigation"><span class="cap">Change</span><button type="button" data-step="-1" aria-label="Previous change" title="Previous change (k)"><svg class="i" aria-hidden="true" focusable="false"><use href="#kr-i-prev"></use></svg></button><span id="change-count" class="pct" title="Selected change / total" aria-label="Selected change of total"></span><button type="button" data-step="1" aria-label="Next change" title="Next change (j)"><svg class="i" aria-hidden="true" focusable="false"><use href="#kr-i-next"></use></svg></button></div>
   <div class="tb-grp" role="group" aria-label="Zoom"><span class="cap">Zoom</span><div id="zoombar" role="group" aria-label="Zoom"></div></div>
-  <div class="tb-grp mark-styles" role="radiogroup" aria-label="Change mark style"><span class="cap">Marks</span>
+  <div class="tb-grp mark-styles" data-compare role="radiogroup" aria-label="Change mark style"><span class="cap">Marks</span>
     <button type="button" id="mark-style" data-mark-style="outline" role="radio" aria-checked="true" title="Outline: box each change with shape and glyph" disabled><svg class="i" aria-hidden="true" focusable="false"><use href="#kr-i-outline"></use></svg><span>Outline</span></button><button type="button" data-mark-style="recolour" role="radio" aria-checked="false" tabindex="-1" title="Recolour: repaint changed objects in diff colours" disabled><svg class="i" aria-hidden="true" focusable="false"><use href="#kr-i-recolour"></use></svg><span>Recolour</span></button>
   </div>
   <div class="tb-grp" role="group" aria-label="Downloads"><button type="button" id="downloads-open" aria-haspopup="dialog" title="Download this review's files">Download</button></div>
@@ -62,6 +62,7 @@
 <script src="board-diff.js"></script>
 <script src="three-studio.js"></script>
 <script src="image-view.js"></script>
+<script src="ask.js"></script>
 <script src="review.js"></script>
 </body>
 </html>

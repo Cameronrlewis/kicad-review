@@ -14,6 +14,7 @@ import appearance from '../ui/appearance.js';
 import boardMarks from '../ui/board-marks.js';
 import boardDiff from '../ui/board-diff.js';
 import imageView from '../ui/image-view.js';
+import ask from '../ui/ask.js';
 import reviewJs from '../ui/review.js';
 import review3d from '../ui/review3d.js';
 import threeParts from '../ui/three-parts.js';
@@ -27,7 +28,7 @@ const DATA = '<script>window.REVIEW_DATA = ';
 const BUNDLE = /<script type="application\/octet-stream" id="three-bundle">[^<]*<\/script>/;
 const assets = {
   'kicad-colors.js': kicadColors, 'appearance-state.js': appearanceState, 'board-gl.js': boardGl,
-  'appearance.js': appearance, 'board-marks.js': boardMarks, 'board-diff.js': boardDiff, 'three-studio.js': threeStudio, 'image-view.js': imageView,
+  'appearance.js': appearance, 'board-marks.js': boardMarks, 'board-diff.js': boardDiff, 'three-studio.js': threeStudio, 'image-view.js': imageView, 'ask.js': ask,
 };
 export const MAX_REPORT_BYTES = 10 * 1024 * 1024;
 export const IMAGE_ASSET_LIMITS = { svg: 8 * 1024 * 1024, json: 4 * 1024 * 1024 };
@@ -105,11 +106,15 @@ export function currentReport(stored, { lazyAssets = false, lazy3d = false, stor
   }
   // 3D: reuse the stored three.js bundle (vendored library, same for every report).
   const bundle = data.includes('"model3d"') ? stored.match(BUNDLE)?.[0] : null;
+  const hasPoster = data.includes('"poster3d"') || data.includes('"pcbdraw"');
   let html = put(page, '<link rel="stylesheet" href="tokens.css">\n<link rel="stylesheet" href="review.css">', `<style>\n${tokens}</style>\n<style>\n${review}</style>`);
   html = put(html, '<script src="sample/review-data.js"></script>', `<script>${data}</script>`);
   html = put(html, '<!-- KR_ICONS -->', sprite);
   html = put(html, '<script src="theme.js"></script>', `<script>\n${theme}</script>`);
-  html = put(html, '<script src="review.js"></script>', `${bundle ? `${bundle}${workerTag}<script>\n${threeParts}</script><script>\n${review3d}</script>` : ''}<script>\n${reviewJs}</script>`);
+  const threeScripts = bundle
+    ? `${bundle}${workerTag}<script>\n${threeParts}</script><script>\n${review3d}</script>`
+    : (hasPoster ? `<script>\n${review3d}</script>` : '');
+  html = put(html, '<script src="review.js"></script>', `${threeScripts}<script>\n${reviewJs}</script>`);
   for (const [name, text] of Object.entries(assets)) html = put(html, `<script src="${name}"></script>`, `<script>\n${text}</script>`);
   return html;
 }

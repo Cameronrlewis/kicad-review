@@ -16,7 +16,7 @@ function render(check = '', status = 'fail') {
   }));
   const context = {
     S: { checks: { check, scope: 'all', error: true, warning: true, group: 'check' } },
-    D: { settings: {} }, proj: () => ({ checks }),
+    D: { settings: {} }, proj: () => ({ checks }), single: () => false,   // 06: a comparison report, not a design snapshot
     esc: value => String(value ?? ''), dockListTools: () => '', fabLedger: () => '',
     ISSUES_ON: false,
   };

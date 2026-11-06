@@ -159,8 +159,35 @@ export async function loadReviewThreads(gh, token, { owner, repo, name = repo, n
   return { ok: true, nodes, head, present };
 }
 
-const validComments = c => Array.isArray(c?.nodes) && Number.isInteger(c.totalCount) && c.totalCount >= 0
+export const validComments = c => Array.isArray(c?.nodes) && Number.isInteger(c.totalCount) && c.totalCount >= 0
   && typeof c.pageInfo?.hasNextPage === 'boolean' && (!c.pageInfo.hasNextPage || typeof c.pageInfo.endCursor === 'string');
+
+// Reads every anchored thread's later comment pages into node.comments, one aliased request per round.
+// Returns null when complete, or the error Response (GitHub failure or the 10-round bound).
+export async function loadThreadComments(gh, token, nodes) {
+  let pending = [];
+  for (const node of nodes) {
+    const c = node?.comments;
+    if (!validComments(c)) return json({ error: 'GitHub did not answer. Try again.' }, 502);
+    if (!parseAnchor(c.nodes[0]?.body)) continue;
+    if (c.pageInfo?.hasNextPage || c.totalCount > c.nodes.length) pending.push({ c, id: String(node.id), after: c.pageInfo?.endCursor });
+  }
+  for (let page = 1; pending.length; page++) {
+    if (page >= 10 || pending.some(p => !p.after)) return json({ error: 'GitHub did not answer. Try again.' }, 502);
+    const variables = Object.fromEntries(pending.flatMap((p, i) => [[`i${i}`, p.id], [`a${i}`, p.after]]));
+    const extra = await graphqlQuery(gh, token, commentsQuery(pending.length), variables);
+    if (extra instanceof Response) return extra;
+    const more = [];
+    for (const [i, p] of pending.entries()) {
+      const next = extra?.data?.[`t${i}`]?.comments;
+      if (!validComments(next)) return json({ error: 'GitHub did not answer. Try again.' }, 502);
+      p.c.nodes.push(...next.nodes);
+      if (next.pageInfo?.hasNextPage || next.totalCount > p.c.nodes.length) more.push({ ...p, after: next.pageInfo?.endCursor });
+    }
+    pending = more;
+  }
+  return null;
+}
 
 export async function threadsRoute(request, env, { owner, repo, number, rest }, { access, gh }) {
   const url = new URL(request.url);
@@ -181,27 +208,8 @@ export async function threadsRoute(request, env, { owner, repo, number, rest }, 
       const threadsResult = await loadReviewThreads(gh, token, { owner, repo, number });
       if (threadsResult instanceof Response) return threadsResult;
       const { nodes, head } = threadsResult;
-      let pending = [];
-      for (const node of nodes) {
-        const c = node?.comments;
-        if (!validComments(c)) return json({ error: 'GitHub did not answer. Try again.' }, 502);
-        if (!parseAnchor(c.nodes[0]?.body)) continue;
-        if (c.pageInfo?.hasNextPage || c.totalCount > c.nodes.length) pending.push({ c, id: String(node.id), after: c.pageInfo?.endCursor });
-      }
-      for (let page = 1; pending.length; page++) {
-        if (page >= 10 || pending.some(p => !p.after)) return json({ error: 'GitHub did not answer. Try again.' }, 502);
-        const variables = Object.fromEntries(pending.flatMap((p, i) => [[`i${i}`, p.id], [`a${i}`, p.after]]));
-        const extra = await graphqlQuery(gh, token, commentsQuery(pending.length), variables);
-        if (extra instanceof Response) return extra;
-        const more = [];
-        for (const [i, p] of pending.entries()) {
-          const next = extra?.data?.[`t${i}`]?.comments;
-          if (!validComments(next)) return json({ error: 'GitHub did not answer. Try again.' }, 502);
-          p.c.nodes.push(...next.nodes);
-          if (next.pageInfo?.hasNextPage || next.totalCount > p.c.nodes.length) more.push({ ...p, after: next.pageInfo?.endCursor });
-        }
-        pending = more;
-      }
+      const failed = await loadThreadComments(gh, token, nodes);
+      if (failed) return failed;
       return json({ threads: parseThreads({ data: { repository: { pullRequest: { reviewThreads: { nodes } } } } }), head });
     }
     if (rest === '') {
