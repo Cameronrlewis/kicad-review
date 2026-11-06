@@ -285,6 +285,7 @@ test('BR02 3D view normalizes wipe mode to side in valid and select', () => {
   const selectCtx = {
     S,
     clearImageSelection: () => {},
+    clearIdentityLink: () => {},
     renderInspector: () => {},
     tabsChange: () => false,
     stopPlacing: () => {},

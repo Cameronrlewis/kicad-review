@@ -37,6 +37,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
+      - run: npm ci --prefix site
       - run: node --import ./site/css-loader.mjs --test site/test.mjs
       - run: node --import ./site/css-loader.mjs --test ui/*.test.mjs
       - run: node ui/board-test.mjs
@@ -96,4 +97,5 @@ jobs:
       - run: node ui/check.mjs --persist-check --no-skip "Themes reload seed" --page "$PAGES/images.html"
       - run: node ui/check.mjs --no-skip "images screen and legacy appearance" --width 1440 --height 900 --dpr 2 --page "$PAGES/images.html"
       - run: node ui/check.mjs --no-skip "images screen and legacy appearance" --dark --width 1440 --height 900 --dpr 2 --page "$PAGES/images.html"
+      - run: node ui/check.mjs --no-skip "MCP unchanged identity links"
       - run: node ui/check.mjs --no-skip "Multi-board BOM" --page "$PAGES/multiboard.html"

@@ -5273,8 +5273,9 @@ def stat_number(text):
 
 def board_facts(side_dir, pcb_path):
     """Layers from the board file; size, areas and counts from `pcb export stats` when it ran. No outline means size_mm is None."""
-    names = board_layers(pcb_path)
-    facts = {"layers": names, "copper_layers": [n for n in names if n.endswith(".Cu")], "stats_available": False}
+    scene = board_geometry(pcb_path)
+    names = [layer["name"] for layer in scene["layers"]]
+    facts = {"layers": names, "copper_layers": scene["copperStack"], "stats_available": False}
     try:
         if os.path.exists(f"{side_dir}/stats.json.error"):
             with open(f"{side_dir}/stats.json.error", encoding="utf-8") as fh:
@@ -5777,6 +5778,33 @@ def read_optional_json(path, default=None):
     return json.loads(pathlib.Path(path).read_text()) if pathlib.Path(path).is_file() else default
 
 
+def identity_objects(objs):
+    """One revision's own symbols, read from that revision's raw object dict: uuid is the last key segment, sheet is where.sheet."""
+    out = []
+    for key, o in objs.items():
+        if o.get('kind') == 'symbol':
+            uuid = key.split('/')[-1].strip()
+            if uuid:
+                out.append({'uuid': uuid, 'kind': o['kind'], 'ref': o['ref'], 'sheet': (o.get('where') or {}).get('sheet')})
+    return out
+
+
+def identity_index(nets, objects):
+    """Net names remain exact strings; each net maps to one symbol of the same revision's own objects, never to the other revision's list."""
+    by_ref = {}
+    for obj in objects:
+        by_ref.setdefault(obj['ref'].split(' unit ', 1)[0], []).append(obj)
+    out = {}
+    for name, source in nets.items():
+        ref = source.get('fallback_ref') if isinstance(source, dict) else source
+        candidates = by_ref.get(ref, [])
+        # ponytail: multi-unit symbols have multiple symbol objects sharing the base ref; dropping ambiguous multi-unit candidates leaves complete=false.
+        if len(candidates) == 1:
+            out[str(name)] = {'uuid': candidates[0]['uuid'], 'sheet': candidates[0]['sheet']}
+    # ponytail: one unambiguous stored symbol per net, not a whole-net copper highlight.
+    return {'nets': out, 'complete': len(out) == len(nets)}
+
+
 CHANNELS = ("components","wiring","routing","rules","board","visual")
 
 
@@ -6056,7 +6084,10 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0, bom_sink=No
             **({"parts": parts} if parts else {}),
             **({"libraries": libraries} if libraries else {}),
             **({"objects": index} if index is not None else {}),
-            **({"ask": ask} if ask is not None else {})}
+            **({"ask": ask} if ask is not None else {}),
+            **({"identity": {side: identity_index(ask["nets"][side], identity_objects(objs[side]))
+                             for side in ("base", "head") if ask["nets"][side] is not None}}
+               if ask is not None else {})}
 
 
 def assign_ids(projects):

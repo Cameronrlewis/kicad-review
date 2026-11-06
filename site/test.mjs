@@ -4,14 +4,18 @@ import {gzipSync, gunzipSync} from 'node:zlib';
 import { createHash, webcrypto } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
+import { readFile } from 'node:fs/promises';
 import worker, { open, seal, milestoneGroups } from './worker.js';
 import { reportCsp, frameCsp } from './csp.js';
 import { threeClient } from './three-client.js';
 import { fixturePages } from './proof.mjs';
-import { commitsPage, homePage, messagePage, reviewPage, reviewsPage, runPage, signedOutPage } from './pages.js';
+import { commitsPage, homePage, messagePage, reviewPage, reviewsPage, runPage, signedOutPage, connectPanel } from './pages.js';
 
 import { historyEvents, HISTORY_QUERY } from './history.js';
 import { historyPage, frame, siteBadge, siteTable, sharedPage, sharedNotFoundPage } from './pages.js';
+import { mcpResponse, TOOLS, validateTool } from './mcp.js';
+import { designParts, projectLists, objectLink, netProjection, bomProjection, bomLines } from './mcp-data.js';
+import { consentRoute } from './mcp-auth.js';
 
 const historyArtifactName = /^kicad-review(?:-([0-9a-f]{7}|none)-([0-9a-f]{7})-(pass|fail))?\.html$/;
 const anchor = { v: 1, project: 'Thermal_Camera', file: 'Thermal_Camera/Thermal_Camera.kicad_pcb', sheet: null, layer: 'F.Cu',
@@ -103,9 +107,10 @@ test('history checks access before timeline calls', async () => {
 });
 
 import { CHECKS } from '../ui/checks.mjs';
-import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, rmSync, statSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 test('TS-S3 absent fixture data is SKIP, never PASS', async () => {
@@ -2766,6 +2771,15 @@ test('worker main named exports are functions or handlers, never CSP strings', a
     if (name === 'default') continue;
     assert.ok(typeof value === 'function' || typeof value?.fetch === 'function', `${name} is not a workerd-compatible entrypoint`);
   }
+});
+
+test('wrangler main module exports every Durable Object class bound in wrangler.toml', async () => {
+  const toml = readFileSync('site/wrangler.toml', 'utf8');
+  const main = toml.match(/^main = "([^"]+)"$/m)[1];
+  const classes = [...toml.matchAll(/^class_name = "([^"]+)"$/gm)].map(m => m[1]);
+  assert.ok(classes.length, 'no durable_objects bindings found');
+  const exports = await import(`./${main}`);
+  for (const name of classes) assert.equal(typeof exports[name], 'function', `${main} does not export ${name}`);
 });
 
 test('serialized thread client has no bundler name helpers and notice is in review bar', () => {
@@ -6205,6 +6219,1487 @@ test('ask client: CRLF frames split across chunks are parsed', async () => {
   assert.deepEqual(page.posts[0].kicadReviewAskEvent.data, { text: 'Hi' });
 });
 
+const rpcRequest = (method, params = {}, id = 1) => new Request('https://site.example/mcp', {
+  method: 'POST', headers: {'Content-Type':'application/json', Accept:'application/json, text/event-stream', 'MCP-Protocol-Version':'2025-03-26'},
+  body: JSON.stringify({jsonrpc:'2.0', id, method, params}),
+});
+test('MCP stateless transport lists tools and rejects event-stream GET', async () => {
+  const init = await mcpResponse(rpcRequest('initialize', {protocolVersion:'2025-03-26', capabilities:{}, clientInfo:{name:'test',version:'1'}}), [], async () => ({}));
+  assert.equal(init.status, 200);
+  assert.equal((await init.json()).result.serverInfo.name, 'kicad-review');
+  const list = await mcpResponse(rpcRequest('tools/list'), [], async () => ({}));
+  assert.deepEqual((await list.json()).result.tools, []);
+  assert.equal((await mcpResponse(new Request('https://site.example/mcp'), [], async () => ({}))).status, 405);
+});
+
+test('MCP stateless transport handles origin check, payload limit, tool calls, and errors', async () => {
+  const foreign = await mcpResponse(new Request('https://site.example/mcp', {
+    method: 'POST',
+    headers: { Origin: 'https://attacker.example' },
+    body: '{}',
+  }), [], async () => ({}));
+  assert.equal(foreign.status, 403);
+  assert.equal(await foreign.text(), 'Forbidden');
+
+  const large = await mcpResponse(new Request('https://site.example/mcp', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: 'x'.repeat(16385),
+  }), [], async () => ({}));
+  assert.equal(large.status, 413);
+  assert.equal(await large.text(), 'Request too large or invalid UTF-8');
+
+  const callRes = await mcpResponse(
+    rpcRequest('tools/call', { name: 'find_parts', arguments: { repo: 'Cameronrlewis/repo', query: 'R1' } }),
+    TOOLS,
+    async (name, args) => ({ tool: name, args, parts: ['R1'] })
+  );
+  assert.equal(callRes.status, 200);
+  const callBody = await callRes.json();
+  assert.deepEqual(callBody.result.content, [
+    { type: 'text', text: JSON.stringify({ tool: 'find_parts', args: { repo: 'Cameronrlewis/repo', query: 'R1', limit: 15 }, parts: ['R1'] }) },
+  ]);
+  assert.equal(callBody.result.isError, undefined);
+
+  const errRes = await mcpResponse(
+    rpcRequest('tools/call', { name: 'get_net', arguments: { repo: 'Cameronrlewis/repo', net: 'GND' } }),
+    TOOLS,
+    async () => ({ error: 'Not found' })
+  );
+  assert.equal(errRes.status, 200);
+  const errBody = await errRes.json();
+  assert.deepEqual(errBody.result.content, [{ type: 'text', text: JSON.stringify({ error: 'Not found' }) }]);
+  assert.equal(errBody.result.isError, true);
+});
+
+
+import { mcpAccess, readBounded, page, bounded, McpError } from './mcp-data.js';
+test('MCP revoked repository access is checked before artifacts', async () => {
+  const seen=[];
+  const deps={open:async()=>({t:'secret',u:'cam',e:Date.now()+600000}), allowedOwners:()=>['cameronrlewis'],
+    gh:async path=>{seen.push(path); return new Response(JSON.stringify(path==='/user'?{login:'cam'}:{}), {status:path==='/user'?200:404});}};
+  await assert.rejects(mcpAccess({}, {credential:'opaque'}, 'Cameronrlewis/private', deps), /Repository unavailable/);
+  assert.deepEqual(seen, ['/user','/repos/Cameronrlewis/private']);
+  seen.length=0;
+  await assert.rejects(mcpAccess({}, {credential:'opaque'}, 'https://attacker/repo', deps), /Repository unavailable/);
+  assert.equal(seen.length,0);
+  let readable=true;
+  deps.gh=async path=>{seen.push(path);return new Response(JSON.stringify(path==='/user'?{login:'cam'}:readable?{owner:{login:'Cameronrlewis'},permissions:{pull:true},full_name:'Cameronrlewis/private'}:{}),{status:path==='/user'||readable?200:404});};
+  assert.equal((await mcpAccess({}, {credential:'opaque'}, 'Cameronrlewis/private', deps)).login,'cam');
+  readable=false;
+  await assert.rejects(mcpAccess({}, {credential:'opaque'}, 'Cameronrlewis/private', deps), /Repository unavailable/);
+  assert.deepEqual(seen,['/user','/repos/Cameronrlewis/private','/user','/repos/Cameronrlewis/private']);
+});
+test('MCP byte bounds and unknown totals are truthful', async () => {
+  await assert.rejects(readBounded(new Response('é'.repeat(9)),16), /too large/);
+  const response=new Response(new ReadableStream({start(c){c.enqueue(new Uint8Array(9));c.enqueue(new Uint8Array(9));c.close();}}));
+  await assert.rejects(readBounded(response,16), /too large/);
+  assert.deepEqual(page([1,2,3],2,null,true), {items:[1,2],limit:2,returned:2,total:null,truncated:true});
+  const value=bounded({rows:page(Array.from({length:50},()=>({text:'é'.repeat(1000)})),50)});
+  assert.ok(new TextEncoder().encode(JSON.stringify(value)).length<=32768);
+  assert.equal(value.error.code,'RESULT_TOO_LARGE');
+});
+test('MCP transport rejects invalid UTF-8, bounds tool results, and refuses unexpiring credentials', async () => {
+  const bad = await mcpResponse(new Request('https://site.example/mcp', { method: 'POST', body: new Uint8Array([0xff, 0xfe]) }), [], async () => ({}));
+  assert.equal(bad.status, 413);
+  const big = await mcpResponse(rpcRequest('tools/call', { name: 'get_bom', arguments: { repo: 'Cameronrlewis/repo' } }), TOOLS,
+    async () => ({ text: 'x'.repeat(40000) }));
+  const result = (await big.json()).result;
+  assert.equal(result.isError, true);
+  assert.equal(JSON.parse(result.content[0].text).error.code, 'RESULT_TOO_LARGE');
+  const seen = [];
+  const deps = { open: async () => ({ t: 'secret', u: 'cam' }), allowedOwners: () => ['cameronrlewis'], gh: async (path) => { seen.push(path); return repoOk(); } };
+  await assert.rejects(mcpAccess({}, { credential: 'opaque' }, 'Cameronrlewis/private', deps), (e) => e instanceof McpError && e.code === 'AUTH_REQUIRED');
+  assert.equal(seen.length, 0);
+});
+
+import { resolveRevision, selectContext, selectPrContext, loadPrReview, loadDesign } from './mcp-data.js';
+const SHA='a'.repeat(40), NEXT='a'.repeat(7)+'b'.repeat(33);
+const MERGE_BASE='b'.repeat(40), TARGET_TIP='d'.repeat(40);
+const prFixture=()=>({number:7,head:{sha:SHA},base:{sha:TARGET_TIP},merge_commit_sha:NEXT});
+const prRunFixture=()=>({id:77,head_sha:SHA,event:'pull_request',pull_requests:[{number:7,base:{sha:TARGET_TIP},head:{sha:SHA}}]});
+const mcpAccessFixture=()=>({root:'/repos/Cameronrlewis/repo',token:'secret',repository:{full_name:'Cameronrlewis/repo',default_branch:'main',permissions:{pull:true,push:true}}});
+// One real producer run; each mcpDoc() is a fresh copy with the requested head.
+const mcpDocBase=JSON.parse(execFileSync('python3',['-c', `
+import json, sys
+from unittest.mock import patch
+import kicad_review as k
+sheets=[{"path":"/","name":"Root","file":"P.kicad_sch","parent":None,"page":"1","status":"unchanged"}]
+p={"dir":"P","name":"P","status":"modified"}
+with patch.object(k,"sheet_pages",return_value=sheets), patch.object(k.os.path,"isfile",return_value=False):
+    project=k.project_context(p,"/nonexistent-mcp-fixture",{"base":{},"head":{}},sheets,{"base":"missing","head":"missing"},[],[],{"base","head"},40,64,{"base":"b"*40,"head":sys.argv[1]},k.DEFAULT_SETTINGS)
+print(json.dumps({"version":1,"kind":"kicad-review-design-context","repo":"Cameronrlewis/repo","base":"b"*40,"head":sys.argv[1],"truncated":False,"projects":[project]}))
+`,SHA],{encoding:'utf8'}));
+const mcpDoc=(head=SHA)=>{const doc=structuredClone(mcpDocBase);doc.head=head;doc.projects[0].revisions.head.revision=head;return doc;};
+const artifactsFixture=()=>({total_count:1,artifacts:[{id:90,name:'kicad-review-bbbbbbb-aaaaaaa-pass.html',created_at:'2026-10-24T12:00:00Z',expired:false,workflow_run:{id:77,repository_id:5}}]});
+test('MCP exact commits never fall back to short SHA matches',async()=>{
+  const deps={gh:async path=>new Response(JSON.stringify(path.includes('/commits/')?{sha:NEXT}:artifactsFixture())),loadContext:async()=>({doc:mcpDoc(SHA),key:'digest'})};
+  const r=await resolveRevision(mcpAccessFixture(),undefined,deps.gh); assert.equal(r.sha,NEXT);
+  await assert.rejects(loadDesign(mcpAccessFixture(),{},deps),/No reviewed data for the requested commit/);
+  // PR-specific base/run tests follow separately; this test covers head-only design selection.
+  deps.loadContext=async()=>({doc:mcpDoc(NEXT),key:'digest'});
+  const got=await loadDesign(mcpAccessFixture(),{},deps); assert.equal(got.provenance.commit,NEXT);
+  deps.gh=async path=>new Response(JSON.stringify(path.endsWith('/pulls/7')?{head:{sha:SHA},merge_commit_sha:NEXT}:{}));
+  assert.equal((await resolveRevision(mcpAccessFixture(),'pr:7',deps.gh)).sha,SHA);
+});
+test('MCP expired history and ambiguous projects fail explicitly',async()=>{
+  const deps={gh:async()=>new Response(JSON.stringify({total_count:101,artifacts:artifactsFixture().artifacts})),loadContext:async()=>({doc:mcpDoc(),key:'d'})};
+  assert.equal((await selectContext(mcpAccessFixture(),SHA,deps)).doc.head,SHA,'first-page exact match works with more than 100 artifacts');
+  deps.gh=async()=>new Response(JSON.stringify({total_count:1001,artifacts:Array.from({length:100},(_,i)=>({id:i,name:'unrelated',expired:false}))}));
+  await assert.rejects(selectContext(mcpAccessFixture(),SHA,deps),/1,000 metadata rows/);
+  deps.gh=async path=>new Response(JSON.stringify(path.includes('/commits/')?{sha:SHA}:artifactsFixture()));
+  const doc=mcpDoc();doc.projects.push({...doc.projects[0],dir:'P2'});deps.loadContext=async()=>({doc,key:'d'});
+  await assert.rejects(loadDesign(mcpAccessFixture(),{},deps),/Choose a project/);
+  assert.equal((await loadDesign(mcpAccessFixture(),{project:'P2'},deps)).project.dir,'P2');
+});
+test('MCP PR provenance separates target tip from merge base',async()=>{
+  let doc=mcpDoc(),run=prRunFixture(),rows=artifactsFixture().artifacts;
+  const seen=[];
+  const deps={loadContext:async(_owner,_repo,id)=>({doc:id==='91'?{...mcpDoc(),base:'c'.repeat(40)}:doc,key:'d'}),
+    gh:async path=>{seen.push(path);let body;
+      if(path.endsWith('/pulls/7'))body=prFixture();
+      else if(path.endsWith(`/compare/${TARGET_TIP}...${SHA}`))body={merge_base_commit:{sha:MERGE_BASE}};
+      else if(path.endsWith('/actions/runs/77'))body=run;
+      else if(path.includes('/actions/artifacts?'))body={total_count:rows.length,artifacts:rows};
+      else assert.fail('Unexpected PR endpoint '+path);
+      return new Response(JSON.stringify(body));
+    }};
+  assert.notEqual(TARGET_TIP,MERGE_BASE);
+  const selected=await loadPrReview(mcpAccessFixture(),7,deps);
+  assert.equal(selected.doc.base,MERGE_BASE);assert.equal(selected.provenance.targetTip,TARGET_TIP);
+  assert.equal(selected.resolution.sha,SHA);assert.ok(seen.includes(`/repos/Cameronrlewis/repo/compare/${TARGET_TIP}...${SHA}`));
+  const comparison={sha:SHA,targetTip:TARGET_TIP,base:MERGE_BASE};
+  doc={...mcpDoc(),base:'c'.repeat(40)};
+  await assert.rejects(selectPrContext(mcpAccessFixture(),7,comparison,deps),/PR comparison context unavailable/);
+  doc=mcpDoc();
+  for(const bad of [{...prRunFixture(),event:'push'}, {...prRunFixture(),head_sha:NEXT},
+    {...prRunFixture(),pull_requests:[{number:8,base:{sha:TARGET_TIP},head:{sha:SHA}}]},
+    {...prRunFixture(),pull_requests:[{number:7,base:{sha:MERGE_BASE},head:{sha:SHA}}]}]){
+    run=bad;await assert.rejects(selectPrContext(mcpAccessFixture(),7,comparison,deps),/PR comparison context unavailable/);
+  }
+  run=prRunFixture();rows=[{...rows[0],id:91,created_at:'2026-10-25T12:00:00Z'},rows[0]];
+  assert.equal((await loadPrReview(mcpAccessFixture(),7,deps)).reportId,'90','skip same-head wrong-base candidate');
+});
+test('MCP selection failures are typed, never stale, and render guidance is writer-only',async()=>{
+  const twoRows={total_count:2,artifacts:[{...artifactsFixture().artifacts[0],id:92,created_at:'2026-10-25T12:00:00Z'},artifactsFixture().artifacts[0]]};
+  const listing=(body=twoRows)=>async path=>new Response(JSON.stringify(path.includes('/commits/')?{sha:SHA}:body));
+  const reader=()=>{const a=mcpAccessFixture();a.repository.permissions={pull:true,push:false};return a;};
+  let calls=0;
+  await assert.rejects(selectContext(mcpAccessFixture(),SHA,{gh:listing(),loadContext:async()=>{calls++;return {status:502,error:'GitHub did not answer'};}}),
+    e=>e.code==='ARTIFACTS_UNAVAILABLE'&&e.message==='GitHub did not answer');
+  assert.equal(calls,1,'an outage never moves on to an older candidate');
+  calls=0;
+  await assert.rejects(selectContext(mcpAccessFixture(),SHA,{gh:listing(),loadContext:async()=>{calls++;return {status:429,error:'GitHub rate limit while reading artifact metadata'};}}),
+    e=>e.code==='ARTIFACTS_UNAVAILABLE'&&/rate limit/.test(e.message));
+  assert.equal(calls,1);
+  const missing=e=>e.code==='MISSING_DATA'&&!('doc' in e)&&!/Other|SECRET-PART/.test(e.message);
+  const leaky=()=>{const d=mcpDoc();d.repo='Other/repo';d.projects[0].name='SECRET-PART';return d;};
+  await assert.rejects(selectContext(mcpAccessFixture(),SHA,{gh:listing(),loadContext:async()=>({doc:leaky(),key:'d'})}),missing,'wrong repo');
+  await assert.rejects(selectContext(mcpAccessFixture(),NEXT,{gh:listing(),loadContext:async()=>({doc:mcpDoc(SHA),key:'d'})}),missing,'full-SHA collision');
+  calls=0;
+  await assert.rejects(selectContext(mcpAccessFixture(),SHA,{gh:listing({total_count:1,artifacts:[{...artifactsFixture().artifacts[0],expired:true}]}),loadContext:async()=>{calls++;return {doc:mcpDoc(),key:'d'};}}),missing,'expired');
+  assert.equal(calls,0,'expired candidates are never downloaded');
+  const asked=[];
+  await assert.rejects(loadDesign(mcpAccessFixture(),{ref:'no/such ref'},{gh:async path=>{asked.push(path);return new Response('{}',{status:404});},loadContext:async()=>assert.fail('no artifact read')}),
+    e=>e.code==='REF_UNAVAILABLE');
+  assert.deepEqual(asked,['/repos/Cameronrlewis/repo/commits/no%2Fsuch%20ref']);
+  const unrelated=Array.from({length:100},(_,i)=>({id:1000+i,name:'unrelated',expired:false}));
+  const paged=async path=>new Response(JSON.stringify({total_count:101,artifacts:path.endsWith('page=1')?unrelated:artifactsFixture().artifacts}));
+  assert.equal((await selectContext(mcpAccessFixture(),SHA,{gh:paged,loadContext:async()=>({doc:mcpDoc(),key:'d'})})).reportId,'90','second page with total_count=101');
+  const writer=await selectContext(mcpAccessFixture(),SHA,{gh:listing(),loadContext:async()=>({status:404,error:'gone'})}).catch(e=>e);
+  assert.equal(writer.code,'MISSING_DATA');assert.equal(writer.canRender,true);assert.equal(writer.renderPath,'/r/Cameronrlewis/repo/commits');
+  const plain=await selectContext(reader(),SHA,{gh:listing(),loadContext:async()=>({status:404,error:'gone'})}).catch(e=>e);
+  assert.equal(plain.code,'MISSING_DATA');assert.equal(plain.canRender,false);assert.equal(plain.renderPath,undefined);
+});
+test('MCP actual producer sheets, legacy revision fields and removed/root projects',async()=>{
+  const doc=mcpDoc(), survivor=doc.projects[0];
+  survivor.dir='';delete survivor.revisions.head.revision;delete survivor.revisions.head.sheets;
+  doc.projects.push({...structuredClone(survivor),dir:'Nested',name:'Nested'});
+  doc.projects.push({...structuredClone(survivor),dir:'Removed',status:'removed',revisions:{base:survivor.revisions.base,head:null}});
+  const deps={gh:async path=>new Response(JSON.stringify(path.includes('/commits/')?{sha:SHA}:artifactsFixture())),loadContext:async()=>({doc,key:'d'})};
+  for(const project of ['', 'Nested']){
+    const args={project};
+    const got=await loadDesign(mcpAccessFixture(),args,deps);
+    assert.equal(got.project.dir,project);assert.equal(got.provenance.commit,SHA);
+    assert.equal(got.project.sheets[0].path,'/');
+  }
+  await assert.rejects(loadDesign(mcpAccessFixture(),{project:'Removed'},deps),e=>e.code==='PROJECT_UNAVAILABLE');
+  assert.equal((await loadDesign(mcpAccessFixture(),{allProjects:true},deps)).doc.projects.length,3);
+});
+
+import {loadContext,askRoute} from './ask.js';
+import {verifyReport} from './worker.js';
+// The kicad-review.yml run behind artifactsFixture's report (head aaaaaaa…), and the site's provenance check bound to repository 5.
+const mcpRun=()=>new Response(JSON.stringify({id:77,path:'.github/workflows/kicad-review.yml',event:'push',head_sha:'a'.repeat(40),repository:{id:5}}));
+const verifyAs=(id='90')=>ghFn=>verifyReport('Cameronrlewis','repo',id,'secret',{id:5},ghFn);
+test('MCP smaller budget preserves legacy Ask acceptance',async()=>{
+  const doc=mcpDoc();doc.padding='x'.repeat(250000);
+  let text=JSON.stringify(doc),models=0;
+  assert.ok(Buffer.byteLength(text)>200000&&Buffer.byteLength(text)<400000);
+  const gh=async path=>{
+    if(path.includes('/contents/'))return new Response('[ask]\nenabled = true');
+    if(path.endsWith('/artifacts/91/zip'))return new Response(null,{status:302,headers:{Location:'https://ctx.blob.core.windows.net/context'}});
+    if(path.endsWith('/actions/runs/77'))return mcpRun();
+    return new Response(JSON.stringify(path.endsWith('/artifacts/90')?artifactsFixture().artifacts[0]:
+      {artifacts:[{id:91,name:'kicad-review-bbbbbbb-aaaaaaa-pass.context.json',expired:false,digest:'d',workflow_run:{id:77}}]}));
+  };
+  const old=globalThis.fetch;
+  globalThis.fetch=async url=>{
+    if(String(url)==='https://ctx.blob.core.windows.net/context')return new Response(text);
+    assert.equal(String(url),'https://api.anthropic.com/v1/messages');models++;
+    return new Response(JSON.stringify({content:[{type:'text',text:'{"summary":"test","questions":["a?","b?","c?"]}'}]}));
+  };
+  try {
+    const loaded=await loadContext('Cameronrlewis','repo','90','secret',gh,verifyAs());
+    assert.equal(loaded.doc.padding.length,250000);
+    await assert.rejects(selectContext(mcpAccessFixture(),SHA,{gh:async()=>new Response(JSON.stringify(artifactsFixture())),loadContext:async()=>loaded}),e=>e.code==='CONTEXT_TOO_LARGE');
+    const req=()=>new Request('https://site.example/r/Cameronrlewis/repo/a/90/ask/insight',{method:'POST',headers:{Origin:'https://site.example','Content-Type':'application/json'},body:'{"project":"P"}'});
+    const config={ANTHROPIC_API_KEY:'test-only',ASK_KV:{get:async()=>null,put:async()=>{}}};
+    const access=async()=>({s:{token:'secret',login:'cam'},repo:{id:5,default_branch:'main'}});
+    const route=()=>askRoute(req(),config,{owner:'Cameronrlewis',repo:'repo',id:'90',rest:'/insight'},{access,gh,verifyReport});
+    assert.equal((await route()).status,200);assert.equal(models,1);
+    text='x'.repeat(400001);assert.equal((await route()).status,502);assert.equal(models,1);
+    globalThis.fetch=async()=>new Response(new ReadableStream({start(c){c.enqueue(new Uint8Array(200001));c.enqueue(new Uint8Array(200001));c.close();}}));
+    assert.equal((await loadContext('Cameronrlewis','repo','90','secret',gh,verifyAs())).status,502);
+  } finally {globalThis.fetch=old;}
+});
+test('MCP shared loader keeps metadata status and refuses ZIP bodies',async()=>{
+  const meta=(status,body={})=>async path=>path.endsWith('/artifacts/90')?new Response(JSON.stringify(body),{status}):assert.fail('stopped at metadata: '+path);
+  assert.deepEqual(await loadContext('Cameronrlewis','repo','90','secret',meta(404),verifyAs()),{status:404,error:'Artifact unavailable'});
+  assert.deepEqual(await loadContext('Cameronrlewis','repo','90','secret',meta(200,{...artifactsFixture().artifacts[0],expired:true}),verifyAs()),{status:404,error:'Artifact unavailable'});
+  assert.deepEqual(await loadContext('Cameronrlewis','repo','90','secret',meta(429),verifyAs()),{status:429,error:'GitHub rate limit while reading artifact metadata'});
+  for(const status of [500,503])assert.deepEqual(await loadContext('Cameronrlewis','repo','90','secret',meta(status),verifyAs()),{status:502,error:'GitHub artifact metadata service unavailable'});
+  const gh=async path=>{
+    if(path.endsWith('/artifacts/91/zip'))return new Response(null,{status:302,headers:{Location:'https://ctx.blob.core.windows.net/context'}});
+    if(path.endsWith('/actions/runs/77'))return mcpRun();
+    return new Response(JSON.stringify(path.endsWith('/artifacts/90')?artifactsFixture().artifacts[0]:{artifacts:[{id:91,name:'kicad-review-bbbbbbb-aaaaaaa-pass.context.json',expired:false,workflow_run:{id:77}}]}));
+  };
+  const old=globalThis.fetch;
+  try {
+    for(const bytes of [new Uint8Array([0x50,0x4b,0x03,0x04,0x14,0,0,0,8,0]),new Uint8Array([0x50,0x4b,0x03,0x04,0xff,0xfe])]){
+      globalThis.fetch=async()=>new Response(bytes);
+      const got=await loadContext('Cameronrlewis','repo','90','secret',gh,verifyAs());
+      assert.equal(got.status,502);assert.match(got.error,/unsupported artifact/);assert.equal(got.doc,undefined);
+    }
+  } finally {globalThis.fetch=old;}
+});
+import {budgeted,runTool as runMcpTool} from './mcp-data.js';
+test('MCP context search uses the report provenance check and a per-call GitHub budget',async()=>{
+  const access={...mcpAccessFixture(),repository:{...mcpAccessFixture().repository,id:5}};
+  const good=await mcpRun().json();
+  const ghFor=run=>async path=>{
+    if(path.endsWith('/actions/runs/77'))return new Response(JSON.stringify(run));
+    if(path.endsWith('/artifacts/91/zip'))return new Response(null,{status:302,headers:{Location:'https://ctx.blob.core.windows.net/context'}});
+    if(path.endsWith('/artifacts/90'))return new Response(JSON.stringify(artifactsFixture().artifacts[0]));
+    if(path.includes('/runs/77/artifacts?'))return new Response(JSON.stringify({artifacts:[{id:91,name:'kicad-review-bbbbbbb-aaaaaaa-pass.context.json',expired:false,workflow_run:{id:77}}]}));
+    if(path.includes('/actions/artifacts?'))return new Response(JSON.stringify(artifactsFixture()));
+    assert.fail('unexpected '+path);
+  };
+  const old=globalThis.fetch;
+  globalThis.fetch=async url=>{assert.equal(String(url),'https://ctx.blob.core.windows.net/context');return new Response(JSON.stringify(mcpDoc()));};
+  try{
+    assert.equal((await selectContext(access,SHA,{gh:ghFor(good),loadContext,verifyReport})).reportId,'90');
+    for(const run of [{...good,path:'.github/workflows/other.yml'},{...good,repository:{id:6}},{...good,head_sha:'c'.repeat(40)}])
+      await assert.rejects(selectContext(access,SHA,{gh:ghFor(run),loadContext,verifyReport}),e=>e.code==='MISSING_DATA',run.path);
+    await assert.rejects(selectContext(access,SHA,{gh:ghFor(good),loadContext}),e=>e.code==='MISSING_DATA','without the provenance check the loader fails closed');
+  } finally{globalThis.fetch=old;}
+  let calls=0;
+  const counted=budgeted(async()=>{calls++;return new Response('{}');},3);
+  await counted('/a');await counted('/repos/o/r/actions/artifacts/1/zip');
+  await assert.rejects(counted('/b'),e=>e.code==='REQUEST_BUDGET');assert.equal(calls,2,'a download counts twice; nothing past the cap is sent');
+  // Many matching candidates: the tool call stops at the budget instead of exceeding the Worker's subrequest limit.
+  let sent=0;
+  const many={total_count:40,artifacts:Array.from({length:40},(_,i)=>({...artifactsFixture().artifacts[0],id:100+i}))};
+  const deps={open:async()=>({t:'secret',u:'cam',e:Date.now()+600000}),allowedOwners:()=>['cameronrlewis'],
+    loadContext:async(o,r,id,token,gh)=>{for(let i=0;i<4;i++)await gh(`/repos/o/r/actions/artifacts/${id}`,token);return {status:404,error:'gone'};},
+    gh:async path=>{sent++;
+      if(path==='/user')return new Response(JSON.stringify({login:'cam'}));
+      if(path==='/repos/Cameronrlewis/repo')return new Response(JSON.stringify({id:5,full_name:'Cameronrlewis/repo',name:'repo',owner:{login:'Cameronrlewis'},default_branch:'main',permissions:{pull:true}}));
+      if(path.includes('/commits/'))return new Response(JSON.stringify({sha:SHA}));
+      if(path.includes('/actions/artifacts?'))return new Response(JSON.stringify(many));
+      return new Response('{}');
+    }};
+  const result=await runMcpTool('get_design',{repo:'Cameronrlewis/repo',limit:15},{env:{},props:{credential:'opaque'},origin:'https://site.example'},deps);
+  assert.equal(result.error?.code,'REQUEST_BUDGET');
+  assert.ok(sent<=45,`sent ${sent} GitHub requests`);
+});
+test('MCP PR review rejects a non-positive or non-integer number before any request',async()=>{
+  for(const pr of [0,-1,1.5,'7'])await assert.rejects(loadPrReview(mcpAccessFixture(),pr,{gh:async()=>assert.fail('no request')}),e=>e.code==='INVALID_REF');
+});
+
+test('MCP six schemas are strict and have read-only annotations',()=>{
+  assert.deepEqual(TOOLS.map(t=>t.name),['list_projects','get_design','find_parts','get_net','get_review','get_bom']);
+  for(const tool of TOOLS){assert.equal(tool.inputSchema.additionalProperties,false);assert.deepEqual(tool.annotations,
+    {readOnlyHint:true,destructiveHint:false,idempotentHint:true,openWorldHint:false});}
+  for(const args of [{repo:'Cameronrlewis/repo',write:true},{repo:'Cameronrlewis/repo',limit:51},{repo:'Cameronrlewis/repo',limit:1.5}])
+    assert.throws(()=>validateTool('list_projects',args),/Invalid/);
+  assert.throws(()=>validateTool('get_net',{repo:'Cameronrlewis/repo'}),/Invalid/);
+  for(const key of ['constructor','toString','__proto__']){
+    const args=JSON.parse('{"repo":"Cameronrlewis/repo","'+key+'":true}');
+    assert.throws(()=>validateTool('list_projects',args),/Invalid/);
+  }
+  for(const project of ['', 'Nested'])assert.equal(validateTool('get_design',{repo:'Cameronrlewis/repo',project}).project,project);
+});
+
+test('MCP inherited keys fail before the call boundary',async()=>{
+  let calls=0;
+  for(const key of ['constructor','toString','__proto__']){
+    const args=JSON.parse('{"repo":"Cameronrlewis/repo","'+key+'":true}');
+    const response=await mcpResponse(rpcRequest('tools/call',{name:'list_projects',arguments:args}),TOOLS,async()=>{calls++;return {};});
+    const result=(await response.json()).result;
+    assert.equal(result.isError,true);assert.equal(JSON.parse(result.content[0].text).error.code,'INVALID_ARGUMENT');
+  }
+  for(const testCase of [
+    {name:'unknown_tool',args:{repo:'Cameronrlewis/repo'}},
+    {name:'list_projects',args:{repo:'Cameronrlewis/repo',limit:51}},
+    {name:'list_projects',args:{repo:'Cameronrlewis/repo',limit:1.5}},
+    {name:'list_projects',args:{repo:'Cameronrlewis/repo',limit:'15'}},
+    {name:'get_net',args:{repo:'Cameronrlewis/repo'}},
+  ]){
+    const response=await mcpResponse(rpcRequest('tools/call',{name:testCase.name,arguments:testCase.args}),TOOLS,async()=>{calls++;return {};});
+    const result=(await response.json()).result;
+    assert.equal(result.isError,true);assert.equal(JSON.parse(result.content[0].text).error.code,'INVALID_ARGUMENT');
+  }
+  const batchReq=new Request('https://site.example/mcp',{
+    method:'POST',
+    headers:{'Content-Type':'application/json',Accept:'application/json, text/event-stream'},
+    body:JSON.stringify([
+      {jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'list_projects',arguments:JSON.parse('{"repo":"Cameronrlewis/repo","__proto__":true}')}},
+      {jsonrpc:'2.0',id:2,method:'tools/call',params:{name:'get_net',arguments:{repo:'Cameronrlewis/repo'}}},
+    ])
+  });
+  const batchRes=await mcpResponse(batchReq,TOOLS,async()=>{calls++;return {};});
+  const batchBody=await batchRes.json();
+  assert.equal(Array.isArray(batchBody),true);
+  assert.equal(batchBody[0].result.isError,true);
+  assert.equal(JSON.parse(batchBody[0].result.content[0].text).error.code,'INVALID_ARGUMENT');
+  assert.equal(batchBody[1].result.isError,true);
+  assert.equal(JSON.parse(batchBody[1].result.content[0].text).error.code,'INVALID_ARGUMENT');
+  assert.equal(calls,0,'invalid arguments never reach authorization or GitHub');
+});
+
+const projectionLoaded=()=>{const doc=mcpDoc();return {doc,project:doc.projects[0],revision:doc.projects[0].revisions.head,projectIndex:0,reportId:'90',provenance:{repo:doc.repo,commit:doc.head}};};
+function assertMcpLists(v,key=''){
+  if(Array.isArray(v)){
+    assert.ok(key==='items'||['size_mm','pos','pos_before','box','before','after'].includes(key)&&[2,4].includes(v.length)&&v.every(Number.isFinite),'unenveloped semantic array: '+key);
+    for(const item of v)assertMcpLists(item);return;
+  }
+  if(!v||typeof v!=='object')return;
+  if(Array.isArray(v.items))for(const k of ['limit','returned','total','truncated'])assert.ok(Object.hasOwn(v,k));
+  for(const [k,x] of Object.entries(v))assertMcpLists(x,k);
+}
+test('MCP actual producer design sheets and part properties',()=>{
+ const loaded=projectionLoaded(),r=loaded.revision;
+ r.parts=[{uuid:'u1',ref:'U1',value:'é'.repeat(2001),datasheet:'javascript:alert(1)',properties:{Voltage:'50V'},pins:[],pin_count:0}];
+ const clipped=designParts('find_parts',{query:'é'.repeat(1999)},loaded,'https://site.example');
+ assert.equal([...clipped.parts.items[0].value].length,2000);
+ assert.equal(clipped.parts.items[0].datasheet,null);
+ assert.ok(clipped.incompleteFields.items.includes('parts.U1.value'));
+ r.parts[0].datasheet='https://user:pass@example.com/datasheet.pdf';
+ assert.equal(designParts('find_parts',{query:'50V'},loaded,'https://site.example').parts.items[0].datasheet,null);
+ r.parts[0].datasheet='https://example.com/datasheet.pdf';
+ assert.equal(designParts('find_parts',{query:'50V'},loaded,'https://site.example').parts.items[0].datasheet,'https://example.com/datasheet.pdf');
+ const design=designParts('get_design',{},loaded,'https://site.example');
+ assert.equal(design.sheets.items[0].path,'/');assert.equal(design.sheets.total,1);
+ r.board={layers:['B.Cu','In2.Cu','In1.Cu','F.Cu'],copper_layers:['F.Cu','In1.Cu','In2.Cu','B.Cu'],size_mm:[20,30]};
+ loaded.project.checks=[{name:'drc',status:'fail',findings:[{type:'unconnected',items:['U1 pad 1','R1 pad 1']}]}];
+ const populated=designParts('get_design',{limit:1},loaded,'https://site.example');
+ assert.equal(populated.board.layers.total,4);assert.equal(populated.board.copper_layers.returned,1);
+ assert.deepEqual(populated.board.size_mm,[20,30]);
+ assert.equal(populated.checks.items[0].findings.items[0].items.total,null);
+ assert.equal(populated.checks.items[0].findings.items[0].items.truncated,true);
+ assertMcpLists(populated);
+ assert.equal(designParts('find_parts',{query:'50V'},loaded,'https://site.example').parts.returned,1);
+ loaded.doc.truncated=true;
+ assert.equal(designParts('find_parts',{query:'missing'},loaded,'https://site.example').parts.total,null);
+});
+test('MCP exact part references survive display clipping and byte rejection',()=>{
+  const loaded=projectionLoaded(),ref='R'+'é'.repeat(2001);
+  loaded.revision.parts=[{uuid:'long-ref',ref,value:'é'.repeat(2001),pins:[],pin_count:0}];
+  const out=designParts('find_parts',{query:'R'},loaded,'https://site.example');
+  assert.equal(out.parts.items[0].ref,ref);
+  assert.equal([...out.parts.items[0].value].length,2000);
+  assert.ok(out.incompleteFields.items.includes(`parts.${ref}.value`));
+  assert.ok(!out.incompleteFields.items.includes(`parts.${ref}.ref`));
+  assert.equal(bounded(out).parts.items[0].ref,ref);
+  loaded.revision.parts[0].ref='R'+'é'.repeat(20000);
+  assert.equal(bounded(designParts('find_parts',{query:'R'},loaded,'https://site.example')).error.code,'RESULT_TOO_LARGE');
+});
+test('MCP recursive lists retain tuples and source incompleteness',()=>{
+  const value={board:{layers:['F.Cu','B.Cu'],copper_layers:['F.Cu','B.Cu'],size_mm:[20,30]},
+    finding:{items:['U1','U2']},detail:{kind:'members',added:['R1.1'],removed:[],beforeNets:['12'],afterNets:['12'],transitions:[{pin:'R1.1',before:[],after:['12']} ]}};
+  const out=projectLists(value,1);
+  assert.equal(out.board.layers.total,2);assert.equal(out.board.layers.truncated,true);
+  assert.deepEqual(out.board.size_mm,[20,30]);assert.equal(out.finding.items.total,null);
+  assert.equal(out.detail.transitions.items[0].after.returned,1);
+  assert.deepEqual(out.detail.transitions.items[0].before,{items:[],limit:1,returned:0,total:0,truncated:false});
+  assert.equal(out.detail.removed.returned,0);
+  assertMcpLists(out);
+  assert.equal(projectLists({layers:['F.Cu'],layers_more:9},2).layers.total,10);
+  assert.equal(projectLists({layers:['F.Cu']},2,'',true).layers.total,null);
+  const stored={items:['F.Cu'],limit:8,returned:1,total:null,truncated:true};
+  assert.deepEqual(projectLists(stored,2),{items:['F.Cu'],limit:2,returned:1,total:null,truncated:true});
+});
+test('MCP objectLink output format produces report viewer hash link', () => {
+  const loaded = projectionLoaded();
+  const link = objectLink('https://site.example', loaded, 'part', 'test-uuid-123');
+  assert.equal(link, 'https://site.example/r/Cameronrlewis/repo/a/90#p=0&part=test-uuid-123');
+  const netLink = objectLink('https://site.example', loaded, 'net', 'GND');
+  assert.equal(netLink, 'https://site.example/r/Cameronrlewis/repo/a/90#p=0&net=GND');
+});
+test('MCP check summaries, reasons and messages are display-clipped at 2000 code points', () => {
+  const loaded = projectionLoaded();
+  loaded.project.checks = [
+    {
+      name: 'erc',
+      status: 'fail',
+      reason: 'r'.repeat(2005),
+      message: 'm'.repeat(2005),
+      summary: 's'.repeat(2005),
+      findings: []
+    }
+  ];
+  const out = designParts('get_design', {}, loaded, 'https://site.example');
+  const check = out.checks.items[0];
+  assert.equal([...check.reason].length, 2000);
+  assert.equal([...check.message].length, 2000);
+  assert.equal([...check.summary].length, 2000);
+  assert.ok(out.incompleteFields.items.includes('checks.erc.reason'));
+  assert.ok(out.incompleteFields.items.includes('checks.erc.message'));
+  assert.ok(out.incompleteFields.items.includes('checks.erc.summary'));
+});
+test('MCP find_parts slices before projection so incompleteFields excludes non-returned parts', () => {
+  const loaded = projectionLoaded();
+  loaded.revision.parts = [
+    { uuid: 'u1', ref: 'R1', value: 'resistor', properties: {}, pins: [], pin_count: 0 },
+    { uuid: 'u2', ref: 'R2', value: 'r' + 'é'.repeat(2001), properties: {}, pins: [], pin_count: 0 }
+  ];
+  const out = designParts('find_parts', { query: 'r', limit: 1 }, loaded, 'https://site.example');
+  assert.equal(out.parts.returned, 1);
+  assert.equal(out.parts.items[0].ref, 'R1');
+  assert.equal(out.parts.total, 2);
+  assert.equal(out.parts.truncated, true);
+  assert.deepEqual(out.incompleteFields.items, []);
+});
+test('MCP get_design p.sheets fallback and sheetsIncomplete handling', () => {
+  const loaded = projectionLoaded();
+  delete loaded.revision.sheets;
+  loaded.project.sheets = [
+    { path: '/', status: 'unchanged' },
+    { path: '/power', status: 'modified' },
+    { path: '/old', status: 'removed' }
+  ];
+  const out = designParts('get_design', {}, loaded, 'https://site.example');
+  assert.equal(out.sheetsIncomplete, false);
+  assert.equal(out.sheets.returned, 2);
+  assert.equal(out.sheets.total, 2);
+  assert.deepEqual(out.sheets.items.map(s => s.path), ['/', '/power']);
+
+  loaded.project.sheets.push({ path: '/bad', status: 'unknown_status' });
+  const incompleteOut = designParts('get_design', {}, loaded, 'https://site.example');
+  assert.equal(incompleteOut.sheetsIncomplete, true);
+  assert.equal(incompleteOut.sheets.total, null);
+  assert.equal(incompleteOut.sheets.truncated, true);
+
+  delete loaded.project.sheets;
+  const noSheetsOut = designParts('get_design', {}, loaded, 'https://site.example');
+  assert.equal(noSheetsOut.sheetsIncomplete, true);
+  assert.equal(noSheetsOut.sheets.total, null);
+  assert.equal(noSheetsOut.sheets.truncated, true);
+  assert.deepEqual(noSheetsOut.sheets.items, []);
+});
+test('MCP get_design with doc.truncated sets partCount null and marks incomplete', () => {
+  const loaded = projectionLoaded();
+  loaded.revision.parts = [{ uuid: 'u1', ref: 'U1', value: '10k', pins: [], pin_count: 0 }];
+  loaded.doc.truncated = true;
+  const out = designParts('get_design', {}, loaded, 'https://site.example');
+  assert.equal(out.partCount, null);
+  assert.equal(out.storedPartCount, 1);
+  assert.equal(out.incomplete, true);
+  assert.equal(out.sheets.total, null);
+  assert.equal(out.sheets.truncated, true);
+});
+test('MCP find_parts searchFieldsComplete reflects properties, truncation, and incomplete fields', () => {
+  const loaded = projectionLoaded();
+  loaded.revision.parts = [
+    { uuid: 'u1', ref: 'U1', value: '10k', properties: { Tol: '1%' }, pins: [], pin_count: 0 }
+  ];
+  let res = designParts('find_parts', { query: '10k' }, loaded, 'https://site.example');
+  assert.equal(res.searchFieldsComplete, true);
+
+  delete loaded.revision.parts[0].properties;
+  res = designParts('find_parts', { query: '10k' }, loaded, 'https://site.example');
+  assert.equal(res.searchFieldsComplete, false);
+
+  loaded.revision.parts[0].properties = { Tol: '1%' };
+  loaded.revision.parts[0].properties_truncated = true;
+  res = designParts('find_parts', { query: '10k' }, loaded, 'https://site.example');
+  assert.equal(res.searchFieldsComplete, false);
+
+  loaded.revision.parts[0].properties_truncated = false;
+  loaded.revision.parts[0].incomplete_fields = ['properties'];
+  res = designParts('find_parts', { query: '10k' }, loaded, 'https://site.example');
+  assert.equal(res.searchFieldsComplete, false);
+
+  loaded.revision.parts[0].incomplete_fields = [];
+  loaded.doc.truncated = true;
+  res = designParts('find_parts', { query: '10k' }, loaded, 'https://site.example');
+  assert.equal(res.searchFieldsComplete, false);
+});
+test('MCP producer truncated fixture reports unknown total and incomplete search fields', () => {
+  const fixturePath = new URL('./fixtures/producer-truncated-context.json', import.meta.url);
+  const doc = JSON.parse(readFileSync(fixturePath, 'utf8'));
+  assert.equal(doc.truncated, true);
+  const loaded = {
+    doc,
+    project: doc.projects[0],
+    revision: doc.projects[0].revisions.head,
+    projectIndex: 0,
+    reportId: '90',
+    provenance: { repo: doc.repo, commit: doc.head },
+  };
+  const out = designParts('find_parts', { query: 'nonexistent_part_query_xyz' }, loaded, 'https://site.example');
+  assert.equal(out.parts.total, null);
+  assert.equal(out.parts.truncated, true);
+  assert.equal(out.searchFieldsComplete, false);
+});
+test('MCP upstream truncation is not a complete negative result', () => {
+  const loaded = projectionLoaded(), r = loaded.revision;
+  r.netlist_available = true;
+  r.parts = [{ uuid: 'u', ref: 'U1', value: 'MCU', pins: [] }];
+  r.nets = [{ id: '12', pins: ['U1.1'], pin_records: [{ ref: 'U1', pin: '1' }], pin_count: 300, more: 299 }];
+  const result = netProjection('get_net', { net: '12', limit: 15 }, loaded, 'https://site.example');
+  assert.equal(result.pins.total, 300);
+  assert.equal(result.pins.returned, 1);
+  assert.equal(result.pins.truncated, true);
+  assert.equal(result.pins.items[0].value, 'MCU');
+  r.parts = [{ uuid: 'part-u1', ref: 'U1', value: 'Controller', pins: [{ pin: 'A.1', net: '12' }] }];
+  r.nets = [{ id: '12', pins: ['U1.A.1'], pin_records: [{ ref: 'U1', pin: 'A.1' }], pin_count: 1 }];
+  const dotted = netProjection('get_net', { net: '12' }, loaded, 'https://site.example').pins.items[0];
+  assert.deepEqual(
+    { ref: dotted.ref, pin: dotted.pin, value: dotted.value, partId: dotted.partId },
+    { ref: 'U1', pin: 'A.1', value: 'Controller', partId: 'part-u1' },
+  );
+  r.nets = [{ id: '12', pins: ['U1.A.1'], pin_count: 1 }];
+  const legacy = netProjection('get_net', { net: '12' }, loaded, 'https://site.example').pins.items[0];
+  assert.equal(legacy.memberAvailable, true);
+  assert.equal(legacy.pin, 'A.1');
+  assert.equal(legacy.value, 'Controller');
+  // A pin_records entry whose ref.pin does not match its pin id is never attributed to that pin.
+  r.parts = [
+    { uuid: 'u1', ref: 'U1', value: 'MCU', pins: [{ pin: '1', net: '12' }] },
+    { uuid: 'u2', ref: 'U2', value: 'Amp', pins: [{ pin: '2', net: '12' }] },
+  ];
+  r.nets = [{ id: '12', pins: ['U1.1', 'U2.2'], pin_records: [{ ref: 'U2', pin: '2' }], pin_count: 2 }];
+  const misaligned = netProjection('get_net', { net: '12' }, loaded, 'https://site.example').pins.items;
+  assert.deepEqual(misaligned.map(m => [m.ref, m.pin, m.value]), [['U1', '1', 'MCU'], ['U2', '2', 'Amp']]);
+  // When pin_records is reordered and parts have no reverse pin lists, structured lookup still matches by id.
+  r.parts = [
+    { uuid: 'u1', ref: 'U1', value: 'MCU', pins: [] },
+    { uuid: 'u2', ref: 'U2', value: 'Amp', pins: [] },
+  ];
+  r.nets = [{ id: '12', pins: ['U1.1', 'U2.2'], pin_records: [{ ref: 'U2', pin: '2' }, { ref: 'U1', pin: '1' }], pin_count: 2 }];
+  const reordered = netProjection('get_net', { net: '12' }, loaded, 'https://site.example');
+  assert.deepEqual(reordered.pins.items.map(m => [m.ref, m.pin, m.value]), [['U1', '1', 'MCU'], ['U2', '2', 'Amp']]);
+  const pagedNet = netProjection('get_net', { net: '12', limit: 1 }, loaded, 'https://site.example');
+  assert.equal(pagedNet.pins.limit, 1);
+  assert.equal(pagedNet.pins.returned, 1);
+  assert.equal(pagedNet.pins.total, 2);
+  assert.equal(pagedNet.pins.truncated, true);
+  assert.equal(pagedNet.pins.items.length, 1);
+  assert.equal(pagedNet.pins.items[0].ref, 'U1');
+  r.parts = [{ uuid: 'part-u1', ref: 'U1', value: 'Controller', pins: [] }];
+  r.nets = [{ id: '12', pins: ['U1.A.1'], pin_count: 1 }];
+  // No structured record or uniquely reconstructable reverse pin.
+  assert.equal(netProjection('get_net', { net: '12' }, loaded, 'https://site.example').pins.items[0].memberAvailable, false);
+  r.netlist_available = false;
+  r.netlist_reason = 'export failed';
+  assert.equal(netProjection('get_net', { net: '12' }, loaded, 'https://site.example').error.code, 'INCOMPLETE');
+});
+test('MCP net projection nearby suggestions, link, paging and unknown tool', () => {
+  const loaded = projectionLoaded(), r = loaded.revision;
+  r.netlist_available = true;
+  r.nets = [{ id: '+3V3', pins: [], pin_count: 0 }, { id: '+3V3_MCU', pins: [], pin_count: 0 }, { id: 'GND', pins: [], pin_count: 0 }];
+  const missing = netProjection('get_net', { net: '3v3' }, loaded, 'https://site.example');
+  assert.equal(missing.found, false);
+  assert.equal(missing.nearby.returned, 2);
+  assert.equal(missing.nearby.total, 2);
+  assert.equal(missing.nearby.truncated, false);
+  assert.equal(missing.nearby.items[0].id, '+3V3');
+  assert.equal(missing.nearby.items[0].link, 'https://site.example/r/Cameronrlewis/repo/a/90#p=0&net=%2B3V3');
+  assert.equal(missing.nearby.items[1].id, '+3V3_MCU');
+  const paged = netProjection('get_net', { net: '3v3', limit: 1 }, loaded, 'https://site.example');
+  assert.equal(paged.nearby.returned, 1);
+  assert.equal(paged.nearby.total, 2);
+  assert.equal(paged.nearby.truncated, true);
+  loaded.doc.truncated = true;
+  const missingTruncated = netProjection('get_net', { net: '3v3' }, loaded, 'https://site.example');
+  assert.equal(missingTruncated.nearby.total, null);
+  assert.equal(missingTruncated.nearby.truncated, true);
+  assert.equal(missingTruncated.incomplete, true);
+  loaded.doc.truncated = false;
+  const found = netProjection('get_net', { net: 'GND' }, loaded, 'https://site.example');
+  assert.equal(found.found, true);
+  assert.equal(found.link, 'https://site.example/r/Cameronrlewis/repo/a/90#p=0&net=GND');
+  assert.throws(() => netProjection('unknown_net_tool', {}, loaded, 'https://site.example'), /Unknown net projection/);
+});
+test('MCP grouped BOM follows 08 included flags and key',()=>{
+ const loaded=projectionLoaded();
+ const key=JSON.stringify(['10k,é','','','M']);const bom=(ref,included,excludedReason=null)=>({included,excludedReason,ref,value:'10k,é',footprint:'',lcsc:'',mpn:'M',manufacturer:null,datasheet:null,category:'Resistors',key});
+ loaded.revision.parts=[{ref:'R1',value:'10k,é',mpn:'M',bom:bom('R1',true)},{ref:'R2',value:'10k,é',mpn:'M',bom:bom('R2',true)},{ref:'R3',value:'10k,é',mpn:'M',dnp:true,bom:bom('R3',false,'dnp')},{ref:'U?',value:'10k,é',mpn:'M',bom:bom('U?',false,'unannotated')}];
+ const json=bomProjection('get_bom',{limit:1},loaded,'https://site.example');
+ assert.equal(json.lines.items[0].quantity,2);assert.equal(json.lines.items[0].refs.total,2);assert.equal(json.lines.items[0].refs.truncated,true);
+ const csv=bomProjection('get_bom',{format:'csv'},loaded,'https://site.example');
+ assert.match(csv.csv,/"R1 R2","10k,é"/);assert.doesNotMatch(csv.csv,/R3/);
+ loaded.doc.truncated=true;assert.equal(bomProjection('get_bom',{},loaded,'https://site.example').lines.total,null);
+ const legacy=structuredClone(loaded);legacy.revision.parts.forEach(p=>delete p.bom);
+ const legacyRes=bomProjection('get_bom',{},legacy,'https://site.example');
+ assert.equal(legacyRes.bom.complete,false);
+ assert.equal(legacyRes.incomplete,true);
+ assert.equal(legacyRes.lines.total,null);
+ assert.equal(legacyRes.lines.items[0].key,null);
+ assert.throws(() => bomProjection('unknown_bom_tool', {}, loaded, 'https://site.example'), /Unknown BOM projection/);
+});
+test('MCP grouped BOM CSV preserves verbatim values without formula prefix mangling per plan',()=>{
+ const loaded=projectionLoaded();
+ const bom=(ref,val)=>({included:true,excludedReason:null,ref,value:val,footprint:'F',lcsc:'C',mpn:'M',key:val});
+ loaded.revision.parts=[{ref:'R1',value:'+5V',bom:bom('R1','+5V')},{ref:'R2',value:'=10k',bom:bom('R2','=10k')},{ref:'R3',value:'-12V',bom:bom('R3','-12V')},{ref:'R4',value:'@special',bom:bom('R4','@special')}];
+ const csv=bomProjection('get_bom',{format:'csv'},loaded,'https://site.example');
+ assert.match(csv.csv,/"R1","\+5V","F","M","C","1"/);
+ assert.match(csv.csv,/"R2","=10k","F","M","C","1"/);
+ assert.match(csv.csv,/"R3","-12V","F","M","C","1"/);
+ assert.match(csv.csv,/"R4","@special","F","M","C","1"/);
+});
+test('MCP BOM replays the shared 08 fixture cases',async()=>{
+ const cases=JSON.parse(await readFile(new URL('../ui/fixtures/bom-cases.json',import.meta.url),'utf8'));
+ for(const c of cases){
+   const keyOf=ref=>c.expect.lines.find(l=>l.refs.includes(ref))?.key??null,seen=new Set(),parts=[];
+   // 09 keys parts by base reference: one record per reference, with an included unit ordered before any excluded one. Excluded records must not reach a line.
+   for(const [id,obj] of Object.entries(c.objects).sort(([a],[b])=>Number(c.expect.included[b])-Number(c.expect.included[a]))){
+     const ref=obj.ref.split(' unit ')[0];if(seen.has(ref))continue;seen.add(ref);
+     const included=c.expect.included[id];
+     parts.push({ref,value:'',footprint:'',lcsc:'',mpn:'',bom:{included,excludedReason:c.expect.excludedReason[id]??null,ref,key:included?keyOf(ref):null}});
+   }
+   const got=bomLines(parts).map(g=>({key:g.key,quantity:g.quantity,refs:g.refs}));
+   assert.deepEqual(got,c.expect.lines.map(l=>({key:l.key,quantity:l.quantity,refs:l.refs})),c.name);
+ }
+});
+
+import {reviewProjects,reviewLive} from './mcp-data.js';
+test('MCP live review uses wiring support, zero changes and removed projects',async()=>{
+  const doc=mcpDoc(),p=doc.projects[0];
+  p.changes={total:1,rows:[{id:'c1',kind:'net-members',channel:'wiring',detail:{kind:'members',added:['R1.1'],removed:[],beforeNets:['12'],afterNets:['12'],transitions:[{pin:'R1.1',before:[],after:['12']}]}}]};
+  p.net_changes={available:true,complete:true};
+  p.checks=[{name:'drc',findings:[{items:['U1.1','R1.1']}]}];
+  let review=reviewProjects(doc,1)[0];
+  assert.equal(review.netChangesAvailable,true);assert.equal(review.netChangesComplete,true);
+  assert.equal(review.changes.items[0].detail.transitions.items[0].before.returned,0);
+  assert.equal(review.changes.items[0].detail.added.returned,1);
+  assert.equal(review.checks.items[0].findings.items[0].items.total,null);
+  assertMcpLists(review);
+  p.changes={total:0,rows:[]};assert.equal(reviewProjects(doc)[0].netChangesComplete,true);
+  p.changes={total:1,rows:[{id:'c2',kind:'copper',detail_truncated:true,detail:{kind:'copper',omitted_counts:{addedContours:40}}}],detail_truncated:1};
+  let marked=reviewProjects(doc)[0];assert.equal(marked.changesDetailTruncated,1);assert.equal(marked.changes.items[0].detailTruncated,true);assert.equal(marked.changes.truncated,true);assert.equal(marked.netChangesComplete,false);
+  const partsBefore=reviewProjects(doc)[0].partsIncomplete;p.revisions.head.parts=[{ref:'R1',properties:{Note:'x'},properties_truncated:true,incomplete_fields:['properties.Note']},{ref:'R2',properties:{},incomplete_fields:[]}];assert.equal(reviewProjects(doc)[0].partsIncomplete-partsBefore,1);
+  p.changes={total:200,rows:[],more:200};assert.equal(reviewProjects(doc)[0].netChangesComplete,false);
+  p.changes={total:0,rows:[]};doc.truncated=true;assert.equal(reviewProjects(doc)[0].netChangesComplete,false);doc.truncated=false;
+  delete p.net_changes;assert.equal(reviewProjects(doc)[0].netChangesAvailable,false);
+  doc.projects.push({...structuredClone(p),dir:'gone',status:'removed',revisions:{base:p.revisions.base,head:null}});
+  assert.equal(reviewProjects(doc)[1].revision,null);assert.equal(reviewProjects(doc)[1].baseRevision,doc.base);
+  const access={...mcpAccessFixture(),repository:{owner:{login:'Cameronrlewis'},name:'repo'}};
+  const gh=async path=>new Response(JSON.stringify(path==='/graphql'?{data:{repository:{pullRequest:{headRefOid:SHA,reviewThreads:{totalCount:0,nodes:[]}}}}}:[]));
+  assert.equal((await reviewLive(access,7,SHA,15,gh)).readiness.state,'review_evidence_only');
+
+  const blockBody = threadBody({ anchor, text: 'B'.repeat(1200), link: 'https://s/r' });
+  const blockGh = async path => new Response(JSON.stringify(path === '/graphql'
+    ? { data: { repository: { pullRequest: { headRefOid: SHA, reviewThreads: { totalCount: 1, nodes: [
+        { id: 't_block', isResolved: false, resolvedBy: null, comments: { totalCount: 1, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [
+          { databaseId: 101, body: blockBody, author: { login: 'reviewer' }, createdAt: '2026-10-12T10:00:00Z', url: 'https://x#1' },
+        ] } },
+      ] } } } } }
+    : []));
+  const blockLive = await reviewLive(access, 7, SHA, 15, blockGh);
+  assert.equal(blockLive.readiness.state, 'needs_work');
+  assert.equal(blockLive.readiness.blocking, 1);
+  assert.equal(blockLive.openThreads.items[0].comments.items[0].body.length, 1000);
+  assert.equal(blockLive.openThreads.items[0].comments.items[0].body, 'B'.repeat(1000));
+
+  const crGh = async path => new Response(JSON.stringify(path === '/graphql'
+    ? { data: { repository: { pullRequest: { headRefOid: SHA, reviewThreads: { totalCount: 0, nodes: [] } } } } }
+    : [{ id: 1, user: { login: 'alice' }, state: 'CHANGES_REQUESTED', commit_id: SHA, submitted_at: '2026-01-01T00:00:00Z' }]));
+  assert.equal((await reviewLive(access, 7, SHA, 15, crGh)).readiness.state, 'needs_work');
+
+  const headMismatchGh = async path => new Response(JSON.stringify(path === '/graphql'
+    ? { data: { repository: { pullRequest: { headRefOid: 'b'.repeat(40), reviewThreads: { totalCount: 0, nodes: [] } } } } }
+    : []));
+  const headMismatchLive = await reviewLive(access, 7, SHA, 15, headMismatchGh);
+  assert.equal(headMismatchLive.readiness.state, 'unknown');
+  assert.equal(headMismatchLive.openThreads.truncated, true);
+
+  const moreThreadsGh = async path => new Response(JSON.stringify(path === '/graphql'
+    ? { data: { repository: { pullRequest: { headRefOid: SHA, reviewThreads: { totalCount: 5, nodes: [] } } } } }
+    : []));
+  assert.equal((await reviewLive(access, 7, SHA, 15, moreThreadsGh)).readiness.state, 'unknown');
+
+  const nonOkThreadsGh = async path => (path === '/graphql' ? new Response('err', { status: 500 }) : new Response('[]'));
+  assert.equal((await reviewLive(access, 7, SHA, 15, nonOkThreadsGh)).readiness.state, 'unknown');
+
+  const nonOkReviewsGh = async path => (path === '/graphql'
+    ? new Response(JSON.stringify({ data: { repository: { pullRequest: { headRefOid: SHA, reviewThreads: { totalCount: 0, nodes: [] } } } } }))
+    : new Response('err', { status: 500 }));
+  assert.equal((await reviewLive(access, 7, SHA, 15, nonOkReviewsGh)).readiness.state, 'unknown');
+
+  const reviews100Gh = async path => (path === '/graphql'
+    ? new Response(JSON.stringify({ data: { repository: { pullRequest: { headRefOid: SHA, reviewThreads: { totalCount: 0, nodes: [] } } } } }))
+    : new Response(JSON.stringify(new Array(100).fill({ id: 1, user: { login: 'u' }, state: 'APPROVED', commit_id: SHA, submitted_at: '2026-01-01' }))));
+  const reviews100Live = await reviewLive(access, 7, SHA, 15, reviews100Gh);
+  assert.equal(reviews100Live.readiness.state, 'unknown');
+  assert.equal(reviews100Live.readiness.decisions.truncated, true);
+
+  const throwsGh = async () => { throw new Error('network rejection'); };
+  assert.equal((await reviewLive(access, 7, SHA, 15, throwsGh)).readiness.state, 'unknown');
+
+  const malformedGh = async path => new Response(JSON.stringify(path === '/graphql'
+    ? { data: { repository: { pullRequest: { headRefOid: SHA, reviewThreads: { totalCount: 0 } } } } }
+    : []));
+  assert.equal((await reviewLive(access, 7, SHA, 15, malformedGh)).readiness.state, 'unknown');
+
+  // Main's paged reads: a second thread page and a second review page are read; an unvalidated comment connection is unknown.
+  const thread = (id, comments = { totalCount: 1, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ databaseId: 5, body: blockBody, author: { login: 'r' }, createdAt: '', url: '' }] }) =>
+    ({ id, isResolved: false, resolvedBy: null, comments });
+  const pagedGh = (second) => async (path, token, init) => {
+    if (path === '/graphql') {
+      const after = JSON.parse(init.body).variables.after;
+      return new Response(JSON.stringify({ data: { repository: { pullRequest: { headRefOid: SHA, reviewThreads: after
+        ? { totalCount: 1, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [second] }
+        : { totalCount: 1, pageInfo: { hasNextPage: true, endCursor: 'c1' }, nodes: [] } } } } }));
+    }
+    return new Response(JSON.stringify(path.endsWith('&page=2') ? [{ id: 2, user: { login: 'x' }, state: 'APPROVED', commit_id: SHA, submitted_at: '2026-01-02' }]
+      : new Array(100).fill({ id: 1, user: { login: 'u' }, state: 'APPROVED', commit_id: SHA, submitted_at: '2026-01-01' })));
+  };
+  const pagedLive = await reviewLive(access, 7, SHA, 15, pagedGh(thread('t2')));
+  assert.equal(pagedLive.readiness.state, 'needs_work');
+  assert.equal(pagedLive.readiness.blocking, 1);
+  assert.equal(pagedLive.readiness.decisions.total, 2);
+  assert.equal((await reviewLive(access, 7, SHA, 15, pagedGh(thread('t3', { nodes: [] })))).readiness.state, 'unknown');
+});
+
+test('MCP live review reports the full comment count without reading comments beyond the validated limit', async () => {
+  const access = { ...mcpAccessFixture(), repository: { owner: { login: 'Cameronrlewis' }, name: 'repo' } };
+  const comment = (n) => ({ databaseId: n, body: n === 1 ? threadBody({ anchor, text: 'first', link: 'https://s/r' }) : `reply ${n}`, author: { login: 'r' }, createdAt: '', url: '' });
+  const range = (from, to) => Array.from({ length: to - from + 1 }, (_, i) => comment(from + i));
+  let calls = 0;
+  const gh = async (path, token, init) => {
+    calls++;
+    if (path !== '/graphql') return new Response('[]');
+    const { query } = JSON.parse(init.body);
+    assert.doesNotMatch(query, /t0:node/, 'later comment pages are not requested');
+    return new Response(JSON.stringify({ data: { repository: { pullRequest: { headRefOid: SHA, reviewThreads: { totalCount: 1, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [
+      { id: 't_long', isResolved: false, resolvedBy: null, comments: { totalCount: 120, pageInfo: { hasNextPage: true, endCursor: 'c50' }, nodes: range(1, 50) } },
+    ] } } } } }));
+  };
+  const args = validateTool('get_review', { repo: 'Cameronrlewis/repo', pr: 7, limit: 50 });
+  const comments = (await reviewLive(access, args.pr, SHA, args.limit, gh)).openThreads.items[0].comments;
+  assert.deepEqual(comments.items.map(c => c.id), range(1, 50).map(c => c.databaseId));
+  assert.equal(comments.returned, 50); assert.equal(comments.total, 120); assert.equal(comments.truncated, true);
+  assert.equal(calls, 2, 'only the reviews and initial threads requests are made');
+});
+
+import {runTool,projectTool} from './mcp-data.js';
+test('MCP six tools preserve provenance and never write GitHub',async()=>{
+  const doc=mcpDoc(),p=doc.projects[0],r=p.revisions.head;
+  r.parts=[{uuid:'r-uuid',ref:'R1',value:'10k,é',footprint:'R',mpn:'M123',sheet:'/',properties:{Voltage:'50V'},pins:[{pin:'1',net:'12'}],pin_count:1}];
+  r.netlist_available=true;r.netlist_reason=null;
+  r.nets=[{id:'12',pins:['R1.1'],pin_count:1}];
+  p.changes={total:1,rows:[{id:'c1',kind:'net-members',channel:'wiring',weight:'heavy',detail:{kind:'members',added:['R1.1'],removed:[],beforeNets:['12'],afterNets:['12'],transitions:[{pin:'R1.1',before:[],after:['12']}]}}]};
+  p.net_changes={available:true,complete:true};
+  p.checks=[{name:'drc',status:'not_run',reason:'no board',confidence:'deterministic',evidence_source:'kicad-cli pcb drc',findings:[]},
+    ...['jlcpcb','pcbway'].map((vendor,i)=>({name:'fab_limits',vendor,status:i?'pass':'fail',profile:`${vendor}-multilayer`,checkedOn:'2026-10-26',assumedCopperOz:1,baselineAvailable:true,fixed:i+1,confidence:'deterministic',evidence_source:`${vendor} isolated kicad-cli pcb drc`,findings:[{type:'track_width',description:`${vendor} finding`,confidence:'deterministic',evidence_source:`${vendor} isolated kicad-cli pcb drc`}]}))];
+  const deps={open:async()=>({t:'secret',u:'cam',e:Date.now()+600000}),allowedOwners:()=>['cameronrlewis'],loadContext:async()=>({doc,key:'d'}),
+    gh:async(path,token,init={})=>{
+      assert.equal(token,'secret');
+      if(init.method==='POST')assert.ok(path==='/graphql'&&JSON.parse(init.body).query.startsWith('query('),'no GitHub mutation');
+      else assert.ok(!init.method||init.method==='GET','no GitHub write');
+      let body;
+      if(path==='/user')body={login:'cam'};
+      else if(path==='/repos/Cameronrlewis/repo')body={full_name:'Cameronrlewis/repo',name:'repo',owner:{login:'Cameronrlewis'},default_branch:'main',permissions:{pull:true,push:true}};
+      else if(path.includes('/commits/'))body={sha:SHA};
+      else if(path.endsWith('/pulls/7'))body=prFixture();
+      else if(path.endsWith(`/compare/${TARGET_TIP}...${SHA}`))body={merge_base_commit:{sha:MERGE_BASE}};
+      else if(path.endsWith('/actions/runs/77'))body=prRunFixture();
+      else if(path.includes('/actions/artifacts'))body=artifactsFixture();
+      else if(path.includes('/reviews?'))body=[];
+      else if(path==='/graphql')body={data:{repository:{pullRequest:{headRefOid:SHA,reviewThreads:{totalCount:0,nodes:[]}}}}};
+      else assert.fail('Unexpected GitHub endpoint '+path);
+      return new Response(JSON.stringify(body));
+    }};
+  const request={env:{},props:{credential:'opaque'},origin:'https://site.example'};
+  const invoke=(name,args={})=>runTool(name,validateTool(name,{repo:'Cameronrlewis/repo',...args}),request,deps);
+  assert.equal((await invoke('list_projects')).projects.returned,1);
+  const design=await invoke('get_design');assert.equal(design.provenance.commit,SHA);
+  assert.equal(design.sheets.total,1);assert.equal(design.sheets.items[0].path,'/');
+  assert.equal((await invoke('find_parts',{query:'50V'})).parts.total,1);
+  assert.equal((await invoke('find_parts',{query:'M123'})).parts.items[0].id,'r-uuid');
+  assert.equal((await invoke('get_net',{net:'12'})).pins.items[0].value,'10k,é');
+  const review=await invoke('get_review',{pr:7});
+  assert.equal(review.projects.items[0].changes.items[0].weight,'heavy');
+  const fab=review.projects.items[0].checks.items.filter(c=>c.name==='fab_limits');
+  assert.deepEqual(fab.map(c=>({vendor:c.vendor,status:c.status,profile:c.profile,checkedOn:c.checkedOn,assumedCopperOz:c.assumedCopperOz,baselineAvailable:c.baselineAvailable,fixed:c.fixed,confidence:c.confidence,evidence_source:c.evidence_source,findings:c.findings.items})),
+    p.checks.filter(c=>c.name==='fab_limits').map(({name,...c})=>c),
+    'get_review retains both vendors and their distinct results/provenance; never merge by fab_limits name');
+  assert.equal(review.live.readiness.blocking,0);
+  assert.equal(review.projects.items[0].netChangesAvailable,true);
+  p.changes={total:0,rows:[]};
+  assert.equal((await invoke('get_review',{pr:7})).projects.items[0].netChangesComplete,true,'supported zero-change review');
+  doc.truncated=true;assert.equal((await invoke('get_review',{pr:7})).projects.items[0].netChangesComplete,false);doc.truncated=false;
+  p.changes={total:200,rows:[],more:200};
+  assert.equal((await invoke('get_review',{pr:7})).projects.items[0].netChangesComplete,false);
+  delete p.net_changes;assert.equal((await invoke('get_review',{pr:7})).projects.items[0].netChangesAvailable,false);
+  doc.projects.push({...structuredClone(p),dir:'gone',status:'removed',revisions:{base:r,head:null}});
+  assert.equal((await invoke('get_review',{pr:7})).projects.items[1].revision,null);
+  assert.equal((await invoke('list_projects')).projects.items[1].baseRevision,doc.base);
+  assert.equal((await invoke('get_design',{project:'gone'})).error.code,'PROJECT_UNAVAILABLE');
+  assert.equal((await invoke('get_design',{project:'P'})).sheets.returned,1);
+  doc.projects.pop();
+  p.dir='';doc.projects.push({...structuredClone(p),dir:'Nested',name:'Nested'});
+  for(const project of ['', 'Nested']){
+    const selected=await invoke('get_design',{project});
+    assert.equal(selected.provenance.project,project);assert.equal(selected.sheets.items[0].path,'/');
+  }
+  assert.equal((await invoke('get_design')).error.code,'PROJECT_REQUIRED');
+  assert.equal((await invoke('list_projects')).projects.items[0].id,'');
+  doc.projects.pop();p.dir='P';
+  assert.equal((await invoke('get_bom')).lines.items[0].quantity,1);
+  assert.match((await invoke('get_bom',{format:'csv'})).csv,/"10k,é"/);
+  const nearby=await invoke('get_net',{net:'1'});assert.equal(nearby.found,false);assert.equal(nearby.nearby.items[0].id,'12');
+  for(const name of ['list_projects','get_design','get_bom'])assert.ok(new TextEncoder().encode(JSON.stringify(await invoke(name))).length<=32768);
+  const nonObjectErr = await runTool('list_projects', { repo: 'Cameronrlewis/repo' }, request, { ...deps, open: async () => { throw null; } });
+  assert.deepEqual(nonObjectErr, { error: { code: 'UNAVAILABLE', message: 'Data unavailable; retry later' } });
+});
+
+test('MCP consent needs same-origin nonce',async()=>{
+  const now=Date.now();
+  const valid={auth:{redirectUri:'https://client.example/cb',state:'state'},login:'cam',nonce:'n',exp:now+600000};
+  for(const kind of ['evil-origin','missing-pending','forged-pending','mismatched-cookie','missing-nonce','account-mismatch','expired','denied']){
+    let grants=0;
+    const env={OAUTH_PROVIDER:{completeAuthorization:async()=>{grants++;return {redirectTo:'https://client.example/cb?code=usable'};}}};
+    const saved=structuredClone(valid);
+    if(kind==='missing-nonce')delete saved.nonce;
+    if(kind==='account-mismatch')saved.login='other';
+    if(kind==='expired')saved.exp=now-1;
+    const deps={session:async()=>({login:'cam',token:'secret'}),open:async value=>value==='sealed'?saved:null,seal:async()=> 'credential'};
+    const pending=kind==='missing-pending'?'':kind==='forged-pending'?'forged':'sealed';
+    const req=new Request('https://site.example/authorize',{method:'POST',headers:{Origin:kind==='evil-origin'?'https://evil.example':'https://site.example',Cookie:'mc='+(kind==='mismatched-cookie'?'other':'sealed'),'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({pending,decision:kind==='denied'?'deny':'allow'})});
+    const result=await consentRoute(req,env,deps);
+    assert.equal(grants,0,kind);
+    assert.equal(result.status,kind==='denied'?302:403,kind);
+    if(kind==='denied')assert.equal(new URL(result.headers.get('Location')).searchParams.get('error'),'access_denied');
+    assert.ok(!/access_token|[?&]code=/.test(result.headers.get('Location')||''),kind);
+    assert.doesNotMatch(await result.text(),/access_token|usable/);
+  }
+});
+
+test('MCP consent rejects missing expiry, oversize forms and unparseable requests without granting',async()=>{
+  let grants=0;
+  const env={OAUTH_PROVIDER:{completeAuthorization:async()=>{grants++;return {redirectTo:'https://client.example/cb?code=usable'};},parseAuthRequest:async()=>{throw new Error('unregistered redirect');}}};
+  const saved={auth:{redirectUri:'https://client.example/cb',state:'state'},login:'cam',nonce:'n'};
+  const deps={session:async()=>({login:'cam',token:'secret'}),open:async value=>value==='sealed'?saved:null,seal:async()=>'credential'};
+  const post=pending=>new Request('https://site.example/authorize',{method:'POST',headers:{Origin:'https://site.example',Cookie:'mc=sealed','Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({pending,decision:'allow'})});
+  assert.equal((await consentRoute(post('sealed'),env,deps)).status,403);
+  assert.equal((await consentRoute(post('x'.repeat(16385)),env,deps)).status,413);
+  const get=await consentRoute(new Request('https://site.example/authorize?response_type=code&code_challenge_method=S256&code_challenge='+'a'.repeat(43)+'&redirect_uri=https://evil.example/cb'),env,deps);
+  assert.equal(get.status,400);assert.equal(get.headers.get('Location'),null);
+  assert.equal(grants,0);
+});
+
+test('MCP consent renders consent page on GET and completes authorization on POST allow', async () => {
+  const now = Date.now();
+  let sealedPending = null;
+  const env = {
+    OAUTH_PROVIDER: {
+      parseAuthRequest: async () => ({
+        clientId: 'client-123',
+        redirectUri: 'https://client.example/cb',
+        scope: ['read:design'],
+        state: 'oauth-state-1',
+      }),
+      lookupClient: async (id) => {
+        assert.equal(id, 'client-123');
+        return {
+          clientName: 'Test AI Assistant',
+          redirectUris: ['https://client.example/cb'],
+        };
+      },
+      completeAuthorization: async (params) => {
+        completedParams = params;
+        return { redirectTo: 'https://client.example/cb?code=auth-code-ok&state=oauth-state-1' };
+      },
+    },
+  };
+  let completedParams = null;
+  let sealedCredential = null;
+  const deps = {
+    session: async () => ({ login: 'cam', token: 'secret' }),
+    open: async (value) => {
+      if (value === 'pending-cookie-token') {
+        return {
+          auth: { clientId: 'client-123', redirectUri: 'https://client.example/cb', scope: ['read:design'], state: 'oauth-state-1' },
+          login: 'cam',
+          nonce: 'nonce-123',
+          exp: now + 600000,
+        };
+      }
+      if (value === 'site-session-token') {
+        return { t: 'gh-user-token', u: 'cam', e: now + 7200000 };
+      }
+      return null;
+    },
+    seal: async (payload) => {
+      if (payload.nonce) {
+        sealedPending = payload;
+        return 'pending-cookie-token';
+      }
+      if (payload.t) {
+        sealedCredential = payload;
+        return 'sealed-cred-jwt';
+      }
+      return 'other';
+    },
+  };
+
+  // 1. Successful GET /authorize
+  const getReq = new Request('https://site.example/authorize?response_type=code&code_challenge_method=S256&code_challenge=' + 'a'.repeat(43) + '&resource=https://site.example/mcp');
+  const getRes = await consentRoute(getReq, env, deps);
+  assert.equal(getRes.status, 200);
+  assert.match(getRes.headers.get('Content-Type') || '', /text\/html/);
+  assert.match(getRes.headers.get('Set-Cookie') || '', /mc=pending-cookie-token; Path=\/authorize; HttpOnly; SameSite=Lax; Max-Age=600; Secure/);
+  assert.equal(sealedPending.login, 'cam');
+  assert.equal(sealedPending.auth.clientId, 'client-123');
+  assert.ok(sealedPending.nonce);
+  assert.ok(sealedPending.exp >= now + 600000 && sealedPending.exp <= Date.now() + 600000);
+  const html = await getRes.text();
+  assert.ok(html.includes('<form method="post" action="/authorize">'));
+  assert.ok(html.includes('<input type="hidden" name="pending" value="pending-cookie-token">'));
+  assert.ok(html.includes('<p>Signed in as cam.</p>'));
+  assert.ok(html.includes('<p>Client: Test AI Assistant</p>'));
+  assert.ok(html.includes('<p>Redirect: https://client.example/cb</p>'));
+
+  // 2. Successful POST /authorize (allow) with mixed-case and padded Content-Type
+  const postReq = new Request('https://site.example/authorize', {
+    method: 'POST',
+    headers: {
+      Origin: 'https://site.example',
+      Cookie: 'mc=pending-cookie-token; s=site-session-token',
+      'Content-Type': '  Application/x-www-form-urlencoded ; charset=UTF-8  ',
+    },
+    body: new URLSearchParams({ pending: 'pending-cookie-token', decision: 'allow' }),
+  });
+  const postRes = await consentRoute(postReq, env, deps);
+  assert.equal(postRes.status, 302);
+  assert.equal(postRes.headers.get('Location'), 'https://client.example/cb?code=auth-code-ok&state=oauth-state-1');
+  assert.match(postRes.headers.get('Set-Cookie') || '', /mc=; Path=\/authorize; HttpOnly; SameSite=Lax; Max-Age=0; Secure/);
+  assert.deepEqual(completedParams, {
+    request: { clientId: 'client-123', redirectUri: 'https://client.example/cb', scope: ['read:design'], state: 'oauth-state-1' },
+    userId: 'cam',
+    metadata: { label: 'cam read-only design access' },
+    scope: ['read:design'],
+    props: { credential: 'sealed-cred-jwt' },
+  });
+  assert.equal(sealedCredential.t, 'gh-user-token');
+  assert.equal(sealedCredential.u, 'cam');
+  assert.ok(sealedCredential.e >= now + 3600000 && sealedCredential.e <= Date.now() + 3600000);
+});
+
+import {oauthFetch} from './mcp-auth.js';
+import {makeMcpWorker} from './mcp-entry.js';
+test('MCP refresh policy does not expose copied GitHub refresh credentials',async()=>{
+  let calls=0;
+  const provider={fetch:async()=>{calls++;return new Response(JSON.stringify({access_token:'access',refresh_token:'never-return',token_type:'Bearer',expires_in:3600}),{headers:{'Content-Type':'application/json'}});}};
+  const env={OAUTH_KV:{}};
+  const refresh=new Request('https://site.example/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'grant_type=refresh_token&refresh_token=old'});
+  assert.equal((await oauthFetch(refresh,env,{},provider,{})).status,400);assert.equal(calls,0);
+  const grant=new Request('https://site.example/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'grant_type=authorization_code&code=x'});
+  const body=await (await oauthFetch(grant,env,{},provider,{})).json();
+  assert.equal(body.access_token,'access');assert.ok(!Object.hasOwn(body,'refresh_token'));
+  // RFC 7009 revocation shares the token endpoint (metadata revocation_endpoint) and stays available.
+  const revoke=new Request('https://site.example/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'token=t&token_type_hint=access_token&client_id=c'});
+  await oauthFetch(revoke,env,{},provider,{});assert.equal(calls,2);
+  const huge=new Request('https://site.example/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'grant_type=authorization_code&code='+'x'.repeat(16384)});
+  assert.equal((await oauthFetch(huge,env,{},provider,{})).status,413);assert.equal(calls,2);
+});
+test('MCP without OAUTH_KV leaves the legacy site unchanged',async()=>{
+  const legacy={fetch:async()=>new Response('legacy')};
+  assert.equal(await (await oauthFetch(new Request('https://site.example/r/a/b'),{},{},null,legacy)).text(),'legacy');
+  for(const path of ['/mcp','/authorize','/token','/register','/.well-known/oauth-authorization-server'])
+    assert.equal((await oauthFetch(new Request('https://site.example'+path),{},{},null,legacy)).status,503,path);
+});
+test('MCP provider integration publishes read-only discovery',async()=>{
+  const worker=makeMcpWorker(),local={...env,OAUTH_KV:{}},ctx={waitUntil:()=>{}};
+  for(const path of ['/.well-known/oauth-protected-resource','/.well-known/oauth-protected-resource/mcp']){
+    const response=await worker.fetch(new Request('https://site.example'+path),local,ctx);
+    assert.equal(response.status,200);
+    assert.equal(response.headers.get('Access-Control-Allow-Origin'),'*');
+    const metadata=await response.json();assert.equal(metadata.resource,'https://site.example/mcp');
+    assert.deepEqual(metadata.scopes_supported,['read:design']);
+  }
+  const response=await worker.fetch(new Request('https://site.example/.well-known/oauth-authorization-server'),local,ctx);
+  assert.equal(response.status,200);const metadata=await response.json();
+  assert.equal(metadata.token_endpoint,'https://site.example/token');
+  assert.equal(metadata.registration_endpoint,'https://site.example/register');
+  assert.deepEqual(metadata.grant_types_supported,['authorization_code']);
+  const denied=await worker.fetch(rpcRequest('tools/list'),local,ctx);
+  assert.equal(denied.status,401);assert.match(denied.headers.get('WWW-Authenticate'),/resource_metadata=/);
+});
+test('MCP authorization metadata HEAD has no body to rewrite',async()=>{
+  const response=await makeMcpWorker().fetch(new Request('https://site.example/.well-known/oauth-authorization-server',{method:'HEAD'}),{...env,OAUTH_KV:{}},{waitUntil:()=>{}});
+  assert.equal(response.status,200);
+});
+test('MCP entry honors injected deps.open in consent and suppresses default error warnings',async()=>{
+  let openCalled=false,errorCaptured=null;
+  const sealed=await signedIn();
+  const customWorker=makeMcpWorker({
+    open:async()=>{openCalled=true;return null;},
+    onError:(err)=>{errorCaptured=err;},
+  });
+  const local={...env,OAUTH_KV:{}},ctx={waitUntil:()=>{}};
+  const consentReq=new Request('https://site.example/authorize',{
+    method:'POST',
+    headers:{Origin:'https://site.example','Content-Type':'application/x-www-form-urlencoded',Cookie:`s=${sealed}; mc=pending-val`},
+    body:'pending=pending-val&decision=deny',
+  });
+  await customWorker.fetch(consentReq,local,ctx);
+  assert.equal(openCalled,true);
+  const invalidTokenReq=new Request('https://site.example/token',{
+    method:'POST',
+    headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:'grant_type=authorization_code&code=invalid',
+  });
+  await customWorker.fetch(invalidTokenReq,local,ctx);
+  assert.ok(errorCaptured);
+  assert.equal(errorCaptured.code,'invalid_client');
+
+  // Assert default makeMcpWorker() suppresses console.warn on expected 400/401 errors
+  const originalWarn=console.warn;
+  let warnCalls=0;
+  console.warn=(...args)=>{warnCalls++;};
+  try{
+    const defaultWorker=makeMcpWorker();
+    const tokenRes=await defaultWorker.fetch(invalidTokenReq,local,ctx);
+    assert.equal(tokenRes.status,400);
+    const unauthMcpReq=new Request('https://site.example/mcp',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/list'}),
+    });
+    const mcpRes=await defaultWorker.fetch(unauthMcpReq,local,ctx);
+    assert.equal(mcpRes.status,401);
+    assert.equal(warnCalls,0);
+  }finally{
+    console.warn=originalWarn;
+  }
+});
+
+import {discoverOAuthProtectedResourceMetadata,discoverAuthorizationServerMetadata} from '@modelcontextprotocol/sdk/client/auth.js';
+import {Client} from '@modelcontextprotocol/sdk/client/index.js';
+import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+// Test-only OAuth protocol storage and GitHub boundary; the real provider and consent code run unmocked.
+class MCPMemoryKV {
+  data=new Map();
+  async get(key,options){
+    const item=this.data.get(key);if(!item||item.exp&&item.exp<=Date.now())return null;
+    const type=typeof options==='string'?options:options?.type;
+    return type==='json'?JSON.parse(item.value):type==='arrayBuffer'?new TextEncoder().encode(item.value).buffer:item.value;
+  }
+  async put(key,value,options={}){
+    const text=typeof value==='string'?value:await new Response(value).text();
+    this.data.set(key,{value:text,exp:options.expiration?options.expiration*1000:options.expirationTtl?Date.now()+options.expirationTtl*1000:null});
+  }
+  async delete(key){this.data.delete(key);}
+  async list({prefix='',limit=1000}={}){return {keys:[...this.data.keys()].filter(k=>k.startsWith(prefix)).slice(0,limit).map(name=>({name})),list_complete:true,cursor:''};}
+}
+function mcpSecurityHarness(){
+  let readable=true,artifactReads=0,providerHelpers;
+  const mcpWorker=makeMcpWorker({onProvider:helpers=>{providerHelpers=helpers;},loadContext:async()=>({doc:mcpDoc(),key:'d'}),gh:async(path,token,init={})=>{
+    assert.equal(token,'user-token');
+    if(path==='/user')return new Response(JSON.stringify({login:'cam'}));
+    if(path==='/repos/Cameronrlewis/repo')return new Response(JSON.stringify({full_name:'Cameronrlewis/repo',owner:{login:'Cameronrlewis'},name:'repo',default_branch:'main',permissions:{pull:true}}),{status:readable?200:404});
+    if(path.includes('/commits/'))return new Response(JSON.stringify({sha:SHA}));
+    if(path.includes('/actions/artifacts')){artifactReads++;return new Response(JSON.stringify(artifactsFixture()));}
+    assert.fail('Unexpected GitHub endpoint '+path);
+  }});
+  const local={...env,OAUTH_KV:new MCPMemoryKV()},ctx={waitUntil:p=>p.catch(()=>{})};
+  const send=(path,init={})=>mcpWorker.fetch(new Request('https://site.example'+path,init),local,ctx);
+  const revokeGrant=async accessToken=>{
+    // Authenticate through the real provider before invoking its administrative helper.
+    const authenticated=rpcRequest('tools/list');
+    authenticated.headers.set('Authorization','Bearer '+accessToken);
+    const response=await mcpWorker.fetch(authenticated,local,ctx);
+    if(response.status!==200)return new Response(null,{status:401});
+    assert.ok(providerHelpers,'authenticated apiHandler must expose provider helpers to test observer');
+    // Task 1 verifies this exact installed helper contract before Task 11/12 depend on it.
+    const grants=await providerHelpers.listUserGrants('cam');
+    assert.ok(Array.isArray(grants.items));assert.equal(grants.items.length,1,'isolated test account has one grant');
+    await providerHelpers.revokeGrant(grants.items[0].id,'cam');
+    return new Response(null,{status:200});
+  };
+  return {mcpWorker,local,ctx,send,revokeGrant,revoke:()=>{readable=false;},artifactReads:()=>artifactReads};
+}
+test('MCP OAuth binding and replay matrix',async(t)=>{
+  const harness=mcpSecurityHarness(),{mcpWorker,local,ctx,send}=harness;
+  const register=async()=>{
+    const r=await send('/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_name:'MCP test',redirect_uris:['https://client.example/cb'],grant_types:['authorization_code'],response_types:['code'],token_endpoint_auth_method:'none'})});
+    assert.equal(r.status,201);return r.json();
+  };
+  const client=await register(),other=await register();
+  const verifier='A'.repeat(64),challenge=createHash('sha256').update(verifier).digest('base64url');
+  const signed=await signedIn({u:'cam',t:'user-token'});
+  const makeCode=async(changes={},consent={})=>{
+    const params=new URLSearchParams({client_id:client.client_id,redirect_uri:'https://client.example/cb',response_type:'code',scope:'read:design',resource:'https://site.example/mcp',code_challenge:challenge,code_challenge_method:'S256',state:'state',...changes});
+    const screen=await send('/authorize?'+params,{headers:{Cookie:'s='+signed}});
+    if(screen.status!==200)return {screen};
+    const html=await screen.text(),pending=/name="pending" value="([^"]+)"/.exec(html)?.[1];
+    assert.ok(pending);const mc=cookieValue(screen,'mc');assert.ok(mc);
+    let postedPending=pending,postedCookie=mc;
+    if(consent.missingNonce){const saved=await open(pending,local);delete saved.nonce;postedPending=postedCookie=await seal(saved,local);}
+    if(consent.expired){t.mock.timers.enable({apis:['Date'],now:Date.now()});t.mock.timers.tick(600001);}
+    const approved=await send('/authorize',{method:'POST',headers:{Origin:'https://site.example',Cookie:`s=${consent.session||signed}; mc=${consent.cookie??postedCookie}`,'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({pending:consent.pending??postedPending,decision:consent.decision||'allow'})});
+    if(consent.expired)t.mock.timers.reset();
+    if(Object.keys(consent).length)return {screen:approved};
+    assert.equal(approved.status,302);return {code:new URL(approved.headers.get('Location')).searchParams.get('code')};
+  };
+  const token=(code,changes={})=>send('/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'authorization_code',client_id:client.client_id,redirect_uri:'https://client.example/cb',code_verifier:verifier,resource:'https://site.example/mcp',code,...changes})});
+  for(const changes of [{redirect_uri:'https://evil.example/cb'},{client_id:other.client_id},{code_verifier:''},{code_verifier:'B'.repeat(64)},{resource:'https://evil.example/mcp'}]){
+    const {code}=await makeCode();assert.ok(code);const r=await token(code,changes);assert.ok(r.status>=400,JSON.stringify(changes));
+  }
+  assert.equal((await makeCode({scope:'write:design'})).screen.status,400);
+  assert.equal((await makeCode({code_challenge_method:'plain'})).screen.status,400);
+  assert.equal((await makeCode({redirect_uri:'https://evil.example/cb'})).screen.status,400);
+  for(const consent of [{pending:''},{pending:'forged'},{cookie:'mismatch'},{missingNonce:true},{expired:true},{session:await signedIn({u:'other',t:'other-token'})},{decision:'deny'}]){
+    const before=JSON.stringify([...local.OAUTH_KV.data]);
+    const {screen}=await makeCode({},consent);
+    assert.equal(screen.status,consent.decision==='deny'?302:403);
+    const loc=screen.headers.get('Location');assert.ok(!loc||!new URL(loc).searchParams.has('code'));
+    assert.equal(JSON.stringify([...local.OAUTH_KV.data]),before,'rejected consent issues no grant/code');
+    assert.doesNotMatch(await screen.text(),/access_token|refresh_token/);
+    const probe=await token('not-issued');assert.ok(probe.status>=400);
+    assert.equal((await probe.json()).access_token,undefined,'rejection cannot redeem a usable token');
+  }
+  const expired=await makeCode();
+  t.mock.timers.enable({apis:['Date'],now:Date.now()});
+  try {t.mock.timers.tick(24*3600000);assert.ok((await token(expired.code)).status>=400,'expired code');}
+  finally {t.mock.timers.reset();}
+  const bearer=accessToken=>{const r=rpcRequest('tools/list');r.headers.set('Authorization','Bearer '+accessToken);return mcpWorker.fetch(r,local,ctx);};
+  const replayed=await makeCode(),first=await (await token(replayed.code)).json();assert.ok(first.access_token);
+  assert.ok((await token(replayed.code)).status>=400,'single-use authorization code');
+  // The provider revokes the whole grant on code replay, so the token issued from that code stops working too.
+  assert.equal((await bearer(first.access_token)).status,401,'code replay revokes the issued token');
+  const {code}=await makeCode();const good=await token(code);assert.equal(good.status,200);
+  const grant=await good.json();assert.ok(grant.access_token);assert.equal(grant.refresh_token,undefined);
+  const tools=await bearer(grant.access_token);assert.equal(tools.status,200);
+  assert.equal((await tools.json()).result.tools.length,6);
+  const cookieOnly=rpcRequest('tools/list');cookieOnly.headers.set('Cookie','s='+signed);
+  assert.equal((await mcpWorker.fetch(cookieOnly,local,ctx)).status,401);
+  assert.equal((await send('/mcp?access_token='+grant.access_token,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).status,401);
+  const fetchFn=async(input,init)=>mcpWorker.fetch(input instanceof Request?new Request(input,init):new Request(input,init),local,ctx);
+  const unauth=await send('/mcp',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+  assert.equal(unauth.status,401);
+  assert.match(unauth.headers.get('WWW-Authenticate'),/resource_metadata=/);
+  const prm=await (await send('/.well-known/oauth-protected-resource/mcp')).json();
+  assert.equal(prm.resource,'https://site.example/mcp');
+  const as=await (await send('/.well-known/oauth-authorization-server')).json();
+  assert.equal(as.registration_endpoint,'https://site.example/register');
+  assert.ok(as.code_challenge_methods_supported.includes('S256'));
+  // Installed SDK 1.32.2 takes fetchFn as the third positional argument here (opts carries only protocolVersion/resourceMetadataUrl).
+  const metadata=await discoverOAuthProtectedResourceMetadata(new URL('https://site.example/mcp'),{},fetchFn);
+  assert.equal(metadata.resource,prm.resource);
+  const authMetadata=await discoverAuthorizationServerMetadata(new URL(prm.authorization_servers[0]),{fetchFn});
+  assert.equal(authMetadata.token_endpoint,as.token_endpoint);
+  const sdk=new Client({name:'mcp-acceptance',version:'1'},{capabilities:{}});
+  const transport=new StreamableHTTPClientTransport(new URL('https://site.example/mcp'),{fetch:fetchFn,requestInit:{headers:{Authorization:'Bearer '+grant.access_token}}});
+  await sdk.connect(transport); // official SDK initialize, not merely tools/list JSON-RPC
+  assert.equal((await sdk.listTools()).tools.length,6);
+  const design=await sdk.callTool({name:'get_design',arguments:{repo:'Cameronrlewis/repo'}});
+  assert.equal(JSON.parse(design.content[0].text).provenance.commit,SHA);
+  const before=harness.artifactReads();harness.revoke();
+  const denied=await sdk.callTool({name:'get_design',arguments:{repo:'Cameronrlewis/repo'}});
+  assert.equal(denied.isError,true);assert.equal(JSON.parse(denied.content[0].text).error.code,'UNAVAILABLE');
+  assert.equal(harness.artifactReads(),before,'authenticated revoked call cannot reach artifacts');
+  // Task 1 records the selected provider's exact authenticated revocation contract; this adapter exercises it without logging token or response bodies.
+  assert.equal((await harness.revokeGrant('invalid-test-bearer')).status,401,'unauthenticated invocation cannot revoke a grant');
+  const revoked=await harness.revokeGrant(grant.access_token);
+  assert.equal(revoked.status,200);
+  assert.equal((await bearer(grant.access_token)).status,401,'revoked OAuth bearer token cannot access /mcp');
+  await sdk.close();
+  for(const {value} of local.OAUTH_KV.data.values())assert.ok(!value.includes('refresh-token')&&!value.includes('user-token'),'no plaintext GitHub credentials');
+});
+
+test('MCP Connect panel is escaped, site-specific and absent offline', () => {
+  assert.equal(connectPanel(), '');
+  assert.equal(connectPanel(null), '');
+  assert.equal(connectPanel(undefined), '');
+  assert.equal(connectPanel(''), '');
+  assert.equal(connectPanel('https://user:pass@review.example'), '');
+  assert.equal(connectPanel('https://review.example/'), '');
+  assert.equal(connectPanel('http://insecure.example'), '');
+  assert.equal(connectPanel('http://example.com'), '');
+
+  // Accepted loopback http
+  const loopbackLocalhost = connectPanel('http://localhost:8787');
+  assert.match(loopbackLocalhost, /claude mcp add --scope user --transport http kicad-review http:\/\/localhost:8787\/mcp/);
+  const loopbackIp = connectPanel('http://127.0.0.1:8787');
+  assert.match(loopbackIp, /claude mcp add --scope user --transport http kicad-review http:\/\/127\.0\.0\.1:8787\/mcp/);
+  assert.match(connectPanel('http://localhost'), /claude mcp add --scope user --transport http kicad-review http:\/\/localhost\/mcp/);
+  assert.match(connectPanel('http://127.0.0.1'), /claude mcp add --scope user --transport http kicad-review http:\/\/127\.0\.0\.1\/mcp/);
+
+  // Accepted https
+  const html = connectPanel('https://review.example');
+  assert.match(html, /Connect your AI assistant/);
+  assert.match(html, /claude mcp add --scope user --transport http kicad-review https:\/\/review\.example\/mcp/);
+  assert.match(html, /read-only/i);
+  assert.match(html, /\/mcp/);
+
+  // Rejected invalid / injection
+  assert.equal(connectPanel('javascript:alert(1)'), '');
+  assert.equal(connectPanel('https://bad.example/" onclick="bad'), '');
+  assert.doesNotMatch(sharedPage({ name: 'x', raw: '/s/x/raw', expires: '2030-01-01' }), /Connect your AI assistant/);
+});
+
+test('MCP Connect panel route presence, OAUTH_KV dependency and malicious artifact name', async () => {
+  const sealed = await signedIn();
+  const restore = mockFetch(async (url) => {
+    if (url.includes('/actions/runs/')) return reviewRun({ id: 123, head_sha: 'cafebad'.padEnd(40, '0'), pull_requests: [] });
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/artifacts/44')) return new Response(JSON.stringify({
+      name: 'kicad-review-deadbee-cafebad-pass.html', expired: false,
+      workflow_run: { id: 123, repository_id: 5 },
+    }));
+    if (url.endsWith('/artifacts/45')) return new Response(JSON.stringify({
+      name: 'kicad-review-deadbee-cafebad-pass"><script>alert(1)</script>.html', expired: false,
+      workflow_run: { id: 123, repository_id: 5 },
+    }));
+    throw new Error(`unexpected ${url}`);
+  });
+  try {
+    // 1. Without OAUTH_KV: no Connect panel
+    const withoutKV = await worker.fetch(request('/r/Cameronrlewis/repo/a/44', { headers: { Cookie: `s=${sealed}` } }), env);
+    assert.equal(withoutKV.status, 200);
+    const bodyWithout = await withoutKV.text();
+    assert.doesNotMatch(bodyWithout, /Connect your AI assistant/);
+
+    // 2. With OAUTH_KV: Connect panel present with exact request origin
+    const withKV = await worker.fetch(request('/r/Cameronrlewis/repo/a/44', { headers: { Cookie: `s=${sealed}` } }), { ...env, OAUTH_KV: new MCPMemoryKV() });
+    assert.equal(withKV.status, 200);
+    const bodyWith = await withKV.text();
+    assert.match(bodyWith, /Connect your AI assistant/);
+    assert.match(bodyWith, /claude mcp add --scope user --transport http kicad-review https:\/\/site\.example\/mcp/);
+    // Panel lives in overflow popover
+    assert.match(bodyWith, /<details class="bench-menu bench-overflow">[\s\S]*?<details class="bench-menu"><summary>Connect your AI assistant<\/summary>/);
+
+    // 3. Malicious artifact name cannot change origin or inject unescaped HTML; it is not a report-family name, so it is refused
+    const malicious = await worker.fetch(request('/r/Cameronrlewis/repo/a/45', { headers: { Cookie: `s=${sealed}` } }), { ...env, OAUTH_KV: new MCPMemoryKV() });
+    assert.equal(malicious.status, 404);
+    const bodyMalicious = await malicious.text();
+    assert.doesNotMatch(bodyMalicious, /<script>alert\(1\)<\/script>/);
+  } finally {
+    restore();
+  }
+});
+
+test('MCP Connect panel details retains native keyboard semantics, in-flow expansion and reachability', () => {
+  const css = readFileSync('site/site.css', 'utf8');
+  // Nested popovers expand in-flow instead of absolutely overlaying outer menu items
+  const nestedRule = css.match(/\.bench-popover\s+\.bench-popover\s*\{([^}]+)\}/);
+  assert.ok(nestedRule, 'nested .bench-popover rule exists in site.css');
+  const decls = Object.fromEntries(
+    nestedRule[1]
+      .split(';')
+      .map(s => s.trim())
+      .filter(Boolean)
+      .map(decl => {
+        const colon = decl.indexOf(':');
+        return [decl.slice(0, colon).trim(), decl.slice(colon + 1).trim()];
+      })
+  );
+  assert.equal(decls['position'], 'static');
+  assert.equal(decls['box-shadow'], 'none');
+  assert.equal(decls['border'], '0');
+
+  const page = reviewPage({
+    user: 'reviewer',
+    owner: 'demo',
+    repo: 'Thermal_Camera',
+    id: 123,
+    name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html',
+    workflowRunId: 99,
+    pull: 7,
+    share: true,
+    pdf: true,
+    mcpOrigin: 'https://review.example',
+  });
+
+  // Connect panel details inside overflow popover
+  assert.match(page, /<details class="bench-menu bench-overflow"><summary aria-label="Review actions">•••<\/summary><div class="bench-popover">/);
+  assert.match(page, /<details class="bench-menu"><summary>Connect your AI assistant<\/summary><div class="bench-popover">/);
+
+  // Command wraps without overflow
+  assert.match(page, /<code style="white-space:pre-wrap;overflow-wrap:anywhere">claude mcp add --scope user --transport http kicad-review https:\/\/review\.example\/mcp<\/code>/);
+
+  // Native details structure: summary is first child inside details for native keyboard toggle
+  assert.match(page, /<details class="bench-menu"><summary>Connect your AI assistant<\/summary>/);
+
+  // Reachability and sequential DOM ordering within overflow menu:
+  // Preceding actions -> Connect details -> Trailing actions (Copy link, Go to)
+  const overflowStart = page.indexOf('<details class="bench-menu bench-overflow">');
+  assert.ok(overflowStart > 0, 'overflow menu exists');
+  const outerPopoverStart = page.indexOf('<div class="bench-popover">', overflowStart);
+  assert.ok(outerPopoverStart > overflowStart, 'outer popover div exists');
+  const outerPopoverContentStart = outerPopoverStart + '<div class="bench-popover">'.length;
+
+  const historyPos = page.indexOf('History', outerPopoverContentStart);
+  const sharePos = page.indexOf('Share…', outerPopoverContentStart);
+  const connectSummary = '<summary>Connect your AI assistant</summary>';
+  const connectSummaryPos = page.indexOf(connectSummary, outerPopoverContentStart);
+
+  assert.ok(historyPos > outerPopoverContentStart && sharePos > historyPos && connectSummaryPos > sharePos, 'Preceding review actions precede Connect panel');
+
+  // Connect details is closed before trailing actions (not wrapping them)
+  const connectDetailsOpen = page.lastIndexOf('<details class="bench-menu">', connectSummaryPos);
+  assert.ok(connectDetailsOpen > outerPopoverContentStart, 'Connect panel is a nested details inside overflow menu');
+  const connectDetailsClose = page.indexOf('</details>', connectSummaryPos);
+  assert.ok(connectDetailsClose > connectSummaryPos, 'Connect panel details closes');
+
+  // Prove preceding actions, nested Connect panel, and trailing actions are direct children of outer popover:
+  const precedingContent = page.slice(outerPopoverContentStart, connectDetailsOpen);
+  assert.equal(
+    precedingContent,
+    '<a href="/r/demo/Thermal_Camera/pull/7/history">History</a><button id="share-open" type="button">Share…</button><a href="https://github.com/demo/Thermal_Camera/actions/runs/99">Open run ↗</a><a href="/r/demo/Thermal_Camera/a/123/pdf">Download PDF</a>',
+    'Preceding actions are direct children of the outer popover'
+  );
+
+  const outerClose = page.indexOf('</div></details>', connectDetailsClose);
+  assert.ok(outerClose > connectDetailsClose, 'outer popover closes after connect panel');
+
+  const trailingContent = page.slice(connectDetailsClose + '</details>'.length, outerClose);
+  assert.equal(
+    trailingContent,
+    '<button type="button" data-review-copy>Copy link</button><label>Go to<input data-review-goto aria-label="Go to saved review position" placeholder="Paste a review link"></label><input data-review-copyfield aria-label="Link to copy" readonly hidden>',
+    'Copy link and Go-to are direct children of outer popover and direct siblings following Connect details'
+  );
+});
+
+test('MCP Connect panel 1440x900 browser layout and visual proof in light and dark', { skip: spawnSync(chrome, ['--version']).status !== 0 && 'no Chrome' }, () => {
+  const proofDir = process.env.PROOF_DIR || tmpdir();
+  mkdirSync(proofDir, { recursive: true });
+
+  for (const theme of ['light', 'dark']) {
+    let page = reviewPage({
+      user: 'reviewer',
+      owner: 'demo',
+      repo: 'Thermal_Camera',
+      id: 123,
+      name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html',
+      workflowRunId: 99,
+      pull: 7,
+      share: true,
+      pdf: true,
+      mcpOrigin: 'https://review.example',
+    });
+
+    const setup = `<script>try{localStorage.setItem('kr.theme',${JSON.stringify(theme)})}catch(e){}document.documentElement.dataset.theme=${JSON.stringify(theme)};</script>`;
+    page = page.replace('<head>', '<head>' + setup);
+    page = page.replace('<details class="bench-menu bench-overflow">', '<details class="bench-menu bench-overflow" open>');
+    page = page.replace('<details class="bench-menu"><summary>Connect your AI assistant</summary>', '<details class="bench-menu" open><summary>Connect your AI assistant</summary>');
+
+    const diagnostic = `<script>
+const outer = document.querySelector('.bench-overflow');
+const outerPopover = outer.querySelector(':scope > .bench-popover') || outer.querySelector('.bench-popover');
+const innerDetails = outer.querySelector('details.bench-menu');
+const innerPopover = innerDetails.querySelector('.bench-popover');
+const copyBtn = outer.querySelector('button[data-review-copy]');
+const gotoInput = outer.querySelector('input[data-review-goto]');
+const gotoLabel = gotoInput.closest('label');
+const code = innerDetails.querySelector('code');
+
+const innerStyle = getComputedStyle(innerPopover);
+const copyRect = copyBtn.getBoundingClientRect();
+const gotoRect = gotoInput.getBoundingClientRect();
+const innerRect = innerPopover.getBoundingClientRect();
+const docScrollWidth = document.documentElement.scrollWidth;
+
+const historyLink = outer.querySelector('a[href*="/history"]') || outer.querySelector('button');
+const shareBtn = outer.querySelector('#share-open') || outer.querySelector('button');
+const historyRect = historyLink ? historyLink.getBoundingClientRect() : { width: 0, height: 0 };
+const shareRect = shareBtn ? shareBtn.getBoundingClientRect() : { width: 0, height: 0 };
+
+const directSiblings =
+  innerDetails.parentElement === outerPopover &&
+  copyBtn.parentElement === outerPopover &&
+  gotoLabel.parentElement === outerPopover &&
+  innerDetails.nextElementSibling === copyBtn &&
+  copyBtn.nextElementSibling === gotoLabel;
+
+const result = {
+  theme: "${theme}",
+  position: innerStyle.position,
+  boxShadow: innerStyle.boxShadow,
+  innerBottom: innerRect.bottom,
+  copyTop: copyRect.top,
+  inFlowExpansion: copyRect.top >= innerRect.bottom,
+  noHorizontalOverflow: docScrollWidth <= 1440,
+  docScrollWidth,
+  codeReadable: code.offsetWidth > 0 && code.offsetHeight > 0,
+  actionsReachable: historyRect.width > 0 && shareRect.width > 0 && copyRect.width > 0 && gotoRect.width > 0,
+  directSiblings,
+};
+const div = document.createElement('div');
+div.id = 'proof-results';
+div.textContent = JSON.stringify(result);
+document.body.appendChild(div);
+</script>`;
+    page = page.replace('</body>', diagnostic + '</body>');
+
+    const dir = mkdtempSync(join(tmpdir(), `connect-1440-${theme}-`));
+    const pagePath = join(dir, 'page.html');
+    const shotPath = join(proofDir, `connect-1440x900-${theme}.png`);
+    writeFileSync(pagePath, page);
+
+    try {
+      const r = spawnSync(chrome, [
+        '--headless=new',
+        '--no-first-run',
+        '--no-default-browser-check',
+        `--user-data-dir=${join(dir, 'profile')}`,
+        '--virtual-time-budget=2000',
+        '--window-size=1440,900',
+        `--screenshot=${shotPath}`,
+        '--dump-dom',
+        pathToFileURL(pagePath).href,
+      ], { timeout: 15000, encoding: 'utf8' });
+
+      assert.equal(r.status, 0, `Chrome exited cleanly for ${theme}`);
+      assert.ok(statSync(shotPath).size > 0, `Screenshot created for ${theme}`);
+
+      const match = r.stdout.match(/<div id="proof-results">([^<]+)<\/div>/);
+      assert.ok(match, `Proof metrics recorded for ${theme}`);
+      const metrics = JSON.parse(match[1]);
+
+      assert.equal(metrics.position, 'static', `${theme}: inner popover is position: static`);
+      assert.equal(metrics.boxShadow, 'none', `${theme}: inner popover has no box-shadow`);
+      assert.equal(metrics.inFlowExpansion, true, `${theme}: Copy link is below expanded connect panel (in-flow expansion)`);
+      assert.equal(metrics.noHorizontalOverflow, true, `${theme}: no horizontal overflow at 1440x900 (scrollWidth ${metrics.docScrollWidth})`);
+      assert.equal(metrics.codeReadable, true, `${theme}: command code is readable and selectable`);
+      assert.equal(metrics.actionsReachable, true, `${theme}: existing review actions remain reachable`);
+      assert.equal(metrics.directSiblings, true, `${theme}: inner details, Copy button, and Go to label are direct children of outer popover`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  const light = readFileSync(join(proofDir, 'connect-1440x900-light.png'));
+  const dark = readFileSync(join(proofDir, 'connect-1440x900-dark.png'));
+  assert.notDeepEqual(light, dark, 'light and dark 1440x900 captures are distinct');
+});
+
 import { deflateRawSync } from 'node:zlib';
 import { zipEntries, zipEntryStream, exactRange } from './zip.js';
 
@@ -7327,4 +8822,3 @@ test('finding 9: malformed compare body and OAuth callback /user errors keep coo
     assert.match(await res.text(), /Sign-in didn&#39;t complete/);
   } finally { restore(); }
 });
-

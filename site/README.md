@@ -26,7 +26,7 @@ cd site
 npx wrangler dev
 ```
 
-`wrangler` is fetched by `npx`; nothing is added to the repository. Put local secrets in `site/.dev.vars`, which is git-ignored:
+`wrangler` is fetched by `npx`. The MCP server's two locked dependencies install with `npm ci --prefix site` from the repository root; run it before the site tests. Put local secrets in `site/.dev.vars`, which is git-ignored:
 
 ```text
 GITHUB_CLIENT_ID=…
@@ -91,6 +91,42 @@ binding = "ASK_KV"
 id = "<the printed id>"
 ```
 Optional variables under `[vars]`: `ASK_DAILY_LIMIT` (questions per user per day, default 50), `ASK_MODEL` (default `claude-sonnet-5-5`) and `ASK_SUMMARY_MODEL` (defaults to `ASK_MODEL`, or `claude-sonnet-5-5`; set `ASK_SUMMARY_MODEL` to a smaller model to cut cost). KV holds only the per-user daily counter and the cached summaries; it is a cache, not a store. The daily counter is a best-effort UX cap, not a billing bound: concurrent requests and eventually consistent reads can overshoot without a fixed bound or lose increments. KV permits only one write per second to the same key; if a daily-counter write fails after the provider starts an answer, Ask continues that answer without retrying the model and emits a status explaining that the remaining count is an estimate. The increment may be lost. Configure provider billing limits before deployment; a hard quota needs owner-approved serialized storage. Locally, put `ANTHROPIC_API_KEY` in `site/.dev.vars` and add the same `[[kv_namespaces]]` stanza.
+
+## Remote MCP (optional)
+
+What Remote MCP does, its limits and how to connect are in the [main README](../README.md#remote-mcp-optional); this section covers the Worker binding only.
+
+Remote MCP needs the `OAUTH_KV` binding. Create the namespace:
+
+```sh
+cd site
+npx --yes wrangler@4.148.0 kv namespace create OAUTH_KV
+```
+
+Add the printed id to `wrangler.toml` (the commented block there). Never bind a placeholder and never leave `id` out, or Wrangler can try to provision a namespace itself on deploy:
+
+```toml
+[[kv_namespaces]]
+binding = "OAUTH_KV"
+id = "<the printed id>"
+```
+
+Without the binding, `/mcp` returns a configuration error and no Connect panel is shown; the rest of the site is unchanged.
+
+## MCP dependencies (verified 2026-11-02)
+
+`site/package.json` pins `@cloudflare/workers-oauth-provider` 1.2.4 and `@modelcontextprotocol/sdk` 1.32.2 exactly; `site/package-lock.json` locks the rest. The SDK's `WebStandardStreamableHTTPServerTransport` runs stateless (`sessionIdGenerator: undefined`, `enableJsonResponse: true`) in workerd and Node and negotiates protocol `2025-03-26`. Discovery in this SDK is `discoverOAuthProtectedResourceMetadata(url, opts, fetchFn)` (fetch is the third argument, so callers pass all three) and `discoverAuthorizationServerMetadata(url, {fetchFn})`.
+
+OAuth provider facts the MCP code relies on, checked against the installed types and source:
+
+- `env.OAUTH_PROVIDER` is set for both `apiHandler` and `defaultHandler`; `apiHandler.fetch(request, env, ctx)` gets the decrypted grant props as `ctx.props`.
+- PKCE is S256 only (plain is refused), redirect URIs match exactly, an access token is bound to `resourceMetadata.resource`, and a replayed code fails with `invalid_grant` and revokes that grant's tokens.
+- Tokens are `<userId>:<grantId>:<secret>`; KV keeps only hashes and encrypted props.
+- Refresh tokens are on by default. `refreshTokenTTL: 0` turns them off.
+- Helpers: `listUserGrants(userId: string, options?) -> Promise<{items: GrantSummary[], cursor?: string}>` (each item has `id`), and `revokeGrant(grantId: string, userId: string) -> Promise<void>`, which deletes the grant and every token under it. The next bearer call returns 401 `invalid_token`.
+- Public revocation (RFC 7009) uses the token endpoint, which metadata advertises as `revocation_endpoint`. Send `POST` with `Content-Type: application/x-www-form-urlencoded` and the body `token=<access or refresh token>&token_type_hint=access_token&client_id=<client id>`; a confidential client authenticates the way it does at the token endpoint. The response is always 200. Revoking an access token deletes only that token; revoking a refresh token revokes the whole grant. After revocation the revoked bearer gets 401 with `WWW-Authenticate: Bearer ... error="invalid_token"`.
+
+The provider imports `cloudflare:workers`, so `site/css-loader.mjs` defines a Node `resolve` hook stubbing `cloudflare:workers` (providing `WorkerEntrypoint`) so Node test suites can load the real OAuth provider.
 
 ## Settings
 

@@ -1,5 +1,6 @@
 // Ask about this design: the Worker side. Pure helpers first, then the route.
 import { json, accessFailure, sessionResponse, ghPages } from './threads.js';
+import { readBounded, McpError } from './mcp-data.js';
 import { downloadUrl } from './share.js';
 
 export const LIMITS = { question: 4000, message: 16000, messages: 24, history: 20 };   // BoardRepo's limits
@@ -173,39 +174,22 @@ const anthropicUrl = 'https://api.anthropic.com/v1/messages';
 // ponytail: coalesce same-isolate cold misses; cross-isolate exact-once generation is deferred and is not promised.
 const insightFlights = new Map();
 
-// Refuses before buffering when Content-Length is over the limit; otherwise stops reading at the first byte past it.
-// Returns the text, '' for an empty body, or null when over the limit.
-async function readBounded(response, max) {
-  const declared = Number(response.headers.get('Content-Length'));
-  if (Number.isFinite(declared) && declared > max) { await response.body?.cancel().catch(() => {}); return null; }
-  if (!response.body) return '';
-  const reader = response.body.getReader(), chunks = [];
-  let size = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.byteLength;
-    if (size > max) { await reader.cancel().catch(() => {}); return null; }
-    chunks.push(value);
-  }
-  const all = new Uint8Array(size);
-  let at = 0;
-  for (const chunk of chunks) { all.set(chunk, at); at += chunk.byteLength; }
-  return new TextDecoder().decode(all);
-}
-
-// `verify` is the site's report check (reportArtifact): the artifact must be a report-family name from
+// `verify(gh)` is the site's report check (reportArtifact): the artifact must be a report-family name from
 // this repository's kicad-review.yml run. Without it the loader fails closed. The run's artifacts are read
 // with the shared paged reader; zero or several context matches are refused; sizes are bounded before download.
 export async function loadContext(owner, repo, id, token, gh, verify) {
   const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions`;
   try {
-    const verified = typeof verify === 'function' ? await verify() : null;
-    if (!verified) return { status: 404, error: 'This review was not found.' };
+    const verified = typeof verify === 'function' ? await verify(gh) : null;
+    // Metadata failures keep their kind: a rate limit or outage must not read as a missing review.
+    const meta = verified?.failed;
+    if (meta && (meta.status === 429 || meta.headers.get('x-ratelimit-remaining') === '0')) return { status: 429, error: 'GitHub rate limit while reading artifact metadata' };
+    if (meta && meta.status >= 500) return { status: 502, error: 'GitHub artifact metadata service unavailable' };
+    if (!verified || meta) return { status: 404, error: 'Artifact unavailable' };
     const report = verified.metadata;
     const snapshot = snapshotName.test(report.name || '');
     if (!snapshot && !reportName.test(report.name || '')) return { status: 404, error: 'This artifact is not a reviewed design.' };
-    if (verified.expired || report.expired || !/^\d{1,20}$/.test(String(report.workflow_run?.id))) return { status: 404, error: 'This review has expired.' };
+    if (verified.expired || report.expired || !/^\d{1,20}$/.test(String(report.workflow_run?.id))) return { status: 404, error: 'Artifact unavailable' };
     const runId = String(report.workflow_run.id);
     const paged = await ghPages(gh, `${root}/runs/${runId}/artifacts`, token, (d) => d?.artifacts);
     if (!paged.ok) return { status: 502, error: 'GitHub did not answer. Try again.' };
@@ -220,8 +204,13 @@ export async function loadContext(owner, repo, id, token, gh, verify) {
     const location = downloadUrl(download.headers.get('Location'));
     if (!location) return { status: 502, error: 'GitHub did not answer. Try again.' };
     const blob = await fetch(location, { redirect: 'manual' });
-    const body = blob.ok ? await readBounded(blob, MAX_CONTEXT) : null;
+    // UTF-8 bytes, counted while streaming. A ZIP or non-UTF-8 body is refused, never parsed (artifacts upload with archive: false).
+    const unsupported = { status: 502, error: 'The design data is an unsupported artifact format; raw JSON is expected.' };
+    let body = '';
+    try { body = blob.ok ? await readBounded(blob, MAX_CONTEXT) : ''; }
+    catch (e) { if (!(e instanceof McpError)) return unsupported; }   // McpError: over the byte limit
     if (!body) return { status: 502, error: 'The design data is missing or too large.' };
+    if (body.startsWith('PK')) return unsupported;
     let doc;
     try { doc = JSON.parse(body); } catch { return {status:502,error:'The design data is not in a known format.'}; }
     if (doc?.version !== 1 || !Array.isArray(doc.projects)) return { status: 502, error: 'The design data is not in a known format.' };
@@ -229,7 +218,10 @@ export async function loadContext(owner, repo, id, token, gh, verify) {
     // Both kinds share one schema; a snapshot must say so (mode single, base null) and a report must not.
     if (doc.kind !== 'kicad-review-design-context' || (doc.mode === 'single') !== snapshot || (snapshot && doc.base !== null)) return { status: 502, error: 'The design data does not match this artifact.' };
     return { doc, key: String(artifact.digest || `${artifact.id}`) };
-  } catch { return { status: 502, error: 'GitHub did not answer. Try again.' }; }
+  } catch (error) {
+    if (error instanceof McpError && error.code === 'REQUEST_BUDGET') throw error;   // an MCP call's budget ends the search
+    return { status: 502, error: 'GitHub did not answer. Try again.' };
+  }
 }
 
 const asJson = (text) => { const a = text.indexOf('{'), b = text.lastIndexOf('}'); return a >= 0 && b > a ? JSON.parse(text.slice(a, b + 1)) : null; };
@@ -257,7 +249,7 @@ export async function askRoute(request, env, { owner, repo, id, rest }, { access
     { headers: { Accept: 'application/vnd.github.raw+json' } });
   if (toml.status !== 404 && !toml.ok) return done(json({ error: 'GitHub did not answer. Try again.' }, 502));
   if (!toml.ok || !askOptedIn(await toml.text())) return done(json({ error: 'Ask is not turned on for this repository. Add [ask] enabled = true to kicad-review.toml on the default branch.' }, 403));
-  const loaded = await loadContext(owner, repo, id, token, gh, verifyReport && (() => verifyReport(owner, repo, id, token, allowed.repo)));
+  const loaded = await loadContext(owner, repo, id, token, gh, verifyReport && ((ghFn) => verifyReport(owner, repo, id, token, allowed.repo, ghFn)));
   if (!loaded.doc) return done(json({ error: loaded.error }, loaded.status));
   const projects = loaded.doc.projects, project = typeof body?.project === 'string' ? projects.find((p) => p.dir === body.project) : projects[0];
   if (!project) return done(json({ error: 'That project is not in this review.' }, 400));

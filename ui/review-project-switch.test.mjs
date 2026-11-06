@@ -26,7 +26,7 @@ function harness() {
     window: {ThreeStudio: {normalizeLighting: x => x, PRESETS: {bench: {}}}},
     proj: () => D.projects[S.p], canon: n => n.replace('_', '.'),
     valid: st => ({p: st.p, v: st.v, layers: st.layers, revision: 'head'}),
-    firstChangedView: () => 'board', clearImageSelection() {},
+    firstChangedView: () => 'board', clearImageSelection() {}, clearIdentityLink() {},
     renderModes() {}, renderPanel() {}, renderInspector() {}, renderZoombar() {},
     renderNav: () => log.push(['renderNav', current]),
     select: () => log.push(['select', current]),
@@ -85,6 +85,7 @@ test('U2: entering 3D clears the board scenes and WebGL flag and refreshes the d
     imageSearchState: {context: '0:3d'}, document: {createElement: el}, boardMountState: null, statusText() {},
     renderImageSearch() {}, disposeBoardRenderers: () => calls.push('dispose'), appearanceSchematics: {clear() {}},
     releaseImageStage() {}, refreshAppearance: () => calls.push(['refresh', boardView.scenes, boardView.useGL]),
+    requestReviewDraw: () => ({}), completeReviewDraw() {},
     window: {REVIEW_DATA: {mode: 'comparison'}, Review3D: {show: async () => calls.push('show')}},
   });
   vm.runInContext(viewerIdFn + slice('let gen = 0;', '\nfunction noChangeNotice('), c);

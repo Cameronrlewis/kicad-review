@@ -2007,10 +2007,12 @@ with tempfile.TemporaryDirectory() as output:
 assert "google-chrome" in test_wf and "CHROME" in test_wf, "TS-S1 CI browser setup"
 build_fixtures_src = pathlib.Path("ui/build-fixtures.py").read_text(encoding="utf-8")
 assert "inline_page" in build_fixtures_src, "TS-S1 fixture generation uses inline_page"
-for command in ('node ui/check.mjs --no-skip "Download dialog"', 'node ui/check.mjs --no-skip "Multi-board BOM" --page "$PAGES/multiboard.html"', 'node ui/check.mjs --no-skip "Fab limits"', 'node ui/check.mjs --no-skip "Fab limits" --dark', 'node ui/check.mjs --no-skip "Fabrication producer contract" --page "$PAGES/fab.html"', 'node ui/check.mjs --no-skip "Fabrication producer contract" --dark --page "$PAGES/fab.html"', 'node ui/check.mjs --no-skip "Waivers"', 'node ui/check.mjs', 'node ui/check.mjs --dark', 'node ui/check.mjs --no-skip "selection-only address"', 'node ui/check.mjs --no-skip "pasted selection address preserves an explicit position"', 'node ui/check.mjs --no-skip "passing checks with baseline findings"', 'node ui/check.mjs --no-skip 3D --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip "unchanged sheet" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "unchanged project" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "Parts fixture" --page "$PAGES/parts.html"', 'node ui/check.mjs --no-skip "Parts fixture" --dark --page "$PAGES/parts.html"', 'node ui/check.mjs --no-skip "Ask"', 'node ui/check.mjs --no-skip "Ask" --dark', 'python3 ui/ask-fixture.py "$PAGES/ask-four.html"', 'node ui/check.mjs --no-skip "BR09 fixture" --page "$PAGES/ask-four.html"', 'node ui/check.mjs --no-skip "BR09 fixture" --dark --page "$PAGES/ask-four.html"'):
+for command in ('node ui/check.mjs --no-skip "Download dialog"', 'node ui/check.mjs --no-skip "Multi-board BOM" --page "$PAGES/multiboard.html"', 'node ui/check.mjs --no-skip "Fab limits"', 'node ui/check.mjs --no-skip "Fab limits" --dark', 'node ui/check.mjs --no-skip "Fabrication producer contract" --page "$PAGES/fab.html"', 'node ui/check.mjs --no-skip "Fabrication producer contract" --dark --page "$PAGES/fab.html"', 'node ui/check.mjs --no-skip "Waivers"', 'node ui/check.mjs', 'node ui/check.mjs --dark', 'node ui/check.mjs --no-skip "selection-only address"', 'node ui/check.mjs --no-skip "pasted selection address preserves an explicit position"', 'node ui/check.mjs --no-skip "passing checks with baseline findings"', 'node ui/check.mjs --no-skip 3D --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip "unchanged sheet" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "unchanged project" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "Parts fixture" --page "$PAGES/parts.html"', 'node ui/check.mjs --no-skip "Parts fixture" --dark --page "$PAGES/parts.html"', 'node ui/check.mjs --no-skip "Ask"', 'node ui/check.mjs --no-skip "Ask" --dark', 'python3 ui/ask-fixture.py "$PAGES/ask-four.html"', 'node ui/check.mjs --no-skip "BR09 fixture" --page "$PAGES/ask-four.html"', 'node ui/check.mjs --no-skip "BR09 fixture" --dark --page "$PAGES/ask-four.html"', 'node ui/check.mjs --no-skip "MCP unchanged identity links"'):
     assert "      - run: " + command in test_wf.splitlines(), "TS-S1 CI missing " + command
 assert test_wf.count("    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n") == test_wf.count("timeout-minutes:") == test_wf.count("runs-on:") == 2, "TS-S1 each CI job (test, dark) has one timeout"
 assert "apt-get" not in test_wf and test_wf.count("npm install") == 1, "TS-S1 only pinned 3D integration dependencies"
+assert test_wf.count("      - run: npm ci --prefix site") == 1, "TS-S1 exactly one locked site install"
+assert test_wf.index("actions/setup-node@") < test_wf.index("- run: npm ci --prefix site") < test_wf.index("- run: node --import ./site/css-loader.mjs --test site/test.mjs"), "TS-S1 locked site install follows setup-node"
 for suffix in ('', ' --dark'):
     assert '      - run: node ui/check.mjs --no-skip "BR02 single renderer head only"' + suffix + ' --page "$PAGES/single.html"' in test_wf
 assert "data['mode'] = 'single'" in build_fixtures_src and 'review-data-3d-processed.js' in build_fixtures_src
@@ -2050,6 +2052,21 @@ assert 'test_kicad_review.py' not in fixture_block, "CI finding 4: fixture gener
 assert '          python3 ui/build-fixtures.py "$PAGES"' in fixture_block.splitlines(), "TS-S1 fixture generation uses build-fixtures.py"
 assert fixture_block.index('export PAGES=') < fixture_block.index('python3 ui/build-fixtures.py "$PAGES"'), "TS-S1 build-fixtures needs PAGES"
 print("ok TS-S1 CI browser matrix")
+
+# MCP deployment must install the same locked site dependencies as tests.
+wf = pathlib.Path('.github/workflows/test.yml').read_text()
+deploy = pathlib.Path('.github/workflows/site-deploy.yml').read_text()
+site_docs = pathlib.Path('site/README.md').read_text()
+root_docs = pathlib.Path('README.md').read_text()
+assert "uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0" in deploy and "node-version: 22" in deploy and deploy.index("actions/setup-node@") < deploy.index("- run: npm ci --prefix site") < deploy.index("- run: node --import ./site/css-loader.mjs --test site/test.mjs"), "deploy pinned setup-node Node 22 before locked install and site test"
+assert 'npm ci --prefix site' in wf and wf.index('npm ci --prefix site') < wf.index('node --import ./site/css-loader.mjs --test site/test.mjs'), "MCP test.yml locked site install before site test"
+assert 'npm ci --prefix site' in deploy and deploy.index('npm ci --prefix site') < deploy.index('node --import ./site/css-loader.mjs --test site/test.mjs'), "MCP site-deploy.yml locked site install before site test"
+assert 'node ui/check.mjs --no-skip "MCP unchanged identity links"' in wf, "MCP browser check in test.yml"
+assert 'OAUTH_KV' in site_docs and 'OAUTH_KV' in root_docs and 'read:design' in root_docs, "MCP OAUTH_KV binding in site/README.md, read:design in README.md"
+assert re.search(r'No\s+model-provider\s+request', root_docs) and re.search(r'one\s+hour', root_docs), "MCP no model request and one hour TTL documented in README.md"
+assert re.search(r'Connect\s+panel', root_docs) and all(re.search(r'no\s+Connect\s+panel\s+is\s+shown', d) for d in (root_docs, site_docs)), "MCP Connect panel wording and absence documented"
+assert re.search(r'32\s+properties', root_docs) and re.search(r'200\s+code\s+points', root_docs) and 'searchFieldsComplete:false' in root_docs, "MCP property limits and searchFieldsComplete documented in README.md"
+print('ok MCP locked installation and settings docs')
 print("ok")
 
 # Parts lines: group by value+footprint+LCSC, normalise LCSC, flag missing numbers and conflicts.
@@ -9187,10 +9204,19 @@ assert kr.fit_context(lambda nc, pc: {"version": 1, "projects": [{"checks": kr.c
 wide = {"/uuid-w": {"kind": "symbol", "ref": "R9", "where": {"sheet": "/"}, "props": {"reference": "R9", "Value": "1k", "Note": "n" * 300, **{f"K{i}": "1" for i in range(30)}}}}
 assert len(wide["/uuid-w"]["props"]) == 33
 wide_parts = list(kr.context_parts(wide).values())
-wdoc = kr.fit_context(lambda nc, pc: {"version": 1, "projects": [{"revisions": {"head": {"parts": wide_parts, "nets": []}}}]})
+wdoc = kr.fit_context(lambda nc, pc: {"version": 1, "kind": "kicad-review-design-context", "repo": "Cameronrlewis/repo", "base": "0" * 40, "head": "a" * 40, "reason": "push",
+                                      "projects": [{"dir": "", "name": "test", "revisions": {"head": {"parts": wide_parts, "nets": []}}}]})
 wp = wdoc["projects"][0]["revisions"]["head"]["parts"][0]
 assert wdoc["truncated"] is True and wp["properties_truncated"] is True and wp["properties_omitted"] == 1
 assert "properties" in wp["incomplete_fields"] and "properties.Note" in wp["incomplete_fields"] and len(wp["properties"]["Note"]) == 200
+fixture_path = pathlib.Path(__file__).parent / "site" / "fixtures" / "producer-truncated-context.json"
+if os.environ.get("REGENERATE_FIXTURES") == "1":
+    fixture_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(fixture_path, "w", encoding="utf-8") as fh:
+        json.dump(wdoc, fh, separators=(",", ":"), ensure_ascii=False)
+with open(fixture_path, "r", encoding="utf-8") as fh:
+    committed_doc = json.load(fh)
+assert committed_doc == wdoc, f"{fixture_path} drift; run REGENERATE_FIXTURES=1 python3 test_kicad_review.py"
 clean_part = list(kr.context_parts({"/uuid-3": objs["/uuid-3"]}).values())
 assert kr.fit_context(lambda nc, pc: {"version": 1, "projects": [{"revisions": {"head": {"parts": clean_part, "nets": []}}}]})["truncated"] is False
 # 09 owns net_changes: 03's wiring status decides availability; a missing summary is unavailable, zero complete rows are available.
@@ -9500,6 +9526,80 @@ assert "ASK_SUMMARY_MODEL` (defaults to `ASK_MODEL`, or `claude-sonnet-5-5`" in 
 )
 assert "export function askOptedIn" in site_ask, "TOML-subset reader in site/ask.js"
 print("ok ask documentation")
+
+# MCP (spec 10): exact four-layer board facts in physical copper order.
+four = "ui/fixtures/vf-order-4.kicad_pcb"
+facts = kr.board_facts("/nonexistent-mcp-facts", four)
+assert set(facts["layers"]) == {"F.Cu", "In1.Cu", "In2.Cu", "B.Cu"}
+assert facts["copper_layers"] == ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"], facts["copper_layers"]
+assert facts.get("size_mm") is None
+print("ok mcp board facts")
+
+# MCP identities are additive; unchanged parts remain targetable.
+objects = {'/root/uuid-r': {'kind': 'symbol', 'ref': 'R1', 'where': {'sheet': '/'},
+            'props': {'reference': 'R1', 'Value': '10k', 'Footprint': 'R_0402', 'Voltage': '50V'}}}
+parts = kr.context_parts(objects)
+assert parts['R1']['uuid'] == 'uuid-r'
+assert parts['R1']['properties']['Voltage'] == '50V'
+# Each revision's map comes from its own raw objects (09's input shape: key is sheet path + UUID, where.sheet is the sheet).
+base_objects = objects
+head_objects = {**objects, '/root/uuid-new': {'kind': 'symbol', 'ref': 'R2', 'where': {'sheet': '/'}, 'props': {'reference': 'R2', 'Value': '4.7k'}}}
+# The unchanged R1 is in both maps, so a base-side net on an unchanged part resolves; R2 is head-only.
+assert kr.identity_index({'12': 'R1'}, kr.identity_objects(head_objects)) == {
+    'nets': {'12': {'uuid': 'uuid-r', 'sheet': '/'}}, 'complete': True}
+assert kr.identity_index({'12': 'R1'}, kr.identity_objects(base_objects)) == {
+    'nets': {'12': {'uuid': 'uuid-r', 'sheet': '/'}}, 'complete': True}, 'an unchanged part must reach the base map'
+assert kr.identity_index({'N': {'fallback_ref': 'R99'}}, []) == {'nets': {}, 'complete': False}
+# Removed nets stay navigable on base: a base UUID is only ever placed in the base map, never the head map.
+base_only = {'/root/uuid-base-r9': {'kind': 'symbol', 'ref': 'R9', 'where': {'sheet': '/'}, 'props': {'reference': 'R9'}}}
+assert kr.identity_index({'REMOVED': {'fallback_ref': 'R9'}}, kr.identity_objects(base_only))['complete'] is True
+assert kr.identity_index({'REMOVED': {'fallback_ref': 'R9'}}, kr.identity_objects(head_objects)) == {'nets': {}, 'complete': False}
+assert kr.identity_index({'12': {'fallback_ref': 'R1'}}, kr.identity_objects(head_objects))['complete'] is True
+
+# Empty or missing UUID is omitted, never substituted.
+empty_uuid_objs = {'/root/': {'kind': 'symbol', 'ref': 'R3', 'where': {'sheet': '/'}},
+                   '': {'kind': 'symbol', 'ref': 'R4', 'where': {'sheet': '/'}}}
+assert kr.identity_objects(empty_uuid_objs) == []
+assert kr.identity_index({'NET': 'R3'}, kr.identity_objects(empty_uuid_objs)) == {'nets': {}, 'complete': False}
+
+# Multi-unit symbols have several candidates; dropping ambiguous candidates leaves complete=False.
+multi_unit_objs = {
+    '/root/u1-a': {'kind': 'symbol', 'ref': 'U1 unit 1', 'where': {'sheet': '/'}},
+    '/root/u1-b': {'kind': 'symbol', 'ref': 'U1 unit 2', 'where': {'sheet': '/'}},
+}
+assert kr.identity_index({'NET_MULTI': 'U1'}, kr.identity_objects(multi_unit_objs)) == {'nets': {}, 'complete': False}
+
+# build_project includes identity when Ask context is present, and omits it when opted out.
+p_out = kr.build_project({'dir': 'test', 'name': 'test', 'status': 'modified'}, {}, kr.DEFAULT_SETTINGS)
+assert 'identity' not in p_out, 'opted-out report must not include identity'
+with tempfile.TemporaryDirectory() as td:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(td)
+        os.makedirs('review', exist_ok=True)
+        with open('review/detect.json', 'w') as fh:
+            json.dump({'base': '0' * 40, 'head': '1' * 40, 'reason': 'test', 'projects': []}, fh)
+        os.makedirs('review/test/head/sch', exist_ok=True)
+        with open('review/test/head/sch/test.svg', 'w') as fh:
+            fh.write('<svg viewBox="0 0 100 100"><g/></svg>')
+        with open('review/test/head/erc.json', 'w') as fh:
+            fh.write('{"sheets": []}')
+        os.makedirs('head/test', exist_ok=True)
+        with open('head/test/test.kicad_sch', 'w') as fh:
+            fh.write('(kicad_sch (uuid root) (sheet_instances (path "/" (page "1"))))')
+        ctx = {}
+        with patch('kicad_review.project_pair', return_value=({'base': {}, 'head': head_objects}, [])), \
+             patch('kicad_review.project_checks', return_value=[]), \
+             patch('kicad_review.ask_index', return_value={'nets': {'12': {'fallback_ref': 'R1'}}}):
+            res = kr.build_project({'dir': 'test', 'name': 'test', 'status': 'modified'}, {}, kr.DEFAULT_SETTINGS, context=ctx)
+            assert 'identity' in res
+            assert res['identity']['head']['nets']['12']['uuid'] == 'uuid-r'
+            assert res['identity']['head']['complete'] is True
+            assert 'base' not in res['identity']
+    finally:
+        os.chdir(old_cwd)
+
+print('ok MCP stable identities and net focus index')
 
 def test_br03_summary():
     from kicad_review import electrical_summary, classify_change

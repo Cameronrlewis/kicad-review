@@ -182,7 +182,7 @@ export function commitsPage({ user, owner, repo, branch, branches, tag = '', tag
   return frame({ title: 'Compare commits', user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: 'Compare commits' }], body: `<main class="page bench-opening"><div class="page-head"><div><h1>Compare commits</h1><p class="lead">Pick the earlier revision as Base and the later one as Head. The review shows what changed from Base to Head.</p></div></div>${alert}${swapForm}<form method="post" action="${path}/compare" class="compare-form"><div class="source-picker"><label>Branch <select name="branch" form="source-picker">${branchOptions}</select></label><span class="muted">or a tag</span><label class="sr-only" for="tag">Tag</label><select id="tag" name="tag" form="source-picker"><option value="">Select a tag</option>${tagOptions}</select><button class="btn" form="source-picker">Show</button></div><div class="table-scroll"><table class="table" aria-label="Commit revisions"><thead><tr><th>Base <span class="compare-letter" aria-hidden="true">A</span></th><th>Head <span class="compare-letter" aria-hidden="true">B</span></th><th>SHA</th><th>Message</th><th>Author</th><th>Date</th><th></th></tr></thead><tbody>${rows}</tbody></table></div><div class="compare-bar">${selection('Base', baseCommit)}<span class="compare-arrow" aria-hidden="true">→</span>${selection('Head', headCommit)}<div class="compare-action"><button class="btn btn-primary" type="submit">Start review</button><div class="muted" role="status"></div></div></div></form><form id="source-picker" method="get"></form>${script}</main>` });
 }
 
-export function reviewPage({ user, owner, repo, id, name, workflowRunId, pdf = false, pull = null, runStatus = null, runConclusion = null, share = false, ask = false }) {
+export function reviewPage({ user, owner, repo, id, name, workflowRunId, pdf = false, pull = null, runStatus = null, runConclusion = null, share = false, ask = false, mcpOrigin = null }) {
   const path = repoPath(owner, repo);
   const match = /^kicad-review-([0-9a-f]{7}|none)-([0-9a-f]{7})-(pass|fail)\.html$/.exec(name || '');
   const revision = match ? `${match[1]} → ${match[2]}` : 'Review';
@@ -211,7 +211,7 @@ export function reviewPage({ user, owner, repo, id, name, workflowRunId, pdf = f
       <p role="status" class="muted"></p><p class="dialog-actions"><button class="btn btn-primary" data-act="reply">Reply</button> <button class="btn" data-act="resolve">Resolve</button> <button class="btn" data-act="issue" hidden>Create issue</button> <button type="button" class="btn" data-act="close">Close</button></p></form></dialog>
     <script>(${threadsClient.toString()})(${JSON.stringify({ threads: Number.isInteger(pull) ? `${path}/pull/${pull}/threads` : null, issues: `${path}/issues`, pull, rerun: Number.isInteger(pull) ? `${path}/pull/${pull}/rerun` : null, run: `${path}/run/`, link: `${path}/a/${encodeURIComponent(id)}` }).replace(/</g, '\\u003c')});</script>`;
   const askScript = ask ? `<script>(${askClient.toString()})(${JSON.stringify({ ask: `${path}/a/${encodeURIComponent(id)}/ask`, insight: `${path}/a/${encodeURIComponent(id)}/ask/insight` }).replace(/</g, '\\u003c')});</script>` : '';
-  return frame({ title: revision, user, reviewStatus: match?.[3] === 'fail' || (runStatus === 'completed' && runConclusion && runConclusion !== 'success') ? '✕ NEEDS WORK' : match ? '✓ CHECKS PASSING' : 'REVIEW', crumbs: [{ href: path, label: `${owner}/${repo}` }, { label: Number.isInteger(pull) ? `PR #${pull}` : 'Review' }], body: `<main class="review-page"><nav class="review-bar" aria-label="Review navigation">${revisionChips(match)}${Number.isInteger(pull) ? link(`https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pull/${pull}`, `PR #${pull} ↗`) : ''}${workflowRunId && /^\d+$/.test(String(workflowRunId)) ? `<span class="mono">Run ${e(workflowRunId)}</span>` : ''}${result}${readiness}${reviewOverflow(`${Number.isInteger(pull) ? link(`${path}/pull/${pull}/history`, 'History') : '<button disabled title="History requires a pull request">History</button>'}${share ? '<button id="share-open" type="button">Share…</button>' : '<button disabled title="Sharing is not enabled for this review">Share…</button>'}${runLink || '<button disabled title="Run not recorded">Open run</button>'}${pdf ? link(`${path}/a/${encodeURIComponent(id)}/pdf`, 'Download PDF') : ''}`)}${notice}</nav><div class="review-stage"><div id="review-loading" class="review-loading"><span class="spinner" aria-hidden="true"></span><span>Loading the review…</span></div><iframe id="review-report" src="${e(raw)}" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads" allow="clipboard-write" referrerpolicy="same-origin" title="KiCad review report"></iframe></div></main>${script}${readinessScript}${threads}${askScript}${sharing}` });
+  return frame({ title: revision, user, reviewStatus: match?.[3] === 'fail' || (runStatus === 'completed' && runConclusion && runConclusion !== 'success') ? '✕ NEEDS WORK' : match ? '✓ CHECKS PASSING' : 'REVIEW', crumbs: [{ href: path, label: `${owner}/${repo}` }, { label: Number.isInteger(pull) ? `PR #${pull}` : 'Review' }], body: `<main class="review-page"><nav class="review-bar" aria-label="Review navigation">${revisionChips(match)}${Number.isInteger(pull) ? link(`https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pull/${pull}`, `PR #${pull} ↗`) : ''}${workflowRunId && /^\d+$/.test(String(workflowRunId)) ? `<span class="mono">Run ${e(workflowRunId)}</span>` : ''}${result}${readiness}${reviewOverflow(`${Number.isInteger(pull) ? link(`${path}/pull/${pull}/history`, 'History') : '<button disabled title="History requires a pull request">History</button>'}${share ? '<button id="share-open" type="button">Share…</button>' : '<button disabled title="Sharing is not enabled for this review">Share…</button>'}${runLink || '<button disabled title="Run not recorded">Open run</button>'}${pdf ? link(`${path}/a/${encodeURIComponent(id)}/pdf`, 'Download PDF') : ''}${connectPanel(mcpOrigin)}`)}${notice}</nav><div class="review-stage"><div id="review-loading" class="review-loading"><span class="spinner" aria-hidden="true"></span><span>Loading the review…</span></div><iframe id="review-report" src="${e(raw)}" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads" allow="clipboard-write" referrerpolicy="same-origin" title="KiCad review report"></iframe></div></main>${script}${readinessScript}${threads}${askScript}${sharing}` });
 }
 
 const revisionSha = /^[0-9a-f]{7,40}$/;
@@ -322,6 +322,25 @@ function mergeBadge(state, text) {
 }
 function reviewOverflow(items) {
   return `<details class="bench-menu bench-overflow"><summary aria-label="Review actions">•••</summary><div class="bench-popover">${items}<button type="button" data-review-copy>Copy link</button><label>Go to<input data-review-goto aria-label="Go to saved review position" placeholder="Paste a review link"></label><input data-review-copyfield aria-label="Link to copy" readonly hidden></div></details>`;
+}
+
+export function connectPanel(origin) {
+  let u;
+  try {
+    u = new URL(origin);
+  } catch {
+    return '';
+  }
+  if (
+    u.origin !== origin ||
+    u.username ||
+    u.password ||
+    !(u.protocol === 'https:' || (u.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(u.hostname)))
+  ) {
+    return '';
+  }
+  const command = `claude mcp add --scope user --transport http kicad-review ${u.origin}/mcp`;
+  return `<details class="bench-menu"><summary>Connect your AI assistant</summary><div class="bench-popover"><p>Read-only design access through your GitHub identity. Your assistant receives the tool results.</p><code style="white-space:pre-wrap;overflow-wrap:anywhere">${e(command)}</code><p>Then run <code>/mcp</code> in Claude Code to sign in and approve access. The connection lasts at most one hour. Never type your GitHub password into an assistant.</p><p>Source: reviewed workflow artifacts; missing or expired revisions stay unavailable. No edits or render triggers.</p></div></details>`;
 }
 // This parent owns the only network capability. The child supplies identities, not URLs.
 export function assetParent(iframe,raw,scope=window,fetcher=fetch) {
