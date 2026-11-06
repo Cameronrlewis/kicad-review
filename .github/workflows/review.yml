@@ -264,6 +264,23 @@ jobs:
               rm -f "$output"
             done
 
+      # Optional: the design data behind Ask. A failure here must not fail the review.
+      - name: Copy design context
+        if: steps.report.outputs.ask == 'true'
+        continue-on-error: true
+        env:
+          CONTEXT_NAME: ${{ steps.report.outputs.context_name }}
+        run: cp review/design-context.json "review/$CONTEXT_NAME"
+
+      - name: Upload design context
+        if: steps.report.outputs.ask == 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          archive: false
+          path: review/${{ steps.report.outputs.context_name }}
+          retention-days: 90
+
       - name: Upload image assets
         if: steps.detect.outputs.changed == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

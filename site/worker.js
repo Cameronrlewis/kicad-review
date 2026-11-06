@@ -7,6 +7,7 @@ export { readStoredData } from './report-shell.js';
 import { deploymentPage, escapeHtml, sharedPage, sharedNotFoundPage, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, historyPage, stages, stageForStep } from './pages.js';
 
 import { threadsRoute, ghPages } from './threads.js';
+import { askRoute } from './ask.js';
 import { issuesRoute } from './issues.js';
 import { historyRoute } from './history.js';
 
@@ -433,6 +434,9 @@ async function reportArtifact(owner, repo, id, active, repository) {
   return { base, metadata, run, expired: false };
 }
 
+// Ask's design-data loader gets the same report-family provenance check as the report routes.
+const verifyReport = (owner, repo, id, token, repository) => reportArtifact(owner, repo, id, { token }, repository);
+
 async function storedReport(artifact, active) {
   const download = await gh(`${artifact.base}/zip`, active.token, { redirect: 'manual' });
   if (download.status !== 302) throw new Error('Report unavailable');
@@ -618,6 +622,7 @@ async function artifactReport(request, env, owner, repo, id, active, raw, canSha
       const sharing = shareEnabled(env) && canShare;
       return sessionResponse(reviewPage({
         user: active.login, owner, repo, id, name: metadata.name, workflowRunId: runId, pdf: new URL(request.url).searchParams.get('pdf') === '1', pull, runStatus, runConclusion, share: sharing,
+        ask: Boolean(env.ANTHROPIC_API_KEY && env.ASK_KV),
       }), { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': frameCsp } }, active);
     }
     if (request.headers.get('Sec-Fetch-Dest') === 'document') return sessionRedirect(`${repoPath(owner, repo)}/a/${encodeURIComponent(id)}`, 302, active);
@@ -1048,6 +1053,11 @@ const routes = {
       if (request.method === 'GET' && assetRoute) {
         const [, owner, repo, id, digest, kind] = assetRoute;
         return await digestAsset(request, env, owner, repo, id, digest, kind);
+      }
+      const askMatch = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/(\d{1,20})\/ask(\/insight)?$/);
+      if (request.method === 'POST' && askMatch) {
+        const result = await askRoute(request, env, { owner: askMatch[1], repo: askMatch[2], id: askMatch[3], rest: askMatch[4] || '' }, { access, gh, verifyReport });
+        return response(result.body, { status: result.status, headers: result.headers });
       }
       const modelRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/(\d{1,20})\/3d\/([^/]+)\/([^/]+)$/);
       if (request.method === 'GET' && modelRoute) {

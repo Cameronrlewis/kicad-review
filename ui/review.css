@@ -772,6 +772,34 @@ html[data-theme="dark"] #stage.mode-3d { background:var(--bg); }
 #image-results button:is(:hover,:focus-visible) { background:var(--surface-2); outline:2px solid var(--accent); outline-offset:-2px; }
 #image-results p { padding:var(--space-2); margin:0; }
 body.shot #image-search { display:none; }
+/* Ask answer chips: live names are buttons with a visible tint and border; unknown names are muted text with a dashed border. Focus uses the global :focus-visible ring. */
+.ask-link { font:var(--fs-sm) var(--font-mono); padding:0 var(--sp-1); border-radius:var(--r-1); }
+button.ask-link { color:var(--acc-tx); background:var(--acc-bg); border:1px solid var(--acc); cursor:pointer; }
+span.ask-link.missing { color:var(--tx2); background:transparent; border:1px dashed var(--deco); text-decoration:line-through; cursor:help; }
+/* Ask about this design (link chips .ask-link above, from ui/ask.js) */
+.ask { display:flex; flex-direction:column; gap:var(--sp-2); padding:var(--sp-2); min-height:100%; box-sizing:border-box; }
+.ask-notice { margin:0; padding:var(--sp-2); font-size:var(--fs-xs); color:var(--tx2); background:var(--inset); border:1px solid var(--hair); border-radius:var(--r-2); }
+.ask-summary { font-size:var(--fs-body); line-height:var(--lh-base); color:var(--tx); }
+.ask-h { margin:var(--sp-2) 0 var(--sp-1); font:var(--fw-semibold) var(--fs-cap)/1 var(--font-cap); letter-spacing:var(--cap-track); text-transform:uppercase; color:var(--tx2); }
+.ask-try { display:flex; flex-direction:column; gap:var(--sp-1); }
+.ask-chip, .ask-send { font:inherit; font-size:var(--fs-sm); text-align:left; color:var(--tx); background:var(--module); border:1px solid var(--line); border-radius:var(--r-2); padding:var(--sp-1) var(--sp-2); min-height:var(--h-md); cursor:pointer; }
+.ask-chip:hover, .ask-send:hover:not(:disabled) { border-color:var(--acc); }
+.ask-send { background:var(--acc); color:var(--on-acc); border-color:var(--acc); text-align:center; font-weight:var(--fw-semibold); }
+.ask-send:disabled { opacity:.6; cursor:default; }
+.ask-log { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:var(--sp-2); flex:1; }
+.ask-msg { font-size:var(--fs-body); line-height:var(--lh-base); color:var(--tx); background:var(--module); border:1px solid var(--hair); border-radius:var(--r-2); padding:var(--sp-2); overflow-wrap:anywhere; }
+.ask-msg.user { background:var(--acc-bg); border-color:var(--hair); }
+.ask-msg p { margin:0 0 var(--sp-1); } .ask-msg ul { margin:0 0 var(--sp-1); padding-left:var(--sp-4); }
+.ask-who { display:block; font:var(--fw-semibold) var(--fs-cap)/1 var(--font-cap); letter-spacing:var(--cap-track); text-transform:uppercase; color:var(--tx2); margin-bottom:var(--sp-1); }
+.ask-error { margin:0; color:var(--rem); font-size:var(--fs-sm); }
+.ask-form { display:flex; flex-direction:column; gap:var(--sp-1); position:sticky; bottom:0; background:var(--panel); padding-top:var(--sp-1); }
+.ask-label { font-size:var(--fs-xs); color:var(--tx2); }
+.ask-form textarea { font:inherit; font-size:var(--fs-md); color:var(--tx); background:var(--inset); border:1px solid var(--line); border-radius:var(--r-2); padding:var(--sp-2); resize:vertical; min-height:56px; }
+.ask-form textarea:focus-visible, .ask-chip:focus-visible, .ask-send:focus-visible, button.ask-link:focus-visible { outline:2px solid var(--acc); outline-offset:1px; }
+.ask-row { display:flex; justify-content:space-between; align-items:center; gap:var(--sp-2); font-size:var(--fs-xs); }
+#panel-tabs:has([data-tab=ask]) { flex-wrap:wrap; }
+@media (pointer:coarse) { .ask-chip, .ask-send, button.ask-link { min-height:44px; min-width:44px; } .ask-form textarea { font-size:16px; } }
+@media (prefers-reduced-motion:reduce) { .ask * { transition:none !important; animation:none !important; } }
 
 .member-chips { display:flex; flex-wrap:wrap; gap:var(--space-1); margin-top:var(--space-1); }
 .weight { font:11px var(--font-mono); margin-left:var(--space-1); color:var(--muted); }

@@ -74,6 +74,24 @@ Writers see **Share…** on a review page. Links grant read-only access to that 
 
 Installation tokens are cached only in worker-isolate memory, until five minutes before their GitHub expiry. The bounded cache separates App, installation, owner, repository and permission scopes. Tokens are never persisted or sent to guests. Guest tokens have only Actions read and Variables read, scoped to the single repository. Revocation uses a separate repository-scoped Variables-write token. Generation state is checked on every guest request and is never cached, so token reuse does not delay revocation. A wrapper view uses four GitHub calls (three with a cached token); its report frame uses six (five cached), including the artifact storage download. No database or KV is added.
 
+## Ask
+
+Ask needs the API-key secret and KV binding on the Worker, plus repository opt-in. Missing Worker setup answers 503; the embedded tab stays disabled. The fail-closed opt-in reader supports the complete shipped `examples/kicad-review.toml`, including `bom.required_fields = ["Value", "Footprint"]`: bare single-level tables/keys, boolean/decimal/string scalars and flat scalar arrays, including multiline arrays, trailing commas and comments. `[ask].enabled` must be the literal boolean `true`; false, quoted booleans, malformed input and duplicate tables/keys never opt in. Inline/dotted/quoted tables, nested arrays and multiline strings remain outside this deliberately constrained subset and refuse Ask without sending design data; configurations needing these forms require an owner-approved TOML parser before deployment. Keep the full-example enabled/false/malformed route test passing after editing the example.
+
+```sh
+cd site
+npx wrangler secret put ANTHROPIC_API_KEY
+npx wrangler kv namespace create ASK_KV
+```
+Add the printed id to `wrangler.toml`:
+
+```toml
+[[kv_namespaces]]
+binding = "ASK_KV"
+id = "<the printed id>"
+```
+Optional variables under `[vars]`: `ASK_DAILY_LIMIT` (questions per user per day, default 50), `ASK_MODEL` (default `claude-sonnet-5-5`) and `ASK_SUMMARY_MODEL` (defaults to `ASK_MODEL`, or `claude-sonnet-5-5`; set `ASK_SUMMARY_MODEL` to a smaller model to cut cost). KV holds only the per-user daily counter and the cached summaries; it is a cache, not a store. The daily counter is a best-effort UX cap, not a billing bound: concurrent requests and eventually consistent reads can overshoot without a fixed bound or lose increments. KV permits only one write per second to the same key; if a daily-counter write fails after the provider starts an answer, Ask continues that answer without retrying the model and emits a status explaining that the remaining count is an estimate. The increment may be lost. Configure provider billing limits before deployment; a hard quota needs owner-approved serialized storage. Locally, put `ANTHROPIC_API_KEY` in `site/.dev.vars` and add the same `[[kv_namespaces]]` stanza.
+
 ## Settings
 
 `ALLOWED_OWNERS` in `wrangler.toml` is a comma-separated list of GitHub owners whose repositories the site will serve.

@@ -54,6 +54,7 @@ jobs:
           export PAGES=$(mktemp -d)
           echo "PAGES=$PAGES" >> "$GITHUB_ENV"
           python3 ui/build-fixtures.py "$PAGES"
+      - run: python3 ui/ask-fixture.py "$PAGES/ask-four.html"
       - run: node ui/check.mjs
       - run: node ui/check.mjs --no-skip "Waivers"
       - run: node ui/check.mjs --no-skip "images fallback selected export palettes" --page "$PAGES/two.html"
@@ -76,6 +77,10 @@ jobs:
       - run: node ui/check.mjs --no-skip "bench-t2 single offline chrome" --page "$PAGES/two.html"
       - run: node ui/check.mjs --no-skip "Parts fixture" --page "$PAGES/parts.html"
       - run: node ui/check.mjs --no-skip "Parts fixture" --dark --page "$PAGES/parts.html"
+      - run: node ui/check.mjs --no-skip "Ask"
+      - run: node ui/check.mjs --no-skip "Ask" --dark
+      - run: node ui/check.mjs --no-skip "BR09 fixture" --page "$PAGES/ask-four.html"
+      - run: node ui/check.mjs --no-skip "BR09 fixture" --dark --page "$PAGES/ask-four.html"
       - run: node ui/check.mjs --no-skip "images screen and legacy appearance"
       - run: node ui/check.mjs --no-skip "images compare and four copper layers" --page "$PAGES/images.html"
       - run: node ui/check.mjs --no-skip "images gesture lifecycle" --page "$PAGES/images.html"
