@@ -1044,10 +1044,10 @@ def release_package_valid(fab_dir, p, side, settings):
     pro = posixpath.join(side, p["dir"], f"{p['name']}.kicad_pro")
     if not os.path.exists(pro):
         return True
+    if not (os.path.isfile(board_path(p, side)) or os.path.isfile(pro[:-len(".kicad_pro")] + ".kicad_sch")):
+        return pathlib.Path(fab_dir).is_dir()  # no fabrication inputs: the rendered directory is intentionally empty
     if not nonempty_dir(fab_dir):
         return False
-    if not (os.path.isfile(board_path(p, side)) or os.path.isfile(pro[:-len(".kicad_pro")] + ".kicad_sch")):
-        return True
     try:
         fab_parts(pro, p["name"], settings, str(fab_dir))
     except (SystemExit, OSError, ValueError, ArithmeticError, IndexError, KeyError, csv.Error, zipfile.BadZipFile):
@@ -1087,7 +1087,10 @@ def missing_products(cache, p, side, settings, purposes):
             missing.append("fab-limits")
     if settings["checks"].get("release", "off") != "off" and not release_package_valid(cache / "fab", p, side, settings):
         missing.append("fab")
-    if settings.get("_snapshot_fabrication") is not None and not nonempty_dir(cache / "fab-snapshot"):
+    pro = posixpath.join(side, p["dir"], f"{p['name']}.kicad_pro")
+    fabrication_inputs = os.path.isfile(pro) and (board or os.path.isfile(pro[:-len(".kicad_pro")] + ".kicad_sch"))
+    snapshot_fab = cache / "fab-snapshot"  # without fabrication inputs the rendered directory is intentionally empty
+    if settings.get("_snapshot_fabrication") is not None and not (nonempty_dir(snapshot_fab) or (not fabrication_inputs and snapshot_fab.is_dir())):
         missing.append("fab-snapshot")
     downloads = settings.get("downloads", {}).get("enabled", False)
     policy = settings.get("_snapshot_fabrication")
@@ -4710,14 +4713,14 @@ def project_checks(p, settings, objs, waivers=None, *, single=False):
     if settings["checks"].get("release", "off") != "off":
         pcb = lambda s: posixpath.join(s, p["dir"], f"{p['name']}.kicad_pcb")
         preset = settings["fabrication"]["preset"]
-        release_reason = output_not_run(p, out_dir, check_sides, f"fab/{p['name']}-review-{preset}-gerbers.zip")
+        fab = "fab-snapshot" if single else "fab"  # a design report reads the trusted-policy package
+        release_reason = output_not_run(p, out_dir, check_sides, f"{fab}/{p['name']}-review-{preset}-gerbers.zip")
         if not os.path.exists(pcb("head")):
             out.append({"name": "release", "title": CHECK_NAMES["release"], "level": settings["checks"]["release"], "status": "not_run",
                         "reason": "no board", "errors": 0, "new_errors": 0, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []})
         elif release_reason:
             out.append(not_run("release", release_reason, True))
         else:
-            fab = "fab-snapshot" if single else "fab"  # a design report reads the trusted-policy package
             side = lambda s: release_findings(f"{out_dir}/{s}/{fab}", p["name"], preset, pcb(s), objs[s]) if os.path.exists(pcb(s)) and not (single and s == "base") else None
             c = run_check("release", settings, side("head"), side("base"))
             c["package"] = package_summary(f"{out_dir}/head/{fab}")

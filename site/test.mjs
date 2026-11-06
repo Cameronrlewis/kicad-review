@@ -5921,7 +5921,7 @@ test('designQuery and folder validation canonicalizes and re-encodes via project
 
 // A commit log for the history tests, newest first. A commit with `files` lists the files it changed; a renamed file
 // lists both names (filename and previous_filename). The mock answers the three calls the route makes: the tip, the
-// path-filtered commit list resumed from a sha (GitHub semantics: the listing starts at that sha, which is included),
+// unfiltered commit list resumed from a sha (GitHub semantics: the listing starts at that sha, which is included),
 // and the commit's files. `calls` records every path so the tests can count requests.
 function historyGh(log, { tree = [{ type: 'blob', path: 'A/A.kicad_pro' }, { type: 'blob', path: 'B/B.kicad_pro' }], calls = [], thumbs = null, refs = null } = {}) {
   const touches = (c, dir) => (c.files || []).some((f) => [f.filename, f.previous_filename].some((p) => p && (dir === '' || p === dir || p.startsWith(`${dir}/`))));
@@ -5977,7 +5977,7 @@ function historyGh(log, { tree = [{ type: 'blob', path: 'A/A.kicad_pro' }, { typ
 }
 const sha40 = (n) => String(n).padStart(40, '0');
 
-test('a folder page lists only the commits that changed its KiCad files: renames and deletions count, README and other folders do not', async () => {
+test('a folder page filters commit details and includes root-level inputs that affect every project', async () => {
   const log = [
     { sha: sha40(1), files: [{ filename: 'README.md' }] },
     { sha: sha40(2), files: [{ filename: 'A/A.kicad_sch' }] },
@@ -5986,16 +5986,20 @@ test('a folder page lists only the commits that changed its KiCad files: renames
     { sha: sha40(5), files: [{ filename: 'B/x.kicad_sch', previous_filename: 'A/x.kicad_sch', status: 'renamed' }] },
     { sha: sha40(6), files: [{ filename: 'A/old.kicad_pcb', status: 'removed' }] },
     { sha: sha40(7), files: [{ filename: 'A/y.kicad_pro' }, { filename: 'B/B.kicad_pcb' }] },
+    { sha: sha40(8), files: [{ filename: 'kicad-review.toml' }] },
+    { sha: sha40(9), files: [{ filename: 'sym-lib-table' }] },
+    { sha: sha40(10), files: [{ filename: 'fp-lib-table' }] },
   ];
-  const gh = historyGh(log);
+  const calls = [], gh = historyGh(log, { calls });
   const a = await (await designGet('/r/Cameronrlewis/repo/p/A/designs', [['/repos/Cameronrlewis/repo/', (url) => gh(url.replace('https://api.github.com', ''))]])).text();
-  assert.deepEqual([...a.matchAll(/\/p\/A\/design\/([0-9a-f]{40})"/g)].map((m) => m[1]), [sha40(2), sha40(5), sha40(6), sha40(7)]);
+  assert.deepEqual([...a.matchAll(/\/p\/A\/design\/([0-9a-f]{40})"/g)].map((m) => m[1]), [sha40(2), sha40(5), sha40(6), sha40(7), sha40(8), sha40(9), sha40(10)]);
   assert.match(a, /KiCad changes/);
   assert.ok(!a.includes('Repository commit history'), 'the list is never labelled as all commits');
   const b = await (await designGet('/r/Cameronrlewis/repo/p/B/designs', [['/repos/Cameronrlewis/repo/', (url) => gh(url.replace('https://api.github.com', ''))]])).text();
-  assert.deepEqual([...b.matchAll(/\/p\/B\/design\/([0-9a-f]{40})"/g)].map((m) => m[1]), [sha40(3), sha40(5), sha40(7)]);
+  assert.deepEqual([...b.matchAll(/\/p\/B\/design\/([0-9a-f]{40})"/g)].map((m) => m[1]), [sha40(3), sha40(5), sha40(7), sha40(8), sha40(9), sha40(10)]);
+  assert.ok(calls.filter((path) => path.includes('/commits?')).every((path) => !new URL(`https://x${path}`).searchParams.has('path')), 'history listings are unfiltered so root inputs reach detail filtering');
   assert.match(a, new RegExp(`name="head" value="${sha40(1)}"`), 'Compare with newest targets the default-branch tip');
-  assert.equal((a.match(/Compare with newest/g) || []).length, 4, 'every row except the tip itself');
+  assert.equal((a.match(/Compare with newest/g) || []).length, 7, 'every row except the tip itself');
 });
 
 test('a mixed history pages by cursor: up to 25 KiCad rows per page, no duplicates, no skipped commit, and the scan limit is shown', async () => {
@@ -7555,4 +7559,3 @@ test('finding 9: malformed compare body and OAuth callback /user errors keep coo
     assert.match(await res.text(), /Sign-in didn&#39;t complete/);
   } finally { restore(); }
 });
-

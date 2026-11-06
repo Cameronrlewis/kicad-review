@@ -8487,6 +8487,24 @@ with _DpTmp() as t:
         os.chdir(old_cwd)
 print("ok DP-S4M snapshot downloads use the trusted downloads-snapshot folder")
 
+# A project file without a board or schematic intentionally produces empty fabrication directories; both policies cache that result.
+with _DpTmp() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        p = {"dir": "P", "name": "P", "status": "added"}
+        write(t, {"head/P/P.kicad_pro": "{}"})
+        cache = pathlib.Path("review/P/head")
+        (cache / "fab").mkdir(parents=True)
+        (cache / "fab-snapshot").mkdir()
+        settings = json.loads(json.dumps(kr.DEFAULT_SETTINGS))
+        settings["checks"]["release"] = "informational"
+        settings["_snapshot_fabrication"] = settings["fabrication"].copy()
+        assert kr.missing_products(cache, p, "head", settings, ("comparison",)) == []
+    finally:
+        os.chdir(old_cwd)
+print("ok pro-only projects cache intentionally empty fabrication outputs")
+
 # DP-S4P: a partial revision-cache hit exports only the missing products, never the cached images again.
 with _DpTmp() as t:
     old_cwd = os.getcwd()
@@ -12511,3 +12529,27 @@ def test_f7_malformed_board_fab_and_release():
 
 test_f7_malformed_board_fab_and_release()
 print("ok F7 malformed board reports fab limits and release as not run")
+
+
+def test_f7_single_snapshot_malformed_release():
+    with tempfile.TemporaryDirectory() as td:
+        old = os.getcwd(); os.chdir(td)
+        try:
+            p = {"dir": "p", "name": "p", "status": "added"}
+            write("head", {"p/p.kicad_pcb": '(kicad_pcb (layers (0 "F.Cu" signal))'})
+            reason = "release package not built: malformed board file: malformed S-expression"
+            write("review/p/head/fab-snapshot", {"p-review-jlcpcb-gerbers.zip.error": reason})
+            write("review/p/head", {"drc.json": json.dumps({"violations": [], "unconnected_items": [], "schematic_parity": []})})
+            settings = json.loads(json.dumps(kr.DEFAULT_SETTINGS))
+            settings["checks"] = {name: "off" for name in settings["checks"]}
+            settings["checks"]["release"] = "informational"
+            release = next(c for c in kr.project_checks(p, settings, {"base": {}, "head": {}}, single=True) if c["name"] == "release")
+            assert release["status"] == "not_run" and release.get("incomplete") is True, release
+            assert release["reason"] == "head " + reason, release
+            assert release["errors"] == release["new_errors"] == 0 and release["violations"] == [], release
+        finally:
+            os.chdir(old)
+
+
+test_f7_single_snapshot_malformed_release()
+print("ok F7 single snapshots read malformed-package evidence from fab-snapshot")

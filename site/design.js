@@ -302,9 +302,9 @@ export class CursorNotFoundError extends Error {
 // Inside a Worker's 50-subrequest budget: access 2 + tip 1 + list 10 + details 30 + thumbnails 3 = 46.
 export const MAX_SCAN = 30; // ponytail: 30 detail requests per view; the Older link resumes the scan, so no commit is skipped
 const PAGE_ROWS = 25;
-const MAX_LIST_PAGES = 10; // ponytail: at most 10 commit-list requests (up to 1000 path-matching commits) per view
+const MAX_LIST_PAGES = 10; // ponytail: at most 10 commit-list requests (up to 1000 repository commits) per view
 export async function scanHistory(gh, token, root, ref, dir, cursor) {
-  const rows = [], pathQuery = dir ? `&path=${enc(dir)}` : '', budget = { used: 0, max: MAX_SCAN };
+  const rows = [], budget = { used: 0, max: MAX_SCAN };
   let skipping = Boolean(cursor), last = cursor || '', progressed = false, listPages = 0;
   for (let page = 1; ; page += 1) {
     if (listPages >= MAX_LIST_PAGES) {
@@ -312,7 +312,7 @@ export async function scanHistory(gh, token, root, ref, dir, cursor) {
       return { rows, next: last, truncated: true };
     }
     listPages += 1;
-    const response = await gh(`${root}/commits?sha=${enc(ref)}&per_page=100${page > 1 ? `&page=${page}` : ''}${pathQuery}`, token);
+    const response = await gh(`${root}/commits?sha=${enc(ref)}&per_page=100${page > 1 ? `&page=${page}` : ''}`, token);
     if (!response.ok) throw new Error('history unavailable');
     const items = await response.json();
     const hasNextPage = Boolean(response.headers.get('Link')?.includes('rel="next"'));
