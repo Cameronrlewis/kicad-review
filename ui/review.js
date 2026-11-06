@@ -7,15 +7,18 @@ const $ = s => document.querySelector(s);
 const single = () => D.mode === "single";   // a design report: one revision, nothing compared
 document.body.classList.toggle("design-single", single());
 const LIGHT_RIGS3D = ["bench", "lowsun", "photo"];
-const S = { p: 0, v: null, m: "side", x: null, y: null, z: null, s: null, part3d: null, t: "changes", layers: null, hidden3d: [], checks: { check: "", scope: null, error: true, warning: true, waived: false } };
+const S = { p: 0, v: null, m: "side", x: null, y: null, z: null, s: null, part3d: null, t: "changes", layers: null, hidden3d: [], checks: { check: "", scope: null, error: true, warning: true, waived: false }, part: null, net: null, revision: null };
 S.threads = null; S.threadFilter = { status: "open", severity: "" }; S.placing = false;
 let THREADS_ON = !single() && parent !== window && !!D.settings?.threads?.enabled;   // a design report has no PR to discuss
 let ISSUES_ON = parent !== window && !!D.settings?.issues?.enabled;
+// Ask about this design. The report cannot connect anywhere; the wrapper page relays (site/ask-client.js).
+const ASK = { on: parent !== window && !!D.settings?.ask?.enabled, ready: false, project: null, insight: null, insightError: "", log: [], busy: false, current: null, status: "", remaining: null, draft: "", insightId: null, asked: false };
+let askSeq = 0;
 S.issues = null;
 S.units = "mm"; S.grid = true; S.imageSelection = null;
 // A design report tells the hosted wrapper its recorded ref, date and subject; the wrapper checks and shows them as text.
 const readyMessage = () => ({ kicadReviewReady: true, threads: !single() && THREADS_ON, issues: ISSUES_ON, blockMerge: !single() && THREADS_ON && !!D.settings?.threads?.block_merge,
-  ...(single() ? { designSnapshot: { ref: D.snapshot?.ref, sha: D.snapshot?.sha, committedAt: D.snapshot?.committedAt, message: D.snapshot?.message } } : {}) });
+  ask: ASK.on, ...(single() ? { designSnapshot: { ref: D.snapshot?.ref, sha: D.snapshot?.sha, committedAt: D.snapshot?.committedAt, message: D.snapshot?.message } } : {}) });
 const validThread = t => t && t.id !== Object(t.id) && Object(t.id) instanceof String && (t.resolved === true || t.resolved === false) && t.anchor && t.anchor === Object(t.anchor)
   && t.anchor.v === 1 && Number.isFinite(t.anchor.x) && Number.isFinite(t.anchor.y) && Array.isArray(t.comments);
 function acceptThreads(list) {
@@ -54,9 +57,11 @@ function findingAnchor(v) {
   return { v: 1, project: P.dir, file, sheet: view === "board" ? null : view.slice(6), layer: null, target: "point",
     uuid: null, kind: null, ref: null, x: round3(v.pos[0]), y: round3(v.pos[1]), side: "head", commit: D.head, severity: "comment" };
 }
-function handleParentMessage(e, on = THREADS_ON, issuesOn = ISSUES_ON) {
+function handleParentMessage(e, on = THREADS_ON, issuesOn = ISSUES_ON, askOn = ASK.on) {
   if (e.source !== parent) return false;
   let accepted = false;
+  if (askOn && e.data?.kicadReviewAskReady === true) { ASK.ready = true; if (S.v) renderPanel(); accepted = true; }
+  if (askOn && e.data?.kicadReviewAskEvent && e.data.kicadReviewAskEvent === Object(e.data.kicadReviewAskEvent)) { askEvent(e.data.kicadReviewAskEvent); accepted = true; }
   if (on && Array.isArray(e.data?.kicadReviewThreads)) { acceptThreads(e.data.kicadReviewThreads); accepted = true; }
   if (issuesOn && Array.isArray(e.data?.kicadReviewIssues)) { acceptIssues(e.data.kicadReviewIssues); accepted = true; }
   return accepted;
@@ -344,16 +349,37 @@ function firstChangedView(p) {
   const s = single() ? p.sheets[0] : p.sheets.find(s => s.status !== "unchanged");
   return s ? `sheet:${s.path}` : boardAvailable(p) ? "board" : p.libraries?.length ? "lib:0" : p.sheets[0] ? `sheet:${p.sheets[0].path}` : "board";
 }
+function resolveIdentity(st, p) {
+  if (!st.part && !st.net) return null;
+  if (st.part && st.net) return { error: 'Choose a part or a net, not both' };
+  const side = st.revision === 'base' ? 'base' : 'head';
+  const target = st.part ? { uuid: st.part, sheet: String(st.v || '').startsWith('sheet:') ? st.v.slice(6) : undefined } : p.identity?.[side]?.nets?.[st.net];
+  if (!target) return { error: 'Object or net not found in this report' };
+  const matches = (p.objects || []).map((o, index) => ({ o, index })).filter(({ o }) => (o.side === side || (side === 'base' && o.side === 'head' && !o.added)) && o.uuid === target.uuid && (target.sheet === undefined || o.sheet === target.sheet));
+  if (matches.length !== 1) return { error: matches.length ? 'Object identity is ambiguous; include its sheet view' : 'Object or net not found in this report' };
+  return { index: matches[0].index };
+}
+async function focusIdentity(st) {
+  const target = resolveIdentity(st, proj()); if (!target) return false;
+  if (target.error) { const status = $('#statusbar .status-message'); if (status) status.textContent = target.error; return false; }
+  await goToObject(target.index);
+  if (st.net) { const status = $('#statusbar .status-message'); if (status) status.textContent = `Net ${st.net}: focused one stored member`; }
+  return true;
+}
+
+// A #part/#net link carries its own revision; navigating away drops the link and that revision,
+// while a revision chosen in the 3D view (no link active) persists across navigation.
+function clearIdentityLink() { if (S.part || S.net) S.revision = null; S.part = null; S.net = null; }
 // One Appearance store per project; bind it before anything patches the store or mounts the dock.
 function viewerIdFor(p) { return JSON.stringify([D.repo || location.pathname, p.dir]); }
-function openProject(i) { clearImageSelection(); S.part3d = null; S.p = i; Appearance.configure([], viewerIdFor(proj())); S.s = null; S.io = null; S.ig = null; S.layers = null; select(firstChangedView(proj())); renderPanel(); }
+function openProject(i) { clearImageSelection(); S.part3d = null; S.p = i; Appearance.configure([], viewerIdFor(proj())); S.s = null; S.io = null; S.ig = null; S.layers = null; clearIdentityLink(); select(firstChangedView(proj())); renderPanel(); }
 function stopPlacing() { S.placing = false; document.body.classList.remove("placing"); }
-function select(view) { clearImageSelection(); S.part3d = null; renderInspector(); const library = String(S.v).startsWith("lib:") || String(view).startsWith("lib:") || tabsChange(view); stopPlacing(); S.v = view; S.m = modeFor(view, S.m); if (String(view).startsWith("lib:")) S.t = "changes"; S.x = S.y = S.z = null; renderModes(); renderNav(); if (library) renderPanel(); renderZoombar(); draw(); saveHash(); }
+function select(view) { clearImageSelection(); S.part3d = null; renderInspector(); const library = String(S.v).startsWith("lib:") || String(view).startsWith("lib:") || tabsChange(view); stopPlacing(); S.v = view; S.m = modeFor(view, S.m); if (String(view).startsWith("lib:")) S.t = "changes"; S.x = S.y = S.z = null; clearIdentityLink(); renderModes(); renderNav(); if (library) renderPanel(); renderZoombar(); draw(); saveHash(); }
 
 function decodeState(hash) {
   const q = new URLSearchParams(hash.replace(/^#/, "").replace(/^.*?#/, "")), out = {};
   if (q.has("p")) out.p = +q.get("p");
-  for (const k of ["v", "m", "s", "t", "revision"]) if (q.has(k)) out[k] = q.get(k);
+  for (const k of ["v", "m", "s", "t", "part", "net", "revision"]) if (q.has(k)) out[k] = q.get(k);
   for (const k of ["x", "y", "z"]) if (q.has(k)) out[k] = +q.get(k);
   if (q.has("l")) out.layers = q.get("l").split(",").filter(Boolean);
   if (q.has("c")) out.camera3d = q.get("c").split(",").map(Number);
@@ -371,13 +397,15 @@ function valid(st) {   // drop anything that does not exist in this report
   out.revision = ["base", "head"].includes(st.revision) ? st.revision : "head";
   for (const k of ["x", "y", "z"]) if (Number.isFinite(st[k]) && (k !== "z" || st[k] > 0)) out[k] = st[k];
   if (p.changes.some(r => r.id === st.s) || p.checks.some(c => c.violations.some(v => v.id === st.s))) out.s = st.s;
-  if (st.t === "checks" || !single() && (st.t === "changes" || st.t === "threads") || st.t === "parts" && p.parts || st.t === "appearance") out.t = st.t;
+  if (st.t === "checks" || !single() && (st.t === "changes" || st.t === "threads") || st.t === "parts" && p.parts || st.t === "appearance" || st.t === "ask" && ASK.on) out.t = st.t;
   if (st.layers) {   // [] = the reviewer turned every layer off; unknown names only = default layers, not an empty board
     const ls = st.layers.filter(n => p.board.layers.some(l => l.name === n));
     if (!st.layers.length || ls.length) out.layers = ls;
   }
   if (Array.isArray(st.camera3d) && st.camera3d.length === 6 && st.camera3d.every(Number.isFinite)) out.camera3d = st.camera3d;
   if (Array.isArray(st.hidden3d)) out.hidden3d = st.hidden3d.filter(x => GROUPS3D.some(([id]) => id === x));
+  if (st.part === String(st.part) && st.part.length <= 100) out.part = st.part;
+  if (st.net === String(st.net) && st.net.length <= 2000) out.net = st.net;
   if (st.assembled3d === false) out.assembled3d = false;
   if (st.lighting3d && LIGHT_RIGS3D.includes(st.lighting3d.rig)) {   // unknown rig = default light; shared studio policy clamps numbers
     // Shared studio presets own persisted lighting defaults and clamping.
@@ -390,7 +418,8 @@ function applyState(st) {
   if(v.p!==S.p || (v.v ?? firstChangedView(D.projects[v.p]))!==S.v)clearImageSelection();
   if (v.t === "appearance") { leftTab = "appearance"; leftCollapsed = false; }
   Object.assign(S, { p: v.p, v: v.v ?? firstChangedView(D.projects[v.p]), m: single() ? "side" : v.m ?? S.m, s: v.s ?? null, part3d: null, io: null, ig: null, t: v.t ?? (single() ? "checks" : S.t),
-                     revision: v.revision ?? "head", layers: v.layers ?? null, hidden3d: v.hidden3d ?? [], assembled3d: v.assembled3d ?? true, lighting3d: v.lighting3d ?? window.ThreeStudio.normalizeLighting(window.ThreeStudio.PRESETS.bench), camera3d: v.camera3d ?? null, x: v.x ?? null, y: v.y ?? null, z: v.z ?? null });
+                     revision: v.revision ?? "head", layers: v.layers ?? null, hidden3d: v.hidden3d ?? [], assembled3d: v.assembled3d ?? true, lighting3d: v.lighting3d ?? window.ThreeStudio.normalizeLighting(window.ThreeStudio.PRESETS.bench), camera3d: v.camera3d ?? null, x: v.x ?? null, y: v.y ?? null, z: v.z ?? null,
+                     part: v.part ?? null, net: v.net ?? null });
   Appearance.configure([], viewerIdFor(proj()));
   S.m = modeFor(S.v, S.m);
   if (S.layers && S.v === "board") Appearance.patch({layers: Object.fromEntries(proj().board.layers.map(l => [canon(l.name), {visible: S.layers.includes(l.name)}]))});   // the link's l= wins over stored eyes
@@ -401,7 +430,10 @@ function applyState(st) {
   renderPanel();
   renderInspector();
   renderZoombar();
-  return draw().then(() => S.s && !hasPos && !v.v && goTo(S.s));
+  return draw().then(async () => {
+    if (v.part || v.net) { await focusIdentity({ ...v, v: st.v }); return; }
+    if (S.s && !hasPos && !v.v) goTo(S.s);
+  });
 }
 
 const PX = 4;                       // CSS px per mm at z = PX
@@ -936,6 +968,50 @@ function viewport(stage, label, kind) {
   }
   return world;
 }
+function publishReadyAdapters(ticket) {
+  const current = !!ticket && ticket === window.reviewDrawTicket &&
+    ticket.project === S.p && ticket.view === S.v && ticket.generation === gen;
+  const done = current && ticket.complete;
+  document.body.dataset.readyDraw = JSON.stringify(ticket ? {
+    project: ticket.project,
+    sheet: ticket.sheet,
+    generation: ticket.generation,
+    complete: !!done
+  } : null);
+}
+function requestReviewDraw(generation) {
+  const ticket = {
+    project: S.p,
+    dir: proj()?.dir || '',
+    view: S.v,
+    sheet: String(S.v || '').startsWith('sheet:') ? S.v.slice(6) : null,
+    generation,
+    complete: false,
+    renderer: ''
+  };
+  window.reviewDrawTicket = ticket;
+  window.__requestedDrawGeneration = generation;
+  publishReadyAdapters(ticket);
+  return ticket;
+}
+function completeReviewDraw(ticket, stage, renderer) {
+  if (ticket !== window.reviewDrawTicket || ticket.generation !== gen ||
+      ticket.project !== S.p || ticket.view !== S.v || !stage?.isConnected ||
+      document.querySelector('#stage') !== stage) return;
+  if (stage.querySelector('.image-error')) return;
+  if (ticket.sheet && !stage.querySelector('.world svg path, .world svg circle, .world svg polygon, .world svg rect, .world svg line, .world svg text, .world img')) return;
+  Object.assign(ticket, { complete: true, renderer: renderer || '' });
+  publishReadyAdapters(ticket);
+}
+function schematicDrawReady(sheet) {
+  const t = window.reviewDrawTicket;
+  if (!t || !t.complete || t.generation !== gen || t.project !== S.p ||
+      t.view !== S.v || t.sheet !== sheet || S.v !== 'sheet:' + sheet) return false;
+  const stage = document.querySelector('#stage');
+  if (!stage || !stage.isConnected || document.querySelector('#stage') !== stage) return false;
+  return !!stage.querySelector('.world svg path, .world svg circle, .world svg polygon, .world svg rect, .world svg line, .world svg text, .world img');
+}
+
 let gen = 0;
 async function draw() {
   window.reviewViewReady = null;   // 2D readiness for measurements; 3D uses Review3D.state.firstFrame
@@ -946,7 +1022,7 @@ async function draw() {
   Appearance.configure([], viewerIdFor(proj()));
   schematicResize.disconnect();
   resetCoordinates();
-  const my = ++gen, view = currentView(), P = proj(), stage = document.createElement("main");
+  const my = ++gen, ticket = requestReviewDraw(my), view = currentView(), P = proj(), stage = document.createElement("main");
   if(imageSearchState.context!==S.p+":"+S.v)$("#image-search").hidden=true;
   stage.id = "stage"; stage.className = `mode-${S.m}`;
   stage.dataset.view = S.v; stage.dataset.imageReady = "false"; stage.dataset.generation = String(my);
@@ -1084,6 +1160,7 @@ async function draw() {
   stage.imageMounted = true; stage.setAttribute("aria-busy", "false");
   if (view && view.kind !== "lib" && !stage.querySelector(".image-error")) stage.dataset.imageReady = "true";
   finishBoard(stage);
+  completeReviewDraw(ticket, stage, S.m);
 }
 function noChangeNotice(stage) {
   if (single()) return;   // nothing is compared, so "no changes" says nothing
@@ -1970,6 +2047,7 @@ if (window.Review3D) { window.Review3D.onPick = id => { S.s = id; markSelected()
 }; }
 const viewOf = r => r.where?.board ? "board" : r.where?.sheet != null ? `sheet:${r.where.sheet}` : null;
 function goTo(id) {
+  clearIdentityLink();
   const r = proj().changes.find(c => c.id === id) || allViolations().find(v => v.id === id);
   if (!r) return Promise.resolve();
   if (r.detail && ["members", "pad-net", "area"].includes(r.detail.kind)) {
@@ -2239,7 +2317,10 @@ function goToObject(i) {
   });
 }
 function bindInventory() {
-  for (const b of document.querySelectorAll("#panel .inv-row[data-obj]")) b.onclick = () => goToObject(+b.dataset.obj);
+  for (const b of document.querySelectorAll("#panel .inv-row[data-obj]")) b.onclick = () => {
+    clearIdentityLink();
+    goToObject(+b.dataset.obj);
+  };
 }
 // ponytail: pages of 50 visible cards; search narrows the full embedded list.
 const CHANGE_PAGE_SIZE = 50, changePage = {key:'',index:0,ids:[]};
@@ -2554,6 +2635,133 @@ function renderThreads() {
     ${detached.length ? `<details class="threads-detached" open><summary>Detached (${detached.length})</summary>${detached.map(t => cardFor(t) + `<span class="thread-note">${esc(resolveAnchor(t.anchor).detached)}</span>`).join("")}</details>` : ""}`;
   return (S.threads ? discussions : "") + (issues.length ? `<details class="issues-group" open><summary>Issues (${issues.length})</summary>${issues.map(i => `<a class="thread-card" data-issue="${i.number}" href="${esc(i.url)}" target="_blank" rel="noopener">#${i.number} ${esc(i.title)} <span class="muted">${esc(i.anchor.ref || "point")}</span></a>`).join("")}</details>` : "");
 }
+function askKnown() {
+  const p = proj(), objects = p.objects || [], nets = p.ask?.nets || {};
+  return {ref: n => objects.some(o => o.ref === n || o.ref.startsWith(n + " unit ")),
+    net: n => ["base", "head"].some(side => Object.hasOwn(nets[side] || {}, n))};
+}
+async function askGo(kind, name, preferredSide = "head") {
+  const p = proj(), objects = p.objects || [];
+  if (kind === "net") {
+    // ponytail: unqualified citations prefer head; callers discussing base may pass preferredSide="base".
+    const order = [preferredSide, preferredSide === "head" ? "base" : "head"];
+    const side = order.find(side => Object.hasOwn(p.ask?.nets?.[side] || {}, name));
+    if (!side) return;
+    const geometry = p.board?.geometry?.[side];
+    let scene = null;
+    try { if (geometry) scene = await loadBoardScene(geometry); } catch { /* documented fallback below */ }
+    if (p !== proj()) return;
+    const net = scene?.nets.find(n => n.name === name);
+    const boxes = net ? scene.objects.filter(o => o.net === net.id).map(BoardDiff.objectBounds).filter(Boolean) : [];
+    if (boxes.length) {
+      S.s = null; S.io = null; S.v = "board"; S.m = "side"; S.layers = null;
+      S.revision = side; renderNav(); renderPanel(); await draw(); saveHash();
+      if (p !== proj()) return;
+      changeBoardAppearance({selectedNet: name, activeLayer: null, layers: Object.fromEntries(scene.layers.filter(l=>l.enabled).map(l=>[l.name,{visible:true}]))});
+      zoomTo([Math.min(...boxes.map(b=>b[0])),Math.min(...boxes.map(b=>b[1])),Math.max(...boxes.map(b=>b[2])),Math.max(...boxes.map(b=>b[3]))]);
+      ASK.status = "Net " + name + " highlighted on " + side; askRefresh(); saveHash(); return;
+    }
+    ASK.status = "Board geometry unavailable for " + name + " (" + side + "); showing a connected part instead, not a net highlight.";
+    const ref = p.ask.nets[side][name].fallback_ref;
+    const i = objects.findIndex(o => (o.ref === ref || o.ref.startsWith(ref + " unit ")) && (!o.side || o.side === side));
+    // ponytail: desktop goToObject does not write S.revision; spec and plan-context.md:59 mandate revision-aware navigation.
+    S.revision = side;
+    if (i >= 0) await goToObject(i); else { await draw(); saveHash(); }
+    askRefresh(); return;
+  }
+  const match = o => o.ref === name || o.ref.startsWith(name + " unit ");
+  const symbol = objects.findIndex(o => match(o) && o.kind === "symbol");
+  const i = symbol >= 0 ? symbol : objects.findIndex(match);
+  if (i >= 0) await goToObject(i); // Desktop object navigation preserves the object's revision before drawing.
+}
+// A comparison report falls back to Changes; a single-design page (06's body.design-single) has no Changes tab, so it falls back to Checks.
+const fallbackTab = () => document.body.classList.contains("design-single") ? "checks" : "changes";
+// Shared focus: askGo keeps its own entry point for Ask links, and 10's focusIdentity (spec 10, Task 13) implements the same whole-net highlight from project.identity. Whichever of 09 or 10 merges second consumes the other's function; the symbol fallback above is never presented as a whole-net highlight.
+
+function askReset() { if (ASK.project !== proj().dir) Object.assign(ASK, { project: proj().dir, insight: null, insightId: null, asked: false, insightError: "", log: [], busy: false, current: null, status: "", draft: "", remaining: null }); }
+function renderAsk() {
+  askReset();
+  if (!ASK.insight && !ASK.insightError && ASK.ready && !ASK.asked) { ASK.asked = true; ASK.insightId = "insight:" + encodeURIComponent(ASK.project) + ":" + (++askSeq); parent.postMessage({ kicadReviewAskInsight: { id: ASK.insightId, project: ASK.project } }, "*"); }
+  return `<div class="ask" id="ask-root">
+    <p class="ask-notice" role="note">Your questions and this design's contents (parts, nets, check results and changes) are sent to Anthropic's Claude API to answer. The repository owner turned this on.</p>
+    <div id="ask-top">${askTop()}</div>
+    <ol id="ask-log" class="ask-log" aria-live="polite" aria-label="Conversation">${askLog()}</ol>
+    <form class="ask-form" id="ask-form"><label class="ask-label" for="ask-input">Ask about this board</label>
+      <textarea id="ask-input" rows="2" maxlength="4000" enterkeyhint="send" placeholder="Which GPIO drives the LED?">${esc(ASK.draft)}</textarea>
+      <div class="ask-row"><span class="muted" id="ask-meta">${askMeta()}</span><button type="submit" class="ask-send" ${ASK.busy ? "disabled" : ""}>${ASK.busy ? "Answering…" : "Ask"}</button></div></form></div>`;
+}
+const askMeta = () => esc(ASK.status || (ASK.remaining == null ? "Enter sends, Shift+Enter adds a line." : `${ASK.remaining} question${ASK.remaining === 1 ? "" : "s"} left today`));
+function askTop() {
+  if (ASK.insightError) return `<p class="ask-error" role="alert">${esc(ASK.insightError)}</p>`;
+  if (!ASK.insight) return '<p class="muted ask-summary">Reading the design…</p>';
+  const q = ASK.insight.questions.map(t => `<button type="button" class="ask-chip" data-ask-q="${esc(t)}">${esc(t)}</button>`).join("");
+  return `<section class="ask-summary"><p>${esc(ASK.insight.summary)}</p><button type="button" class="ask-chip" data-ask-more>Tell me more</button></section>${q ? `<p class="ask-h">Try asking</p><div class="ask-try">${q}</div>` : ""}`;
+}
+function askLog() {
+  const known = askKnown();
+  return ASK.log.map((m, i) => m.role === "user" ? `<li class="ask-msg user"><span class="ask-who">You</span>${esc(m.text)}</li>`
+    : `<li class="ask-msg assistant"><span class="ask-who">Claude</span>${m.error ? `<p class="ask-error" role="alert">${esc(m.error)}</p>` : KrAsk.render(m.text, known) || `<p class="muted">${esc(ASK.status || "Thinking…")}</p>`}
+    ${m.followups?.length && i === ASK.log.length - 1 && !ASK.busy ? `<div class="ask-try">${m.followups.map(t => `<button type="button" class="ask-chip" data-ask-q="${esc(t)}">${esc(t)}</button>`).join("")}</div>` : ""}</li>`).join("");
+}
+function askRefresh() {
+  if (rightTab !== "ask" || ASK.project !== proj().dir) return;
+  const top = $("#ask-top"), log = $("#ask-log"), meta = $("#ask-meta"), send = $("#ask-form .ask-send");
+  if (!top || !log) return renderPanel();
+  const scroller = $("#panel-body");
+  const atEnd = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 40;
+  top.innerHTML = askTop(); log.innerHTML = askLog(); meta.innerHTML = askMeta(); send.disabled = ASK.busy; send.textContent = ASK.busy ? "Answering…" : "Ask";
+  if (atEnd) scroller.scrollTop = scroller.scrollHeight;
+}
+// Suggestion clicks intentionally replace/clear any existing draft, exactly like submitting the form.
+function askSend(text) {
+  askReset();
+  text = String(text || "").trim().slice(0, 4000);
+  if (!text || ASK.busy || !ASK.ready) return;
+  const messages = [];
+  for (let i = 0; i + 1 < ASK.log.length; i += 2) if (ASK.log[i + 1].text && !ASK.log[i + 1].error) messages.push({ role: "user", text: ASK.log[i].text }, { role: "assistant", text: ASK.log[i + 1].text });
+  messages.push({ role: "user", text });
+  ASK.log.push({ role: "user", text }, { role: "assistant", text: "" });
+  ASK.busy = true; ASK.status = ""; ASK.current = "q" + (++askSeq); ASK.draft = "";
+  let outgoing = messages.slice(-20);
+  while (outgoing.length && outgoing[0].role !== "user") outgoing.shift();
+  parent.postMessage({ kicadReviewAskQuestion: { id: ASK.current, project: proj().dir, messages: outgoing } }, "*");
+  const input = $("#ask-input"); if (input) input.value = "";
+  askRefresh();
+}
+function askEvent({ id, event, data }) {
+  // String(q) === q: primitive strings only.
+  const text = q => String(q) === q && !!q.trim();
+  const str = (v, n) => String(v ?? "").slice(0, n), list = v => (Array.isArray(v) ? v : []).filter(text).slice(0, 3).map(q => q.slice(0, 200));
+  if (ASK.project !== proj().dir) return;
+  if (id === ASK.insightId) {
+    if (event === "insight" && text(data?.summary) && Array.isArray(data.questions) && data.questions.filter(text).length === 3) ASK.insight = { summary: str(data.summary.trim(), 1500), questions: data.questions.filter(text).map(q => str(q.trim(), 200)).slice(0, 3) };
+    else if (event === "insight" || event === "error") ASK.insightError = str(data?.message, 300) || "The summary or its three suggested questions could not be loaded.";
+  } else if (id === ASK.current) {
+    const m = ASK.log.at(-1);
+    if (event === "start") ASK.remaining = Number.isFinite(data?.remaining) ? data.remaining : null;
+    else if (event === "status") ASK.status = str(data?.text, 100);
+    // Match site/ask.js LIMITS.message: cap the whole accumulated answer, not just each delta.
+    // ponytail: retain only the first 16,000 characters for display/history; longer provider output is truncated.
+    else if (event === "answer_delta") m.text = (m.text + str(data?.text, 16000)).slice(0, 16000);
+    else if (event === "answer") { m.text = str(data?.text, 16000); m.complete = true; }
+    else if (event === "followups") m.followups = list(data?.questions);
+    else if (event === "error") { m.complete = false; m.error = str(data?.message, 300) || "Ask failed."; ASK.busy = false; }
+    else if (event === "done") { ASK.busy = false; ASK.status = ""; }
+  }
+  askRefresh();
+}
+function askBind() {
+  const root = $("#ask-root"), input = $("#ask-input");
+  root.onclick = e => {
+    const link = e.target.closest("[data-ask-ref], [data-ask-net]"), chip = e.target.closest("[data-ask-q]");
+    if (link) askGo(link.hasAttribute("data-ask-net") ? "net" : "ref", link.dataset.askNet ?? link.dataset.askRef);
+    else if (chip) askSend(chip.dataset.askQ);
+    else if (e.target.closest("[data-ask-more]") && ASK.insight) askSend(`Tell me more about this, from the summary shown above:\n\n"${ASK.insight.summary}"`);
+  };
+  input.oninput = () => { ASK.draft = input.value; };
+  input.onkeydown = e => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); askSend(input.value); } };
+  $("#ask-form").onsubmit = e => { e.preventDefault(); askSend(input.value); };
+}
 function libInfoHtml(c) {
   return `<div class="lib-info"><p><b>${esc(c.lib)}:${esc(c.item)}</b> · ${esc(c.kind)} · ${esc(c.status)}${c.note ? ` · ${esc(c.note)}` : ""}</p>
     ${c.warnings.map(w => `<p class="lib-warn">${esc(w)}</p>`).join("")}
@@ -2587,17 +2795,19 @@ function renderPanel() {
   if (S.t === "parts" && !p.parts) S.t = fallback;
   if (S.t === "appearance" && leftTab !== "appearance") renderNav();
   if (S.t === "threads" && !S.threads && !S.issues) { S.wantThreads = true; S.t = fallback; }
+  if (S.t === "ask" && !(ASK.on && ASK.ready)) S.t = fallback;
   if (S.t !== "appearance") rightTab = S.t;
   if (rightTab === "parts" && !p.parts || rightTab === "threads" && !S.threads && !S.issues) rightTab = fallback;
+  if (rightTab === "ask" && !(ASK.on && ASK.ready)) rightTab = fallback;
   const panelTab = rightTab;
   const kinds = [...new Set(p.changes.map(r => r.kind))];
   const c = { added: 0, removed: 0, modified: 0 }; p.changes.forEach(r => c[r.action]++);
-  const tab = (name, label, enabled, extra = "") => `<button type="button" role="tab" id="tab-${name}" data-tab="${name}" aria-controls="panel-body" aria-selected="${panelTab === name}" ${enabled ? "" : `disabled title="${name === "parts" ? "Parts data was not included in this report" : "Threads require the connected review site"}"`}>${label}${extra}</button>`;
+  const tab = (name, label, enabled, extra = "") => `<button type="button" role="tab" id="tab-${name}" data-tab="${name}" aria-controls="panel-body" aria-selected="${panelTab === name}" ${enabled ? "" : `disabled title="${name === "ask" ? "Ask needs the connected review site and [ask] enabled in kicad-review.toml" : name === "parts" ? "Parts data was not included in this report" : "Threads require the connected review site"}"`}>${label}${extra}</button>`;
   const partsExtra = p.parts ? ` ${p.parts.lines.length}${partsProblemCount(p.parts) ? ` · ${partsProblemCount(p.parts)} ⚠` : ""}` : "";
   const threadsExtra = S.threads || S.issues ? ` ${(S.threads || []).filter(t => !t.resolved && t.anchor.project === p.dir).length}` : "";
   const summary = electricalSummaryHtml();
-  $("#panel").innerHTML = `<div class="dock-actions"><span>REVIEW</span><button type="button" data-panel-wide title="${S.panelWide ? "Narrow the dock to 360 px" : "Widen the dock to 700 px"}" aria-pressed="${!!S.panelWide}">${tbIcon("expand")}<span>${S.panelWide ? "Narrow" : "Widen"}</span></button>${["parts", "checks"].includes(panelTab) ? `<button type="button" data-panel-table aria-pressed="${!!S.panelTable}" title="Full-width table view">${S.panelTable ? "Close table" : "Table view"}</button>` : ""}<button type="button" data-panel-close aria-label="Collapse right dock" title="Collapse right dock">×</button></div><div id="panel-tabs" role="tablist" aria-label="Inspector">${single() ? "" : tab("changes", "Changes", true, ` ${p.changes.length}`)}${tab("checks", "Checks", true)}${tab("parts", "Parts", !!p.parts, partsExtra)}${single() ? "" : tab("threads", "Threads", !!(S.threads || S.issues), threadsExtra)}</div><div id="panel-body" role="tabpanel" aria-labelledby="tab-${panelTab}">` +
-    (panelTab === "threads" ? renderThreads() : panelTab === "parts" ? renderParts() : panelTab === "checks" ? renderChecks() : `
+  $("#panel").innerHTML = `<div class="dock-actions"><span>REVIEW</span><button type="button" data-panel-wide title="${S.panelWide ? "Narrow the dock to 360 px" : "Widen the dock to 700 px"}" aria-pressed="${!!S.panelWide}">${tbIcon("expand")}<span>${S.panelWide ? "Narrow" : "Widen"}</span></button>${["parts", "checks"].includes(panelTab) ? `<button type="button" data-panel-table aria-pressed="${!!S.panelTable}" title="Full-width table view">${S.panelTable ? "Close table" : "Table view"}</button>` : ""}<button type="button" data-panel-close aria-label="Collapse right dock" title="Collapse right dock">×</button></div><div id="panel-tabs" role="tablist" aria-label="Inspector">${single() ? "" : tab("changes", "Changes", true, ` ${p.changes.length}`)}${tab("checks", "Checks", true)}${tab("parts", "Parts", !!p.parts, partsExtra)}${single() ? "" : tab("threads", "Threads", !!(S.threads || S.issues), threadsExtra)}${ASK.on ? tab("ask", "Ask", ASK.ready) : ""}</div><div id="panel-body" role="tabpanel" aria-labelledby="tab-${panelTab}">` +
+    (panelTab === "ask" ? renderAsk() : panelTab === "threads" ? renderThreads() : panelTab === "parts" ? renderParts() : panelTab === "checks" ? renderChecks() : `
     ${String(S.v).startsWith("lib:") && p.libraries?.[+S.v.slice(4)] ? libInfoHtml(p.libraries[+S.v.slice(4)]) : ""}
     ${dockListTools("changes", f)}
     ${p.objects ? `<div class="filters inv-toggle"><button class="check-chip" data-inv="0" aria-pressed="${!f.all}">Changes</button><button class="check-chip" data-inv="1" aria-pressed="${f.all}">All parts ${p.objects.length}</button></div>` : ""}
@@ -2606,6 +2816,7 @@ function renderPanel() {
       <select class="kind"><option value="">All kinds</option>${kinds.map(k => `<option ${k === f.kind ? "selected" : ""}>${esc(k)}</option>`).join("")}</select></div>`}
     ${f.all ? "" : summary.top}<div class="cards">${f.all ? inventoryHtml() : cardsHtml()}</div>${f.all ? "" : summary.status}${summary.incomplete}${S.v === "3d" && p.board.no_model?.length ? `<details class="no-models" open><summary>Parts without a 3D model (${p.board.no_model.length})</summary>${p.board.no_model.map(x => `<button data-no-model="${esc(x.ref)}" data-no-model-side="${esc(x.side)}"><b>${esc(x.ref)}</b> <span class="muted">${{base: "Base · ", head: "Head · "}[x.side] || ""}${esc(x.reason)}</span></button>`).join("")}</details>` : ""}</div>`);
   bindRightDock();
+  if (panelTab === "ask") askBind();
   for (const input of document.querySelectorAll("#panel [data-list-search], #panel [data-list-sort], #panel [data-list-group]")) {
     const attribute = input.hasAttribute("data-list-search") ? "search" : input.hasAttribute("data-list-sort") ? "sort" : "group";
     const name = input.getAttribute(`data-list-${attribute}`), state = name === "checks" ? S.checks : name === "parts" ? S.partsFilter : S.filter;
@@ -2692,6 +2903,8 @@ function encodeState(s = S) {
   if (s.layers) q.set("l", s.layers.join(","));
   if (Array.isArray(s.camera3d)) q.set("c", s.camera3d.map(n => (+n.toFixed(1))).join(","));
   if (s.hidden3d?.length) q.set("h", s.hidden3d.join(","));
+  if (s.part) q.set('part', s.part);
+  if (s.net) q.set('net', s.net);
   if (s.assembled3d === false) q.set("asm", "0");
   if (s.lighting3d) { const l = window.Review3D?.normalizeLighting(s.lighting3d) ?? s.lighting3d; if (["rig", "bearing", "exposure"].some(key => l[key] !== window.ThreeStudio.PRESETS.bench[key])) q.set("lt", [l.rig, l.bearing, l.exposure].join(",")); }
   return q.toString().replace(/%2F/g, "/").replace(/%3A/g, ":").replace(/%2C/g, ",");

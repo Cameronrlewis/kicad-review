@@ -7,6 +7,7 @@ export { readStoredData } from './report-shell.js';
 import { deploymentPage, escapeHtml, sharedPage, sharedNotFoundPage, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, historyPage, stages, stageForStep, designMissingPage, projectsPage, designsPage } from './pages.js';
 
 import { threadsRoute, ghPages } from './threads.js';
+import { askRoute } from './ask.js';
 import { issuesRoute } from './issues.js';
 import { historyRoute } from './history.js';
 import { designName, designRoute, designReleaseRoute, projectsRoute, designsRoute, renderRoute, thumbnailsFor, designQuery } from './design.js';
@@ -406,11 +407,12 @@ function assetFromData(data, id, kind, matched = false) {
 // head_sha, except a manual (workflow_dispatch) run, which reviews a head given by hand. The legacy
 // kicad-review.html name carries no head, so only its run provenance is checked. Verified runs are
 // memoized per artifact in the isolate cache to avoid repeated GitHub run lookups on asset requests.
-async function reportArtifact(owner, repo, id, active, repository) {
+// `options` serves the design-data loaders (Ask, MCP): their GitHub fetcher, and the metadata response on failure.
+async function reportArtifact(owner, repo, id, active, repository, { ghFn = gh, onFailure = () => null } = {}) {
   const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions`;
   const base = `${root}/artifacts/${id}`;
-  const result = await gh(base, active.token);
-  if (result.status !== 200) return null;
+  const result = await ghFn(base, active.token);
+  if (result.status !== 200) return onFailure(result);
   const metadata = await result.json();
   const name = String(metadata.name || '');
   const head7 = artifactName.exec(name)?.[2] ?? /^kicad-design-([0-9a-f]{7})\.html$/.exec(name)?.[1];
@@ -426,13 +428,18 @@ async function reportArtifact(owner, repo, id, active, repository) {
   const cachedRun = key ? reportCache.entries.get(key)?.run : null;
   let run = cachedRun;
   if (!run) {
-    const runResponse = await gh(`${root}/runs/${runId}`, active.token);
+    const runResponse = await ghFn(`${root}/runs/${runId}`, active.token);
     run = runResponse.ok ? await runResponse.json() : null;
   }
   if (run?.path !== `.github/workflows/${workflowFile}` || run.repository?.id !== repository.id
     || (head7 && run.event !== 'workflow_dispatch' && !(/^[0-9a-f]{40}$/.test(run.head_sha) && run.head_sha.startsWith(head7)))) return null;
   return { base, metadata, run, expired: false };
 }
+
+// Ask's and MCP's design-data loader gets the same report-family provenance check as the report routes.
+// A metadata failure is returned as { failed: response } so the loader can keep its kind (rate limit, outage).
+export const verifyReport = (owner, repo, id, token, repository, ghFn = gh) =>
+  reportArtifact(owner, repo, id, { token }, repository, { ghFn, onFailure: (response) => ({ failed: response }) });
 
 async function storedReport(artifact, active) {
   const download = await gh(`${artifact.base}/zip`, active.token, { redirect: 'manual' });
@@ -621,6 +628,8 @@ async function artifactReport(request, env, owner, repo, id, active, raw, canSha
       return sessionResponse(reviewPage({
         user: active.login, owner, repo, id, name: metadata.name, workflowRunId: runId, pdf: query.get('pdf') === '1', pull, runStatus, runConclusion, share: sharing,
         ...designQuery(query),
+        ask: Boolean(env.ANTHROPIC_API_KEY && env.ASK_KV),
+        mcpOrigin: env.OAUTH_KV ? new URL(request.url).origin : null,
       }), { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': frameCsp } }, active);
     }
     if (request.headers.get('Sec-Fetch-Dest') === 'document') return sessionRedirect(`${repoPath(owner, repo)}/a/${encodeURIComponent(id)}`, 302, active);
@@ -1053,6 +1062,11 @@ const routes = {
       if (request.method === 'GET' && assetRoute) {
         const [, owner, repo, id, digest, kind] = assetRoute;
         return await digestAsset(request, env, owner, repo, id, digest, kind);
+      }
+      const askMatch = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/(\d{1,20})\/ask(\/insight)?$/);
+      if (request.method === 'POST' && askMatch) {
+        const result = await askRoute(request, env, { owner: askMatch[1], repo: askMatch[2], id: askMatch[3], rest: askMatch[4] || '' }, { access, gh, verifyReport });
+        return response(result.body, { status: result.status, headers: result.headers });
       }
       const modelRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/(\d{1,20})\/3d\/([^/]+)\/([^/]+)$/);
       if (request.method === 'GET' && modelRoute) {

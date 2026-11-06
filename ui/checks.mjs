@@ -204,6 +204,25 @@ const gestureLifecycleCheck=['images gesture lifecycle','',`
   return true;
 `];
 
+// Ask about this design: a two-revision object/net fixture, then the wrapper handshake and the enabled tab click.
+const askOpen = `
+  const p = proj();
+  p.objects = [{ref:'R16',kind:'symbol',sheet:'/',pos:[10,10,0],uuid:'u16'},{ref:'U1',kind:'symbol',sheet:'/',pos:[30,30,0],uuid:'u1'}];
+  p.ask = { nets: {head:{'/SW_DOWN':{fallback_ref:'R16'},'12':{fallback_ref:'U1'}},base:{REMOVED:{fallback_ref:'R16'}}} };
+  ASK.on = true; ASK.ready = false; ASK.log = []; ASK.insight = null; ASK.project = null; ASK.asked = null; ASK.busy = false;
+  S.t = 'ask'; renderPanel();
+  if (S.t !== 'changes' || !document.querySelector('#panel-tabs [data-tab=ask]')?.disabled) return 'unready Ask must fall back to Changes with a disabled tab';
+  const wrapper = (id, event, data) => window.postMessage({ kicadReviewAskEvent: { id, event, data } }, '*');
+  const settle = () => new Promise(r => setTimeout(r, 60));
+  if (!handleParentMessage({source:parent,data:{kicadReviewAskReady:true}}, false, false, true)) return 'ready message not accepted';
+  await settle();
+  if (S.t !== 'changes' || document.querySelector('#panel-tabs [data-tab=ask]')?.disabled) return 'ready handshake must enable Ask without selecting it';
+  document.querySelector('#panel-tabs [data-tab=ask]').click();
+  if (S.t !== 'ask' || !document.querySelector('#ask-input')) return 'enabled Ask tab click did not render the input';
+  if (!document.querySelector('#panel').classList.contains('dock-open') && innerWidth < 900) document.querySelector('[data-dock=panel]').click();
+  const visibleAsk = document.querySelector('#ask-root')?.getBoundingClientRect();
+  if (!visibleAsk || visibleAsk.width <= 0 || visibleAsk.height <= 0) return 'Ask is not visibly open';`;
+
 export const CHECKS = [
 ["BR02 processed unchanged focus and missing batch", "v=3d&m=side", `
  if(!proj().board.parts3d)return 'skip';
@@ -6556,6 +6575,208 @@ return true;
     if(JSON.stringify(actual)!==JSON.stringify(expected))throw Error('reload lost per-viewer opacity/colour'+(()=>{try{const s=localStorage.getItem('kr.appearance.v1');return ' storage '+(s?s.length:'none')+' viewers '+(s?Object.keys(JSON.parse(s).viewers||{}).join('|').slice(0,300):'')+' total '+Object.keys(localStorage).reduce((n,k)=>n+(localStorage.getItem(k)||'').length,0)+' path '+location.pathname}catch(e){return ' storage error '+e.message}})());
     console.log('BOARD_PROOF '+JSON.stringify({task:'vf-opacity',reload:true,opacity:actual.layerOpacity['In2.Cu'],color:actual.layers['In2.Cu'].color}));return true;
   `}],
+  // Ask about this design (09). Every name starts with "Ask" so the CI filter "Ask" selects them.
+  ["Ask tab is absent offline and disabled until connected", "", `
+    ASK.on = true; ASK.ready = false; S.t = 'changes'; renderPanel();
+    const tab = document.querySelector('#panel-tabs [data-tab="ask"]');
+    if (!tab) return 'no Ask tab';
+    if (!tab.disabled || !/connected review site/.test(tab.title)) return 'tab must be disabled with an explanation, got ' + tab.disabled + ' ' + tab.title;
+    ASK.on = false; renderPanel();
+    return !document.querySelector('#panel-tabs [data-tab="ask"]') || 'an offline report must not show an Ask tab';`],
+  ["Ask tab streams, links and greys out", "", askOpen + `
+    window.postMessage({ kicadReviewAskReady: true }, '*'); await settle();
+    const input = () => document.querySelector('#ask-input');
+    if (!input()) return 'panel not rendered';
+    wrapper(ASK.insightId, 'insight', { summary: 'A camera board.', questions: ['What powers it?', 'Which pin is SW_DOWN?', 'What changed?'], cached: false }); await settle();
+    const chips = [...document.querySelectorAll('#ask-top [data-ask-q]')];
+    if (chips.length !== 3 || !document.querySelector('[data-ask-more]')) return 'summary or questions missing';
+    chips[0].click(); await settle();
+    if (!ASK.busy || ASK.log.length !== 2 || !/What powers it/.test(ASK.log[0].text)) return 'chip did not send';
+    const id = ASK.current;
+    input().value = 'draft kept'; input().dispatchEvent(new Event('input')); input().focus(); input().setSelectionRange(3, 7);
+    wrapper(id, 'start', { remaining: 41, cached: true }); wrapper(id, 'answer_delta', { text: 'USB-C feeds [R16], not [R99] or [net:12] or [net:nope] ' });
+    await settle();
+    wrapper(id, 'answer_delta', { text: '<img src=x onerror=alert(1)> and **bold**.' }); wrapper(id, 'answer', { text: 'USB-C feeds [R16], not [R99] or [net:12] or [net:nope] <img src=x onerror=alert(1)> and **bold**.' });
+    wrapper(id, 'followups', { questions: ['Why?'] }); wrapper(id, 'done', {}); await settle();
+    const log = document.querySelector('#ask-log');
+    if (log.querySelector('img')) return 'HTML from the model was rendered';
+    if (!log.querySelector('button[data-ask-ref="R16"]') || !log.querySelector('button[data-ask-net="12"]')) return 'live links missing';
+    if (log.querySelectorAll('span.ask-link.missing').length !== 2) return 'unknown names must be greyed out: ' + log.innerHTML;
+    if (ASK.busy || !/41 questions left/.test(document.querySelector('#ask-meta').textContent)) return 'busy or remaining wrong';
+    if (input().value !== 'draft kept' || document.activeElement !== input() || input().selectionStart !== 3 || input().selectionEnd !== 7) return 'streaming must not touch draft, focus or selection';
+    if (!handleParentMessage({source:parent,data:{kicadReviewAskEvent:{id:ASK.current,event:'done',data:{}}}}, false, false, true)) return 'event message not accepted';
+    askSend('partial stream'); const droppedId=ASK.current;
+    wrapper(droppedId,'answer_delta',{text:'unfinished'}); wrapper(droppedId,'error',{message:'The answer ended before completion.'}); wrapper(droppedId,'done',{}); await settle();
+    return !ASK.busy && ASK.log.at(-1).error && !ASK.log.at(-1).complete || 'partial EOF left busy or looked complete';`],
+  ["Ask stays live beside the real left Appearance tab", "v=board", askOpen + `
+    document.querySelector('#left-tab-appearance').click(); await settle();
+    if (S.t !== 'appearance' || rightTab !== 'ask' || !document.querySelector('#ask-root')) return 'real Appearance tab did not retain Ask';
+    wrapper(ASK.insightId,'insight',{summary:'Appearance-side summary.',questions:['A?','B?','C?']}); await settle();
+    if (!document.querySelector('#ask-top').textContent.includes('Appearance-side summary.')) return 'summary stopped updating beside Appearance';
+    askSend('Answer beside Appearance'); await settle();
+    const id=ASK.current, send=()=>document.querySelector('#ask-form .ask-send');
+    if (!ASK.busy || !send().disabled || send().textContent !== 'Answering…') return 'send state stopped updating beside Appearance';
+    wrapper(id,'answer_delta',{text:'Live beside Appearance.'}); await settle();
+    if (!document.querySelector('#ask-log').textContent.includes('Live beside Appearance.')) return 'stream stopped updating beside Appearance';
+    wrapper(id,'answer',{text:'Completed beside Appearance.'}); wrapper(id,'done',{}); await settle();
+    if (ASK.busy || send().disabled || !document.querySelector('#ask-log').textContent.includes('Completed beside Appearance.')) return 'completed answer or busy state stale beside Appearance';
+    askSend('Error beside Appearance');
+    wrapper(ASK.current,'error',{message:'Visible Appearance-side error.'}); await settle();
+    const log=document.querySelector('#ask-log').getBoundingClientRect();
+    return S.t==='appearance' && rightTab==='ask' && log.width>0 && log.height>0 && !ASK.busy && !send().disabled && document.querySelector('#ask-log .ask-error')?.textContent==='Visible Appearance-side error.' || 'error or visible busy state stale beside Appearance';`],
+  ["Ask sends only the last 20 messages including the current question", "", askOpen + `
+    ASK.log=Array.from({length:28},(_,i)=>({role:i%2?'assistant':'user',text:'history '+i,complete:i%2===1}));
+    const sent=[], capture=e=>{if(e.source===parent && e.data?.kicadReviewAskQuestion) sent.push(e.data.kicadReviewAskQuestion);};
+    addEventListener('message',capture);
+    try {
+      askSend('Current question retained'); await settle();
+      const q=sent[0];
+      if (sent.length!==1 || q.project!==proj().dir || q.messages.length!==19) return 'client must trim history to at most 20 messages leading with a user turn';
+      return q.messages[0].role==='user' && q.messages[0].text==='history 10' && q.messages.at(-1).role==='user' && q.messages.at(-1).text==='Current question retained' || 'transport lost the latest history window or current question';
+    } finally { removeEventListener('message',capture); }`],
+  ["Ask bounds streamed and completed history before the next question", "", askOpen + `
+    askSend('A long answer'); const first=ASK.current;
+    wrapper(first,'answer_delta',{text:'a'.repeat(9000)}); wrapper(first,'answer_delta',{text:'b'.repeat(9000)}); await settle();
+    if (ASK.log.at(-1).text.length!==16000) return 'cumulative streaming answer must stop at LIMITS.message=16000';
+    wrapper(first,'answer',{text:'c'.repeat(20000)}); wrapper(first,'done',{}); await settle();
+    if (ASK.log.at(-1).text.length!==16000 || ASK.busy) return 'completed answer must fit the next request history';
+    const sent=[], capture=e=>{if(e.source===parent && e.data?.kicadReviewAskQuestion) sent.push(e.data.kicadReviewAskQuestion);};
+    addEventListener('message',capture);
+    try {
+      askSend('A question after the long answer'); await settle();
+      const q=sent[0], history=q?.messages.find(m=>m.role==='assistant');
+      if (!q || !history || history.text!=='c'.repeat(16000) || q.messages.some(m=>m.text.length>16000) || q.messages.at(-1).text!=='A question after the long answer') return 'oversized answer poisoned outgoing history';
+      wrapper(q.id,'answer',{text:'Next question succeeded.'}); wrapper(q.id,'done',{}); await settle();
+      return !ASK.busy && !ASK.log.at(-1).error && document.querySelector('#ask-log').textContent.includes('Next question succeeded.') || 'next question did not complete';
+    } finally { removeEventListener('message',capture); }`],
+  ["Ask project summaries ignore out-of-order replies", "", askOpen + `
+    const firstProject=ASK.project, firstId=ASK.insightId, original=S.p;
+    const second=structuredClone(proj()); second.dir='Ask-second-project'; second.name='Ask second'; D.projects.push(second);
+    S.p=D.projects.length-1; renderPanel(); const secondId=ASK.insightId;
+    if(!secondId || secondId===firstId) return 'summary request not reset';
+    wrapper(firstId,'insight',{summary:'STALE',questions:['A?','B?','C?']}); await settle();
+    if(ASK.insight) return 'stale project reply accepted';
+    wrapper(secondId,'insight',{summary:'SECOND',questions:['A?','B?','C?']}); await settle();
+    if(ASK.insight?.summary!=='SECOND') return 'current project reply lost';
+    S.p=original; renderPanel(); const thirdId=ASK.insightId;
+    wrapper(secondId,'insight',{summary:'STALE SECOND',questions:['A?','B?','C?']}); await settle();
+    return ASK.project===firstProject && thirdId!==firstId && !ASK.insight || 'returning project reused stale summary';`],
+  ["Ask rejects incomplete insight payloads and follows only the actual dock scroller", "", askOpen + `
+    window.postMessage({ kicadReviewAskReady: true }, '*'); await settle();
+    const id=ASK.insightId, root=document.querySelector('#panel-body');
+    for (const payload of [
+      {summary:'',questions:['A?','B?','C?']},
+      {summary:'A board.',questions:[]},
+      {summary:'A board.'},
+      {summary:'A board.',questions:['A?',null,'C?']},
+      {summary:'A board.',questions:['A?','B?']}
+    ]) {
+      wrapper(id,'insight',payload); await settle();
+      if (!ASK.insightError || ASK.insight || !document.querySelector('#ask-top .ask-error')) return 'incomplete insight was displayed as success';
+      ASK.insightError='';
+    }
+    wrapper(id,'insight',{summary:'A camera board.',questions:['A?','B?','C?']}); await settle();
+    ASK.log=Array.from({length:24},(_,i)=>({role:i%2?'assistant':'user',text:('conversation '+i+' ').repeat(45),followups:[]}));
+    askRefresh(); await settle();
+    if (root.scrollHeight <= root.clientHeight) return 'conversation did not overflow #panel-body';
+    root.scrollTop=root.scrollHeight; askRefresh(); await settle();
+    if (root.scrollHeight-root.scrollTop-root.clientHeight >= 40) return 'reader at bottom was not followed';
+    root.scrollTop=80; const before=root.scrollTop;
+    ASK.log.push({role:'assistant',text:'new streamed text '.repeat(80)}); askRefresh(); await settle();
+    return Math.abs(root.scrollTop-before)<2 || 'reader position moved while scrolled up';`],
+  ["Ask whole screen: no overflow, readable in both themes", "", askOpen + `
+    window.postMessage({ kicadReviewAskReady: true }, '*'); await settle();
+    wrapper(ASK.insightId, 'insight', { summary: 'A camera board with a USB-C input, an ESP32-S3 module and a TFT display on SPI.', questions: ['What powers it?', 'Which pin drives the LED?', 'What protects USB VBUS?'] }); await settle();
+    ASK.log.push({ role:'user', text:'What is on net 12?' }, { role:'assistant', text:'Net [net:12] joins [R16] and [R99].', followups:[] }); askRefresh(); await settle();
+    const root = document.querySelector('#ask-root'), panel = document.querySelector('#panel');
+    if (document.documentElement.scrollWidth > innerWidth) return 'page scrolls sideways at ' + innerWidth;
+    if ([root, document.querySelector('#ask-input'), document.querySelector('.ask-send')].some(el=>!el || el.getBoundingClientRect().width<=0 || el.getBoundingClientRect().height<=0)) return 'Ask controls hidden or zero-sized';
+    if (root.scrollWidth > panel.clientWidth + 1) return 'Ask panel overflows its dock';
+    const rgba = color => { const a=color.match(/[\\d.]+/g).map(Number); return [a[0],a[1],a[2],a[3]??1]; };
+    const over = (a,b) => {const alpha=a[3]+b[3]*(1-a[3]); return [...a.slice(0,3).map((v,i)=>(v*a[3]+b[i]*b[3]*(1-a[3]))/(alpha||1)),alpha];};
+    const background = el => {const chain=[]; for(let n=el;n;n=n.parentElement) chain.unshift(n); return chain.reduce((bg,n)=>over(rgba(getComputedStyle(n).backgroundColor),bg),[255,255,255,1]);};
+    const textBackground = el => over(rgba(getComputedStyle(el).backgroundColor), background(el.parentElement || el));
+    const lum = c => {const a=c.slice(0,3).map(v=>{v/=255;return v<=.04045?v/12.92:((v+.055)/1.055)**2.4;}); return .2126*a[0]+.7152*a[1]+.0722*a[2];};
+    const contrast = el => {const bg=textBackground(el), fg=over(rgba(getComputedStyle(el).color),bg), a=lum(fg),b=lum(bg);return (Math.max(a,b)+.05)/(Math.min(a,b)+.05);};
+    const probe=document.createElement('span'); probe.style.cssText='background:rgb(255,255,255);color:rgb(0,0,0)';root.append(probe);
+    if(Math.abs(contrast(probe)-21)>.01) return 'contrast passing fixture wrong';
+    probe.style.color='rgb(200,200,200)';if(contrast(probe)>=4.5)return 'contrast failing fixture wrong';
+    probe.style.cssText='background:rgb(255,255,255);color:rgb(0,0,0)';
+    const alphaProbe=document.createElement('span');alphaProbe.style.cssText='background:rgba(0,0,0,.5);color:rgba(255,255,255,.8)';probe.append(alphaProbe);
+    const expectedAlpha=(lum([229.5,229.5,229.5])+.05)/(lum([127.5,127.5,127.5])+.05);
+    if(background(alphaProbe).slice(0,3).some(v=>Math.abs(v-127.5)>.01)||Math.abs(contrast(alphaProbe)-expectedAlpha)>.01)return 'alpha background or foreground not composited';probe.remove();
+    const missing = document.querySelector('span.ask-link.missing'), live = document.querySelector('button.ask-link');
+    if(!missing || !live) return 'contrast chips missing';
+    const low = [...document.querySelectorAll('.ask-notice,.ask-summary p,.ask-chip,.ask-label,.ask-who,.ask-link,#ask-meta,#ask-input')].map(el=>[el.className || el.id,el]).filter(([,el])=>contrast(el)<4.5);
+    if (low.length) return 'low contrast in ' + KRTheme.get() + ': ' + low.map(l => l[0]).join(',');
+    for (const b of document.querySelectorAll('#panel-tabs [role=tab]')) { const r = b.getBoundingClientRect(); if (r.width && (r.right > innerWidth + 1 || r.left < -1)) return 'tab clipped: ' + b.textContent; }
+    return true;`],
+  ["BR09 fixture net links select and frame exact board nets on both revisions", "v=board", askOpen + `
+    if (!proj().board?.geometry?.head) return 'skip';
+    const scene=await loadBoardScene(proj().board.geometry.head);
+    if (!scene.nets.some(n=>n.name==='12')) return 'skip';
+    await askGo('net','12');
+    boardDiff?.render();
+    if(S.v!=='board'||Appearance.get().selectedNet!=='12'||!boardView.useGL||boardView.renderers.some(r=>r.appearance.selectedNet!=='12'))return 'net not highlighted in shipped board';
+    const boxes=scene.objects.filter(o=>o.net===scene.nets.find(n=>n.name==='12').id).map(BoardDiff.objectBounds).filter(Boolean);
+    const box=[Math.min(...boxes.map(b=>b[0])),Math.min(...boxes.map(b=>b[1])),Math.max(...boxes.map(b=>b[2])),Math.max(...boxes.map(b=>b[3]))];
+    if(Math.abs(S.x-(box[0]+box[2])/2)>.1||Math.abs(S.y-(box[1]+box[3])/2)>.1) return 'net bounds not framed';
+    await askGo('net','REMOVED','base');
+    boardDiff?.render();
+    if(S.revision!=='base') return 'base-only net left the revision on '+S.revision;
+    if(Appearance.get().selectedNet!=='REMOVED' || !/base/.test(ASK.status) || boardView.renderers.some(r=>r.appearance.selectedNet!=='REMOVED')) return 'base-only net did not resolve';
+    const geometry=proj().board.geometry;delete proj().board.geometry;
+    await askGo('net','12');proj().board.geometry=geometry;
+    return /not a net highlight/.test(ASK.status) || 'missing-geometry fallback not disclosed';`],
+  ["Ask base-only net link switches the revision (run at desktop widths)", "v=board", askOpen + `
+    await askGo('net','REMOVED','base');
+    return S.revision === 'base' || 'base-only net link left the revision on ' + S.revision;`],
+  ["Ask unavailable selected side: fallback is disclosed", "v=board", askOpen + `
+    const geometry = proj().board.geometry; delete proj().board.geometry;
+    try {
+      await askGo('net', '12', 'head');
+      if (!/not a net highlight/.test(ASK.status)) return 'unavailable side not disclosed: ' + ASK.status;
+      if (S.revision !== 'head') return 'fallback left the revision on ' + S.revision;
+    } finally { proj().board.geometry = geometry; }
+    return true;`],
+  ["Ask single design: an unready Ask falls back to Checks, never a hidden Changes tab", "v=board", askOpen + `
+    // ponytail: askOpen leaves Ask ready; drop readiness so the unready fallback under test applies.
+    document.body.classList.add('design-single'); ASK.ready = false;
+    S.t = 'ask'; renderPanel();
+    const landed = S.t;
+    document.body.classList.remove('design-single');
+    return landed === 'checks' || 'single design fell back to ' + landed;`],
+  ...['top','flipped'].map(view => ["BR09 fixture keeps the 4-layer board in KiCad order with the tab open: " + view, "v=board", askOpen + `
+    const scene=await loadBoardScene(proj().board?.geometry?.head);
+    if(!scene?.copperStack || scene.copperStack.length!==4) return 'skip';
+    Object.assign(S,{v:'board',m:'side',layers:null,x:10,y:5,z:20}); await draw();
+    const names=['F.Cu','In1.Cu','In2.Cu','B.Cu'];
+    const baseLayers=()=>Object.fromEntries(names.map(n=>[n,{visible:true,opacity:1}]));
+    const close=(p,c)=>p.slice(0,3).every((v,i)=>Math.abs(v-c[i])<=2);
+    // Sample the shipped compositor, not renderer.draw(): in Side mode its last scene can be null on the Base pane.
+    const pixel=(index,x=10)=>{boardDiff.render();const q=boardView.panes[index].renderer.worldToScreen([x,5]);return Array.from(boardDiff.readPixel(index,q[0],q[1]));};
+    const order=${JSON.stringify(view==='flipped'?['B.Cu','In2.Cu','In1.Cu','F.Cu']:['F.Cu','In1.Cu','In2.Cu','B.Cu'])};
+    Appearance.reset();
+    changeBoardAppearance({grid:{visible:false},contrast:'normal',colors:Object.fromEntries(names.map(n=>[KicadColors.layerThemeKeys[n],KicadColors.layers[n].map((v,i)=>i<3?v/255:v)]))});
+    if(!boardDiff || boardView.panes.length!==2 || boardView.panes.some(p=>p.canvas.getBoundingClientRect().width<=0)) return 'shipped comparison panes missing';
+    const metadata=proj().board.layers.map(l=>canon(l.name));
+    if(names.some(n=>!metadata.includes(n))) return 'fixture layer-eye metadata omits copper';
+    const layers=baseLayers();
+    changeBoardAppearance({layers,activeLayer:null,selectedNet:null,flip:${view==='flipped'}});
+    if(names.some(n=>!S.layers?.map(canon).includes(n) || glAppearance().layers[n]?.visible!==true)) return 'shipped layer filter hides fixture copper, including inner layers';
+    for(const expected of order){
+      changeBoardAppearance({layers,activeLayer:null,selectedNet:null,flip:${view==='flipped'}});
+      for(const [index] of boardView.panes.entries()) if(!close(pixel(index),KicadColors.layers[expected]))return 'physical order wrong at '+expected;
+      layers[expected]={visible:false,opacity:1};
+    }
+    // Same-layer duplicate primitives in the generated fixture overlap at x=10, not x=4.
+    // At half opacity both pixels must equal ONE blend of the layer, not 0.75 from per-path alpha.
+    changeBoardAppearance({layers:baseLayers(),activeLayer:null,selectedNet:null,flip:${view==='flipped'}});
+    const top=order[0],under=order[1];
+    changeBoardAppearance({layers:{[top]:{opacity:.5}}});
+    const blend=KicadColors.layers[top].slice(0,3).map((v,i)=>Math.round(.5*v+.5*KicadColors.layers[under][i]));
+    for(const [index] of boardView.panes.entries())for(const x of [4,10])if(!close(pixel(index,x),blend))return 'not whole-layer alpha at '+x;
+    return document.querySelector('#ask-root').getBoundingClientRect().width>0 || 'Ask hidden';`]),
 
 ];
 
@@ -7650,6 +7871,145 @@ CHECKS.push(['images asset timeout unavailable and retry complete-screen','',`
     delete cache[id];assetText=fail;await draw();
     return true;
   } finally {assetText=original;window.setTimeout=nativeTimeout;client.dispose();}
+`],
+["MCP schematic completed draw readiness", "", `
+  const sheet=proj().sheets[0];if(!sheet)return "no sheet in mandatory fixture";
+  const saved={...S},mode=S.m,render=MODES[S.m];let release,pending;
+  try {
+    S.v="sheet:"+sheet.path;await draw();
+    if(!schematicDrawReady(sheet.path))return "initial real sheet did not complete";
+    const old=document.querySelector('#stage'),previous=window.__requestedDrawGeneration;
+    const gate=new Promise(resolve=>{release=resolve;});
+    MODES[mode]=async(stage,view)=>{await gate;return render(stage,view);};
+    pending=draw();
+    const requested=JSON.parse(document.body.dataset.readyDraw||'null');
+    if(window.__requestedDrawGeneration!==previous+1||requested?.generation!==window.__requestedDrawGeneration||requested?.complete!==false)return "request did not invalidate matching generation";
+    if(!old.isConnected||!old.querySelector('.world svg path,.world svg circle,.world svg polygon,.world svg rect,.world svg line,.world svg text,.world img'))return "prior artwork not retained during delay";
+    if(schematicDrawReady(sheet.path))return "stale prior-stage artwork reported ready";
+    const empty=document.createElement('main');empty.id='stage';empty.innerHTML='<div class="world"></div>';
+    old.replaceWith(empty);
+    if(schematicDrawReady(sheet.path))return "empty world reported ready";
+    empty.replaceWith(old);release();await pending;pending=null;
+    const completed=JSON.parse(document.body.dataset.readyDraw||'null');
+    if(completed?.project!==S.p||completed?.sheet!==sheet.path||completed?.generation!==window.__requestedDrawGeneration||completed?.complete!==true)return "completion marker does not match request";
+    if(!schematicDrawReady(sheet.path))return "completed actual sheet not ready";
+    if(schematicDrawReady('/not-the-requested-sheet'))return "wrong sheet reported ready";
+    return true;
+  } finally {release?.();if(pending)await pending;MODES[mode]=render;Object.assign(S,saved);await draw();}
+`],
+["MCP unchanged identity links", "", `
+  const saved = {objects:proj().objects,identity:proj().identity}, savedState = {...S};
+  const sheet=proj().sheets[0];if(!sheet)return "skip";
+  const net="12 + & / # %";
+  try {
+    proj().objects=[
+      {uuid:"mcp-unchanged",ref:"U77",kind:"symbol",side:"head",sheet:sheet.path,pos:[20,20],box:[17,17,23,23]},
+      {uuid:"mcp-head-added",ref:"U88",kind:"symbol",side:"head",added:true,sheet:sheet.path,pos:[25,25],box:[22,22,28,28]},
+      {uuid:"mcp-base-only",ref:"R99",kind:"symbol",side:"base",sheet:sheet.path,pos:[30,30],box:[27,27,33,33]}
+    ];
+    proj().identity={
+      head:{nets:{[net]:{uuid:"mcp-unchanged",sheet:sheet.path}},complete:true},
+      base:{nets:{"BASE_NET":{uuid:"mcp-base-only",sheet:sheet.path}},complete:true}
+    };
+    await applyState(decodeState("#"+new URLSearchParams({p:String(S.p),part:"mcp-unchanged"})));
+    if(S.v!=="sheet:"+sheet.path||S.io!==0)return "unchanged UUID did not focus";
+    await applyState(decodeState("#"+new URLSearchParams({p:String(S.p),net})));
+    if(S.io!==0||decodeState("#"+encodeState()).net!==net)return "net identity did not round-trip";
+    await applyState(decodeState("#"+new URLSearchParams({p:String(S.p),part:"missing"})));
+    if(!document.querySelector("#statusbar .status-message")?.textContent.includes("not found"))return "missing identity was silent";
+
+    // Probes for revision=base resolution:
+    // 1. Unchanged-head fallback with !added
+    const baseUnchanged = resolveIdentity({part:"mcp-unchanged",revision:"base"}, proj());
+    if(baseUnchanged?.index!==0)return "revision=base did not resolve unchanged head object";
+    // 2. Head added object (!added is false) rejected on base
+    const headAddedOnBase = resolveIdentity({part:"mcp-head-added",revision:"base"}, proj());
+    if(!headAddedOnBase?.error?.includes("not found"))return "head added part matched revision=base";
+    // 3. Base-only removed object resolves on base, rejected on head
+    const baseOnlyOnBase = resolveIdentity({part:"mcp-base-only",revision:"base"}, proj());
+    if(baseOnlyOnBase?.index!==2)return "base-only object did not resolve on base";
+    const baseOnlyOnHead = resolveIdentity({part:"mcp-base-only",revision:"head"}, proj());
+    if(!baseOnlyOnHead?.error?.includes("not found"))return "base-only object resolved on head";
+    // 4. Base net lookup resolves on base, rejected on head
+    const baseNetRes = resolveIdentity({net:"BASE_NET",revision:"base"}, proj());
+    if(baseNetRes?.index!==2)return "base net did not resolve to base object";
+    const headNetRes = resolveIdentity({net:"BASE_NET",revision:"head"}, proj());
+    if(!headNetRes?.error?.includes("not found"))return "base net resolved on head";
+
+    // 5. Revision key round-trip with net and part
+    await applyState(decodeState("#"+new URLSearchParams({p:String(S.p),revision:"base",net:"BASE_NET"})));
+    if(S.revision!=="base"||S.net!=="BASE_NET"||S.io!==2)return "revision=base net did not focus base object";
+    if(decodeState("#"+encodeState()).revision!=="base"||decodeState("#"+encodeState()).net!=="BASE_NET")return "revision=base net did not round-trip";
+
+    await applyState(decodeState("#"+new URLSearchParams({p:String(S.p),revision:"base",part:"mcp-base-only"})));
+    if(S.revision!=="base"||S.part!=="mcp-base-only"||S.io!==2)return "revision=base part did not focus base object";
+    if(decodeState("#"+encodeState()).revision!=="base"||decodeState("#"+encodeState()).part!=="mcp-base-only")return "revision=base part did not round-trip";
+
+    // Repeated UUID ambiguity and explicit sheet disambiguation
+    proj().objects.push({...proj().objects[0],sheet:"/repeated"});
+    const ambiguous=resolveIdentity({part:"mcp-unchanged"},proj());
+    if(!ambiguous?.error)return "repeated UUID was guessed instead of rejected";
+    const disambiguated=resolveIdentity({part:"mcp-unchanged",v:"sheet:"+sheet.path},proj());
+    if(disambiguated?.index!==0)return "explicit sheet disambiguation failed";
+
+    // Finding 2: valid() drops unknown view for part links
+    if(valid(decodeState("#"+new URLSearchParams({part:"mcp-unchanged",v:"sheet:/wrong-sheet"}))).v)return "valid() retained unknown sheet view";
+    if(valid(decodeState("#"+new URLSearchParams({part:"mcp-unchanged",v:"garbage"}))).v)return "valid() retained garbage view";
+    // Wrong sheet does not fall back to unscoped match on another sheet
+    await applyState(decodeState("#"+new URLSearchParams({p:String(S.p),part:"mcp-unchanged",v:"sheet:/wrong-sheet"})));
+    if(!document.querySelector("#statusbar .status-message")?.textContent.includes("not found"))return "wrong sheet silently focused part";
+    if(S.v==="sheet:/wrong-sheet"||decodeState("#"+encodeState()).v==="sheet:/wrong-sheet")return "bogus sheet view persisted in S.v or hash";
+
+    // Finding 1: Non-sheet views (board, 3d, lib:0) leave lookup unscoped
+    const boardScoped=resolveIdentity({part:"mcp-head-added",v:"board"},proj());
+    if(boardScoped?.index!==1)return "part link with v=board failed to resolve";
+    const tdScoped=resolveIdentity({part:"mcp-head-added",v:"3d"},proj());
+    if(tdScoped?.index!==1)return "part link with v=3d failed to resolve";
+    const libScoped=resolveIdentity({part:"mcp-head-added",v:"lib:0"},proj());
+    if(libScoped?.index!==1)return "part link with v=lib:0 failed to resolve";
+
+    // Simultaneous part+net
+    const simultaneous=resolveIdentity({part:"mcp-unchanged",net},proj());
+    if(!simultaneous?.error?.includes("not both"))return "simultaneous part+net not rejected";
+    await applyState(decodeState("#"+new URLSearchParams({p:String(S.p),part:"mcp-unchanged",net})));
+    if(!document.querySelector("#statusbar .status-message")?.textContent.includes("not both"))return "simultaneous part+net message missing";
+
+    // Ordinary change selection after a net focus clears part/net/revision
+    await applyState(decodeState("#"+new URLSearchParams({p:String(S.p),net})));
+    if(S.net!==net)return "net was not focused before change selection";
+    const change=proj().changes[0];
+    if(change){
+      goTo(change.id);
+      if(S.net!==null||S.part!==null||S.revision!==null)return "ordinary change selection did not clear net";
+      if(decodeState("#"+encodeState()).net)return "cleared net still encoded in state";
+    }
+
+    // Missing objects on a legacy payload
+    const legacyProj={...proj(),objects:null,identity:null};
+    const legacyResult=resolveIdentity({part:"mcp-unchanged"},legacyProj);
+    if(!legacyResult?.error?.includes("not found"))return "missing objects on legacy payload did not error";
+
+    // Second-project selection (probe never silently skipped)
+    const savedProjects = D.projects;
+    try {
+      if(D.projects.length<=1){
+        D.projects=[...D.projects,{...proj(),dir:"second_project",sheets:proj().sheets,objects:[],identity:{head:{nets:{}},base:{nets:{}}}}];
+      }
+      const secondProj=D.projects[1],secondSheet=secondProj.sheets[0];
+      const savedSecond={objects:secondProj.objects,identity:secondProj.identity};
+      try {
+        secondProj.objects=[{uuid:"mcp-second",ref:"R88",kind:"symbol",side:"head",sheet:secondSheet?.path,pos:[10,10],box:[8,8,12,12]}];
+        await applyState(decodeState("#"+new URLSearchParams({p:"1",part:"mcp-second"})));
+        if(S.p!==1||S.v!=="sheet:"+secondSheet?.path||S.io!==0)return "second-project selection failed";
+      } finally {
+        secondProj.objects=savedSecond.objects;secondProj.identity=savedSecond.identity;
+      }
+    } finally {
+      D.projects = savedProjects;
+    }
+
+    return true;
+  } finally {proj().objects=saved.objects;proj().identity=saved.identity;Object.assign(S,savedState);await draw();}
 `]);
 
 // BR02 Task 9B: offline reports decode embedded models only; hosted lazy shells ask the parent broker.

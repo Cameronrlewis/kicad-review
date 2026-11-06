@@ -14,6 +14,7 @@ import appearance from '../ui/appearance.js';
 import boardMarks from '../ui/board-marks.js';
 import boardDiff from '../ui/board-diff.js';
 import imageView from '../ui/image-view.js';
+import ask from '../ui/ask.js';
 import reviewJs from '../ui/review.js';
 import review3d from '../ui/review3d.js';
 import threeParts from '../ui/three-parts.js';
@@ -27,7 +28,7 @@ const DATA = '<script>window.REVIEW_DATA = ';
 const BUNDLE = /<script type="application\/octet-stream" id="three-bundle">[^<]*<\/script>/;
 const assets = {
   'kicad-colors.js': kicadColors, 'appearance-state.js': appearanceState, 'board-gl.js': boardGl,
-  'appearance.js': appearance, 'board-marks.js': boardMarks, 'board-diff.js': boardDiff, 'three-studio.js': threeStudio, 'image-view.js': imageView,
+  'appearance.js': appearance, 'board-marks.js': boardMarks, 'board-diff.js': boardDiff, 'three-studio.js': threeStudio, 'image-view.js': imageView, 'ask.js': ask,
 };
 export const MAX_REPORT_BYTES = 10 * 1024 * 1024;
 export const IMAGE_ASSET_LIMITS = { svg: 8 * 1024 * 1024, json: 4 * 1024 * 1024 };

@@ -37,6 +37,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
+      - run: npm ci --prefix site
       - run: node --import ./site/css-loader.mjs --test site/test.mjs
       - run: node --import ./site/css-loader.mjs --test ui/*.test.mjs
       - run: node ui/board-test.mjs
@@ -73,6 +74,7 @@ jobs:
           fs.writeFileSync(`${process.env.PAGES}/design-history.html`, html);
           NODEFIXTURE
           python3 ui/build-fixtures.py "$PAGES"
+      - run: python3 ui/ask-fixture.py "$PAGES/ask-four.html"
       - run: node ui/check.mjs
       - run: node ui/check.mjs --no-skip "Waivers"
       - run: node ui/check.mjs --no-skip "images fallback selected export palettes" --page "$PAGES/two.html"
@@ -103,6 +105,10 @@ jobs:
       - run: node ui/check.mjs --no-skip "design readiness"
       - run: node ui/check.mjs --no-skip "design Parts" --page "$PAGES/parts.html"
       - run: node ui/check.mjs --no-skip "design Parts" --dark --page "$PAGES/parts.html"
+      - run: node ui/check.mjs --no-skip "Ask"
+      - run: node ui/check.mjs --no-skip "Ask" --dark
+      - run: node ui/check.mjs --no-skip "BR09 fixture" --page "$PAGES/ask-four.html"
+      - run: node ui/check.mjs --no-skip "BR09 fixture" --dark --page "$PAGES/ask-four.html"
       - run: node ui/check.mjs --no-skip "images screen and legacy appearance"
       - run: node ui/check.mjs --no-skip "images compare and four copper layers" --page "$PAGES/images.html"
       - run: node ui/check.mjs --no-skip "images gesture lifecycle" --page "$PAGES/images.html"
@@ -119,4 +125,5 @@ jobs:
       - run: node ui/check.mjs --no-skip "images screen and legacy appearance" --width 1440 --height 900 --dpr 2 --page "$PAGES/images.html"
       - run: node ui/check.mjs --no-skip "images screen and legacy appearance" --dark --width 1440 --height 900 --dpr 2 --page "$PAGES/images.html"
       - run: node ui/check.mjs --no-skip "design revisions thumbnails" --page "$PAGES/design-history.html"
+      - run: node ui/check.mjs --no-skip "MCP unchanged identity links"
       - run: node ui/check.mjs --no-skip "Multi-board BOM" --page "$PAGES/multiboard.html"

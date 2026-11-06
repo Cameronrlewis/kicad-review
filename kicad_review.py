@@ -32,6 +32,7 @@ import zlib
 import sys
 import tempfile
 import tomllib
+import uuid
 import zipfile
 from collections import Counter
 from urllib.parse import urlsplit
@@ -388,7 +389,7 @@ def read_netlist(out):
     return text
 
 
-def render_side(src_dir, name, out, netlist=False):
+def render_side(src_dir, name, out, netlist=False, ask=False):
     """SVG renders, ERC and DRC reports of one revision of one project."""
     sch, pcb = f"{src_dir}/{name}.kicad_sch", f"{src_dir}/{name}.kicad_pcb"
     with tempfile.TemporaryDirectory() as cfg:
@@ -439,8 +440,10 @@ def render_side(src_dir, name, out, netlist=False):
                 os.environ['KICAD_CONFIG_HOME'] = previous
     if os.path.exists(sch):
         kicad_cli("sch", "erc", "--format", "json", "--severity-all", "-o", f"{out}/erc.json", sch)
-        if netlist:
-            export_netlist(sch, out)
+        if netlist or ask:
+            export_netlist(sch, out)  # 03's producer: bounded, soft, validated; one call per present schematic
+            if ask:
+                export_label_membership(src_dir, name, out)  # Task 3C: one probed netlist export, Ask-only, soft
     if board_error is not None:
         # Incomplete evidence: no DRC report for this side, only the reason.
         pathlib.Path(out, 'drc.json').unlink(missing_ok=True)
@@ -1366,7 +1369,7 @@ def cmd_render(args):
                     continue
             else:
                 # Connectivity evidence for every present schematic, whatever the check settings.
-                render_side(posixpath.join(side, p["dir"]), p["name"], out, netlist=True)
+                render_side(posixpath.join(side, p["dir"]), p["name"], out, netlist=True, ask=bool(settings.get("ask", {}).get("enabled")))
                 if fab_enabled(settings):
                     try:
                         render_fab(p, side, out, settings)
@@ -3018,6 +3021,7 @@ DEFAULT_SETTINGS = {
     "inventory": {"enabled": False},
     "libraries": {"enabled": False},
     "design": {"enabled": False},  # head-only design snapshot on default-branch pushes, version tags and manual snapshot runs
+    "ask": {"enabled": False},
 }
 CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields", "interfaces": "Interfaces", "release": "Release package", "fab_limits": "Fab limits"}
 
@@ -3072,7 +3076,7 @@ def load_settings(roots=("base", "head")):
                 else:
                     settings[k] = v
             break
-    for section in ("checks", "bom", "fabrication", "3d", "parts", "release", "digikey", "threads", "issues", "github", "waivers", "inventory", "libraries", "interfaces", "pdf", "downloads", "design"):
+    for section in ("checks", "bom", "fabrication", "3d", "parts", "release", "digikey", "threads", "issues", "github", "waivers", "inventory", "libraries", "interfaces", "pdf", "downloads", "design", "ask"):
         if not isinstance(settings[section], dict):
             sys.exit(f"{SETTINGS_FILE}: {section} must be a table")
     if not isinstance(settings["bom"]["required_fields"], list) or not all(isinstance(f, str) for f in settings["bom"]["required_fields"]):
@@ -3134,6 +3138,8 @@ def load_settings(roots=("base", "head")):
             sys.exit(f"{SETTINGS_FILE}: {key} must be true or false")
     if not isinstance(settings["waivers"]["enabled"], bool):
         sys.exit(f"{SETTINGS_FILE}: waivers.enabled must be true or false")
+    if not isinstance(settings["ask"]["enabled"], bool):
+        sys.exit(f"{SETTINGS_FILE}: ask.enabled must be true or false")
     if settings["threads"]["block_merge"] and not settings["threads"]["enabled"]:
         sys.exit(f"{SETTINGS_FILE}: threads.block_merge needs threads.enabled = true")
     return settings
@@ -5259,6 +5265,531 @@ def interface_check(p, settings, objs, out_dir, *, single=False):
     return c
 
 
+# ---- Ask: the compact, factual design context a model answers from (spec 09). ----
+CONTEXT_LIST = 15
+
+
+def clip(value, n=200):
+    return str(value if value is not None else "")[:n]
+
+
+FIELD_LIMIT = 2000    # code points kept for identity fields (value, footprint, mpn, lcsc); 10's display cap
+PROPERTY_LIMIT = 200  # code points kept per extra KiCad property value
+PROPERTY_COUNT = 32   # extra properties kept per part, in file order
+
+
+def keep(value, n):
+    """(text cut to n code points, was_cut). A cut is always reported by the caller, never silent."""
+    text = "" if value is None else str(value)
+    return text[:n], len(text) > n
+
+
+def netlist_context(text, net_cap, pin_cap):
+    """Nets as {id, pin_count, pins[REF.PIN], pin_records[{ref, pin}], more} and, per part, its pins {pin, net, fn, fn_truncated?}. Single-pin unconnected- nets are counted, not listed; a connected net keeps its name whatever it starts with.
+    `text` must be the return value of 03's read_netlist, which already enforces the single export root, unique net names and identity fields. This function adds only the components check the context needs."""
+    root = parse_sexpr(text)
+    if not root or root[0] != "export" or find(root, "components") is None:
+        raise ValueError("netlist has no components section")
+    _, nets = parse_netlist(text)
+    out, by_ref, unconnected = [], {}, 0
+    def fn(n):
+        value, cut = keep(n["function"], 60)
+        return {"fn": value, "fn_truncated": True} if cut else {"fn": value} if value else {}  # never cut silently; fit_context reads the mark
+    for raw in sorted(nets, key=lambda k: natural(str(k))):
+        name, nodes = str(raw), nets[raw]
+        if name.startswith("unconnected-") and len(nodes) == 1:  # KiCad's generated name for a lone pin
+            unconnected += len(nodes)
+            for n in nodes:
+                by_ref.setdefault(n["ref"], []).append({"pin": n["pin"], "net": None, **fn(n)})
+            continue
+        pins = [f'{n["ref"]}.{n["pin"]}' for n in nodes]
+        out.append({"id": name, "pin_count": len(pins), "pins": pins[:net_cap],
+                    "pin_records": [{"ref": n["ref"], "pin": n["pin"]} for n in nodes[:net_cap]],  # same nodes, same order as pins
+                    **({"more": len(pins) - net_cap} if len(pins) > net_cap else {})})
+        for n in nodes:
+            by_ref.setdefault(n["ref"], []).append({"pin": n["pin"], "net": name, **fn(n)})
+    return out, by_ref, unconnected
+
+
+def context_parts(objs):
+    """One record per placed reference; the units of a multi-unit symbol merge. Power symbols and #flags are not parts."""
+    parts = {}
+    # Prefer schematic identities; board-only projects retain footprint UUIDs without inventing sheets or connectivity.
+    symbols = [o for o in objs.values() if o.get("kind") == "symbol" and (o.get("props") or {}).get("reference") and not o["props"]["reference"].startswith("#")]
+    source = "symbol" if symbols else "footprint"
+    for key, o in objs.items():
+        p = o.get("props") or {}
+        ref = p.get("reference") or ""
+        if o.get("kind") != source or not ref or ref.startswith("#"):
+            continue
+        if source == "footprint": p = {**p, "Footprint": p.get("footprint", "")}
+        ds = field(p, ("datasheet",))
+        identity = {"value": p.get("Value", ""), "footprint": p.get("Footprint", ""), "mpn": field(p, MPN_FIELDS), "lcsc": (field(p, LCSC_FIELDS) or "").upper() or None}
+        cut = {name: (keep(v, FIELD_LIMIT) if v is not None else (None, False)) for name, v in identity.items()}
+        props = list(p.items())
+        clipped = [str(k) for k, v in props[:PROPERTY_COUNT] if keep(v, PROPERTY_LIMIT)[1]]
+        rec = parts.setdefault(ref, {
+            "ref": ref, "uuid": key.rsplit("/", 1)[-1],
+            "bom": bom_identity(o),  # 08's canonical contract, unclipped; the first unit's identity stands for the merged part, and grouping uses only this field
+            "value": cut["value"][0], "footprint": cut["footprint"][0], "mpn": cut["mpn"][0], "lcsc": cut["lcsc"][0],
+            "datasheet": ds if ds and ds.lower().startswith(("http://", "https://")) else None,
+            "sheet": (o.get("where") or {}).get("sheet") if source == "symbol" else None,
+            "source": source, "schematic_available": source == "symbol",
+            "schematic_reason": None if source == "symbol" else "no schematic symbols; part identity is the KiCad footprint UUID",
+            "properties": {str(k): keep(v, PROPERTY_LIMIT)[0] for k, v in props[:PROPERTY_COUNT]},
+            "properties_truncated": len(props) > PROPERTY_COUNT or bool(clipped),
+            "properties_omitted": max(0, len(props) - PROPERTY_COUNT),
+            "properties_clipped": clipped,
+            "incomplete_fields": [name for name in identity if cut[name][1]] + [f"properties.{k}" for k in clipped] + (["properties"] if len(props) > PROPERTY_COUNT else []),
+            "dnp": p.get("dnp") == "yes", "units": 0 if source == "symbol" else None})
+        if source == "symbol": rec["units"] += 1
+    return dict(sorted(parts.items(), key=lambda kv: natural(kv[0])))
+
+
+def side_context(side_dir, objs, net_cap=40, pin_cap=64):
+    """Parts and nets of one revision, read only through 03's read_netlist (marker first, then strict validation). If the netlist is missing or unusable the nets stay empty and the reason says why; nothing is built from geometry."""
+    nets, pins, unconnected, reason = [], {}, 0, None
+    try:
+        text = read_netlist(side_dir)
+        nets, pins, unconnected = netlist_context(text, net_cap, pin_cap)
+    except FileNotFoundError:
+        reason = "no netlist was exported for this revision"
+    except ValueError as exc:
+        # read_netlist raises the marker's own text when the export failed, and a validation message for a corrupt file.
+        marker = os.path.exists(f"{side_dir}/netlist.net.error")  # ponytail: a reason-text check only; the read itself is 03's
+        reason = clip(exc, 500) if marker else f"netlist unreadable: {clip(exc, 200)}"
+    except OSError as exc:  # ponytail: unreadable file; reported, never a stack trace in a review
+        reason = f"netlist unreadable: {clip(exc, 200)}"
+    labels, label_reason = None, "KiCad netlist does not retain label kinds; no geometric connectivity inference"
+    if reason is None:
+        try:
+            labels = read_label_membership(side_dir, text)
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            label_reason = clip(exc, 500)
+    parts = []
+    for rec in context_parts(objs).values():
+        mine = pins.get(rec["ref"], [])
+        net_names = sorted({v["net"] for v in mine if v["net"] is not None}, key=natural)
+        neighbors = sorted({ref for ref, entries in pins.items() if ref != rec["ref"] and any(v["net"] in net_names for v in entries)}, key=natural)
+        parts.append({**rec, "nets": net_names, "neighbors": neighbors, "pin_count": len(mine), "pins": mine[:pin_cap],
+                      "connectivity_available": reason is None, "connectivity_reason": reason,
+                      **({"pins_more": len(mine) - pin_cap} if len(mine) > pin_cap else {})})
+    for n in nets:
+        refs = {ref for ref, entries in pins.items() if any(v["net"] == n["id"] for v in entries)}
+        n["name"] = n["id"]
+        n["sheet_paths"] = sorted({part["sheet"] for part in parts if part["ref"] in refs and part["sheet"] is not None})
+        if labels is None:
+            n.update(hierarchical_labels=None, global_labels=None, local_labels=None, labels_unavailable=label_reason)
+        else:
+            rec = labels.get(n["id"], {})
+            for key in LABEL_KINDS.values():
+                items = rec.get(key, [])
+                n[key] = items[:CONTEXT_LIST]
+                if len(items) > CONTEXT_LIST:
+                    n[f"{key}_more"] = len(items) - CONTEXT_LIST
+            n["labels_unavailable"] = None
+    return {"netlist_available": reason is None, "netlist_reason": reason, "parts": parts, "nets": nets,
+            "unconnected_pins": unconnected}
+
+
+def enrich_context(rev, objs, sheets):
+    """Join exact sheet-path identities; do not infer electrical label membership from coordinates."""
+    pages = {pg["path"]: pg for pg in sheets}
+    for part in rev["parts"]:
+        pg = pages.get(part["sheet"], {})
+        part["page"] = pg.get("page")
+        part["sheet_name"] = pg.get("name")
+        part["page_reason"] = None if part["page"] is not None else "sheet instance page unavailable"
+    for net in rev["nets"]:
+        net["pages"] = [pages[path]["page"] for path in net["sheet_paths"] if path in pages]
+
+
+# ---- Ask: label kinds per net, computed by KiCad on probed copies and verified against the real netlist (Task 3C). ----
+PROBE_PREFIX = "KRPROBE"
+LABEL_KINDS = {"label": "local_labels", "global_label": "global_labels", "hierarchical_label": "hierarchical_labels"}
+BUS_TEXT = re.compile(r"\[[^\]]*\.\.[^\]]*\]|\{")
+PROBE_FONT = "(effects (font (size 1.27 1.27)) (hide yes))"
+PROBE_LIB = ('(symbol "kicad_review_probe:P" (pin_names (offset 0)) (exclude_from_sim yes) (in_bom no) (on_board yes) '
+             f'(property "Reference" "{PROBE_PREFIX}" (at 0 0 0) {PROBE_FONT}) (property "Value" "probe" (at 0 0 0) {PROBE_FONT}) '
+             '(symbol "P_1_1" (pin passive line (at 0 0 0) (length 0) (name "~" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))))')
+
+
+def label_probes(src_dir, name, work):
+    """Copy the schematics to `work` with a zero-length probe pin and a junction on every label anchor. One record per label per sheet instance. Raises ValueError for anything not supported; nothing in src_dir changes."""
+    src = pathlib.Path(src_dir).resolve()
+    pages = sheet_pages(src_dir, name)
+    if not pages:
+        raise ValueError("no schematic")
+    root_uuid = val(parse_sexpr((src / f"{name}.kicad_sch").read_text(encoding="utf-8")), "uuid")
+    by_file, probes = {}, []
+    for pg in pages:
+        by_file.setdefault(pg["file"], []).append(pg)
+    for file, instances in by_file.items():
+        path = (src / file).resolve()
+        if src not in path.parents:
+            raise ValueError(f"sheet file outside the project folder: {clip(file, 100)}")
+        text = path.read_text(encoding="utf-8")
+        if PROBE_PREFIX in text or "kicad_review_probe" in text:
+            raise ValueError(f"{clip(file, 100)} already uses the reserved probe name {PROBE_PREFIX}")
+        root = parse_sexpr(text)
+        for sheet in findall(root, "sheet"):
+            sheetfile = properties(sheet).get("Sheetfile") or ""
+            try:
+                child = (path.parent / sheetfile).resolve()
+            except (OSError, ValueError):
+                raise ValueError(f"sheet file outside the project folder: {clip(sheetfile, 100)}") from None
+            if pathlib.Path(sheetfile).is_absolute() or src not in child.parents:
+                raise ValueError(f"sheet file outside the project folder: {clip(sheetfile, 100)}")
+        if findall(root, "bus") or findall(root, "bus_entry"):
+            raise ValueError(f"{clip(file, 100)} has buses; bus membership is not resolved")  # ponytail: whole revision fails closed; expand bus members when a real design needs it
+        add = []
+        for node in root[1:]:
+            if not (isinstance(node, list) and node and node[0] in LABEL_KINDS):
+                continue
+            if BUS_TEXT.search(str(node[1])):
+                raise ValueError(f"bus label {clip(node[1], 60)!r}; bus membership is not resolved")
+            x, y = find(node, "at")[1:3]  # verbatim tokens: the probe sits exactly on KiCad's anchor
+            paths = []
+            for pg in instances:
+                ref = f"{PROBE_PREFIX}{len(probes) + 1}"
+                paths.append(f'(path "/{root_uuid}{pg["path"].rstrip("/")}" (reference "{ref}") (unit 1))')
+                probes.append({"ref": ref, "kind": node[0], "text": str(node[1]), "sheet": pg["path"], "uuid": val(node, "uuid")})
+            ids = [uuid.uuid5(uuid.NAMESPACE_URL, f"kicad-review:{file}:{probes[-1]['ref']}:{k}") for k in range(3)]
+            add.append(f'(symbol (lib_id "kicad_review_probe:P") (at {x} {y} 0) (unit 1) (exclude_from_sim yes) (in_bom no) (on_board yes) (dnp no) (uuid "{ids[0]}") '
+                       f'(property "Reference" "{PROBE_PREFIX}" (at {x} {y} 0) {PROBE_FONT}) (property "Value" "probe" (at {x} {y} 0) {PROBE_FONT}) '
+                       f'(pin "1" (uuid "{ids[1]}")) (instances (project "{name}" {" ".join(paths)})))')
+            add.append(f'(junction (at {x} {y}) (diameter 0) (color 0 0 0 0) (uuid "{ids[2]}"))')  # required: a pin alone does not join a wire mid-segment and takes the label off it
+        text, hits = re.subn(r"\(lib_symbols(?=[\s)])", "(lib_symbols " + PROBE_LIB, text, count=1)
+        if not hits:
+            raise ValueError(f"{clip(file, 100)} has no lib_symbols section")
+        out = pathlib.Path(work, path.relative_to(src))
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text.rstrip()[:-1] + "\n" + "\n".join(add) + "\n)\n", encoding="utf-8")
+    for extra in (f"{name}.kicad_pro", "sym-lib-table"):
+        if (src / extra).is_file():
+            shutil.copy(src / extra, pathlib.Path(work, extra))
+    return probes
+
+
+def label_membership(orig_text, probed_text, probes, erc):
+    """Label kinds per net. KiCad computed the probed netlist; without the probes it must equal the real one exactly, or this raises."""
+    comps, nets = parse_netlist(orig_text)
+    probed_comps, probed_nets = parse_netlist(probed_text)
+    want = {p["ref"]: p for p in probes}
+    if set(probed_comps) - set(want) != set(comps):
+        raise ValueError("probed netlist parts differ from the KiCad netlist")
+    seen, home, stripped = Counter(), {}, {}
+    for name, nodes in probed_nets.items():
+        real = sorted((x["ref"], x["pin"]) for x in nodes if x["ref"] not in want)
+        for x in nodes:
+            if x["ref"] in want:
+                seen[x["ref"]] += 1
+                home[x["ref"]] = str(name)
+        if real:
+            stripped[str(name)] = real
+    if any(seen[ref] != 1 for ref in want):
+        raise ValueError("a label probe did not resolve to exactly one KiCad net")
+    if stripped != {str(k): sorted((x["ref"], x["pin"]) for x in v) for k, v in nets.items()}:
+        raise ValueError("probed netlist differs from the KiCad netlist; label membership not verified")
+    dangling = {i.get("uuid") for s in erc.get("sheets", []) for v in s.get("violations", [])
+                if v.get("type") == "label_dangling" for i in v.get("items", [])}
+    out, unattached = {}, 0
+    for ref, p in want.items():
+        if home[ref] not in stripped:
+            if p["uuid"] not in dangling:
+                raise ValueError(f"label {clip(p['text'], 60)!r} reaches no part pin and KiCad ERC does not report it dangling")
+            unattached += 1
+            continue
+        rec = out.setdefault(home[ref], {key: [] for key in LABEL_KINDS.values()})
+        entry = {"text": p["text"], "sheet": p["sheet"]}
+        if entry not in rec[LABEL_KINDS[p["kind"]]]:
+            rec[LABEL_KINDS[p["kind"]]].append(entry)
+    for rec in out.values():
+        for entries in rec.values():
+            entries.sort(key=lambda e: (natural(e["text"]), e["sheet"]))
+    return {"version": 1, "netlist_sha256": hashlib.sha256(orig_text.encode("utf-8")).hexdigest(),
+            "nets": out, "unattached": unattached, "probes": len(want)}
+
+
+def export_label_membership(src_dir, name, out):
+    """Ask-only and soft: <out>/labels.json, or a one-line labels.json.error. Never exits; Task 3D falls back to null label fields."""
+    out = pathlib.Path(out)
+    target, marker = out / "labels.json", out / "labels.json.error"
+    for path in (target, marker):
+        path.unlink(missing_ok=True)
+    try:
+        orig = read_netlist(out)  # 03's marker first: no netlist, no labels
+        erc = json.loads((out / "erc.json").read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as work:
+            probes = label_probes(src_dir, name, work)
+            probed = pathlib.Path(work, "probed.net")
+            run = subprocess.run(["kicad-cli", "sch", "export", "netlist", "--format", "kicadsexpr", "-o", str(probed),
+                                  str(pathlib.Path(work, f"{name}.kicad_sch"))], capture_output=True, text=True, timeout=60)
+            if run.returncode or not probed.is_file():
+                raise ValueError(f"probed netlist export failed ({run.returncode}): {run.stderr or run.stdout}")
+            text = probed.read_text(encoding="utf-8")
+            validate_netlist(text)
+            doc = label_membership(orig, text, probes, erc)
+        target.write_text(json.dumps(doc, sort_keys=True), encoding="utf-8")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError) as exc:  # AttributeError: a non-object erc.json
+        target.unlink(missing_ok=True)
+        marker.write_text(" ".join(f"label kinds unavailable: {exc}".split())[:500], encoding="utf-8")
+
+
+def read_label_membership(side_dir, netlist_text):
+    marker = pathlib.Path(side_dir, "labels.json.error")
+    if marker.exists():
+        raise ValueError(marker.read_text(encoding="utf-8")[:500] or "label kinds unavailable")
+    doc = json.loads(pathlib.Path(side_dir, "labels.json").read_text(encoding="utf-8"))
+    if not isinstance(doc, dict) or doc.get("version") != 1 or doc.get("netlist_sha256") != hashlib.sha256(netlist_text.encode("utf-8")).hexdigest():
+        raise ValueError("label membership does not belong to this revision's netlist")
+    nets = doc.get("nets")
+    if not isinstance(nets, dict) or any(
+        not isinstance(rec, dict) or any(not isinstance(rec.get(k, []), list) for k in LABEL_KINDS.values())
+        for rec in nets.values()
+    ):
+        raise ValueError("label membership nets is malformed")
+    return nets
+
+
+CONTEXT_LIMIT = 200_000  # bytes: the spec's target for design-context.json
+CONTEXT_STAGES = ((40, 64), (15, 32), (5, 16), (0, 8), (0, 0))  # (pins kept per net, pins kept per part), least cut first
+CHECK_SOURCE = {"erc": "kicad-cli sch erc", "drc": "kicad-cli pcb drc", "parity": "kicad-cli pcb drc --schematic-parity",
+                "bom": "schematic symbol fields", "release": "fabrication export of the board"}
+
+
+def stat_number(text):
+    """'506.97 mm²' -> 506.97; null or anything else -> None. kicad-cli stats put units inside the strings."""
+    m = re.match(r"\s*(-?\d+(?:\.\d+)?)", text) if isinstance(text, str) else None
+    return float(m[1]) if m else None
+
+
+def board_facts(side_dir, pcb_path):
+    """Layers from the board file; size, areas and counts from `pcb export stats` when it ran. No outline means size_mm is None."""
+    scene = board_geometry(pcb_path)
+    names = [layer["name"] for layer in scene["layers"]]
+    facts = {"layers": names, "copper_layers": scene["copperStack"], "stats_available": False}
+    try:
+        if os.path.exists(f"{side_dir}/stats.json.error"):
+            with open(f"{side_dir}/stats.json.error", encoding="utf-8") as fh:
+                facts["stats_reason"] = clip(fh.read(), 500)
+            return facts
+        with open(f"{side_dir}/stats.json", encoding="utf-8") as fh:
+            stats = json.load(fh)
+        if not isinstance(stats, dict): raise TypeError("stats is not an object")
+        b = stats["board"]
+        if not isinstance(b, dict): raise TypeError("board section is not an object")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        facts["stats_reason"] = f"statistics unavailable: {clip(exc, 200)}"
+        return facts
+    size = [stat_number(b.get("width")), stat_number(b.get("height"))]
+    comps = stats.get("components")
+    facts.update({
+        "stats_available": True, "has_outline": bool(b.get("has_outline")), "size_mm": size if None not in size else None,
+        "front_copper_mm2": stat_number(b.get("front_copper_area")), "back_copper_mm2": stat_number(b.get("back_copper_area")),
+        "min_track_width_mm": stat_number(b.get("min_track_width")), "min_clearance_mm": stat_number(b.get("min_track_clearance")),
+        "min_drill_mm": stat_number(b.get("min_drill_diameter")), "thickness_mm": stat_number(b.get("board_thickness")),
+        "pads": stats.get("pads"), "vias": stats.get("vias"),
+        "components": {k: v.get("total") for k, v in comps.items() if isinstance(v, dict)} if isinstance(comps, dict) else {}})
+    return facts
+
+
+FAB_LEDGER = ("vendor", "profile", "checkedOn", "assumedCopperOz", "checked", "unchecked", "unsupported", "coverageWarnings", "baselineAvailable", "fixed")  # 04's vendor identity and coverage ledger
+
+
+def ledger(check):
+    """04's fab coverage fields, copied unchanged except for size. A string or listed item over 200 code points is cut and named in `<field>_truncated`; a list keeps its first 15 items and its full count in `<field>_more`. fit_context reads every mark, so nothing is clipped silently."""
+    out = {}
+    for key in FAB_LEDGER:
+        if key not in check: continue
+        value = check[key]
+        if isinstance(value, list):
+            kept = [keep(item, 200) for item in value[:CONTEXT_LIST]]
+            out[key] = [text for text, _ in kept]
+            if len(value) > CONTEXT_LIST: out[f"{key}_more"] = len(value) - CONTEXT_LIST
+            if any(cut for _, cut in kept): out[f"{key}_truncated"] = True
+        elif isinstance(value, str):
+            out[key], cut = keep(value, 200)
+            if cut: out[f"{key}_truncated"] = True
+        else:
+            out[key] = value
+    return out
+
+
+def net_change_support(summary):
+    """03's wiring channel: complete with zero rows is available and complete; a missing summary or not_applicable is unavailable."""
+    wiring = next((c for c in (summary or {}).get("channels", []) if c.get("channel") == "wiring"), None)
+    return {"available": bool(wiring and wiring.get("status") != "not_applicable"), "complete": bool(wiring and wiring.get("status") == "complete")}
+
+
+DETAIL_BYTES = 2000  # JSON bytes of typed change detail kept verbatim per row
+
+
+GEOMETRY_KEYS = ("addedContours", "removedContours", "contours", "points")  # 03's signed copper outlines and point lists: counted, never sent to the model
+
+
+def bounded_detail(detail):
+    """(detail, truncated). Small detail is kept whole. Larger detail keeps its scalars and names, the first 15 items of each long list (members, transitions), and for geometry (copper contours, point lists) only a count. Every omitted part is named in omitted_counts, so the row's type, channel, weight and counts always survive."""
+    if len(json.dumps(detail, separators=(",", ":"), ensure_ascii=False).encode("utf-8")) <= DETAIL_BYTES:
+        return detail, False
+    if not isinstance(detail, dict):
+        return {"omitted": True}, True  # a non-object detail keeps no raw text; the row flag and the context's detail_truncated count say so
+    kept, counts = {}, {}
+    for key, value in detail.items():
+        geometry = isinstance(value, list) and bool(value) and (key in GEOMETRY_KEYS or any(isinstance(item, list) for item in value))
+        if geometry:
+            kept[key], counts[key] = {"omitted": True}, len(value)
+        elif isinstance(value, list) and len(value) > CONTEXT_LIST:
+            kept[key], counts[key] = value[:CONTEXT_LIST], len(value)
+        elif isinstance(value, dict) and len(json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")) > DETAIL_BYTES:
+            kept[key], counts[key] = {"omitted": True}, len(value)
+        elif isinstance(value, str):
+            kept[key] = clip(value, 200)
+        else:
+            kept[key] = value
+    return {**kept, "omitted_counts": counts}, True
+
+
+def context_checks(checks, cap=CONTEXT_LIST):
+    """Every supplied check, including not_run, with provenance and vendor via ledger(c). Keep both fab_limits sections (jlcpcb/pcbway) as separate entries, never deduplicate by name. Positions are never included."""
+    out = []
+    for c in checks:
+        known = c["name"] in CHECK_SOURCE or c["name"] == "interfaces"
+        default_conf = "heuristic" if c["name"] == "interfaces" or not known else "deterministic"
+        default_source = CHECK_SOURCE.get(c["name"], "kicad-review interfaces check (name patterns on the netlist)" if c["name"] == "interfaces" else "unspecified producer; provenance unavailable")
+        def provenance(value, parent=None):
+            parent = parent or {}
+            confidence = value.get("confidence", parent.get("confidence", default_conf))
+            source = value.get("evidence_source", parent.get("evidence_source", default_source))
+            return {"confidence": confidence if confidence in ("deterministic", "heuristic", "datasheet-backed") else "heuristic",
+                    "evidence_source": source if isinstance(source, str) and source.strip() else "unspecified producer; provenance unavailable"}
+        finds = [{"type": v["type"], "severity": v["severity"], "description": clip(v["description"]), "new": bool(v.get("new")),
+                  "items": [clip(i, 120) for i in v.get("items", [])[:4]], **provenance(v, c)} for v in c.get("violations", [])[:cap]]
+        out.append({"name": c["name"], "title": c["title"], "level": c["level"], "status": c["status"], "reason": c.get("reason"),
+                    "errors": c["errors"], "warnings": c["warnings"], "new_errors": c["new_errors"], "new_warnings": c["new_warnings"],
+                    **provenance(c), **ledger(c),
+                    "findings": finds, **({"more": len(c["violations"]) - cap} if len(c.get("violations", [])) > cap else {})})
+    return out
+
+
+def context_changes(changes, cap=150):
+    """The change list: a count per kind plus the first `cap` rows (rows are already ordered most important kind first)."""
+    by_kind = {}
+    for r in changes:
+        by_kind[r["kind"]] = by_kind.get(r["kind"], 0) + 1
+    rows = []
+    for r in changes[:cap]:
+        row_ = {"id": r.get("id"), "action": r["action"], "kind": r["kind"], "ref": clip(r.get("ref"), 100),
+                "sheet": (r.get("where") or {}).get("sheet") if (r.get("where") or {}).get("sheet") is not None else "board"}
+        if r.get("changes"):
+            row_["changes"] = [[clip(a, 60), clip(b, 100), clip(c, 100)] for a, b, c in r["changes"][:6]]
+            if len(r["changes"]) > 6: row_["changes_more"] = len(r["changes"]) - 6
+        elif r.get("props"):
+            row_["props"] = {clip(k, 60): clip(v, 100) for k, v in list(r["props"].items())[:6]}
+        for key in ("channel", "weight"):  # spec 03 adds these to change rows; absent on main
+            if r.get(key):
+                row_[key] = r[key]
+        if r.get("detail") is not None:
+            row_["detail"], cut = bounded_detail(r["detail"])
+            if cut: row_["detail_truncated"] = True  # never silent: the row says its detail was bounded
+        rows.append(row_)
+    return {"total": len(changes), "by_kind": by_kind, "rows": rows, "detail_truncated": sum(1 for row in rows if row.get("detail_truncated")),
+            **({"more": len(changes) - cap} if len(changes) > cap else {})}
+
+
+def complete_context_checks(checks, settings, has_schematic, has_board):
+    result = list(checks)
+    present = {c["name"] for c in result}
+    for name in ("erc", "drc", "parity", "bom", "release", "interfaces"):
+        if name in present: continue
+        level = settings["checks"].get(name, "off")
+        available = has_schematic if name in ("erc", "parity", "bom", "interfaces") else has_board
+        reason = "disabled in settings" if level == "off" else ("evidence unavailable" if available else "no schematic" if name in ("erc", "parity", "bom", "interfaces") else "no board")
+        result.append({"name": name, "title": CHECK_NAMES[name], "level": level, "status": "not_run", "reason": reason,
+                       "errors": 0, "warnings": 0, "new_errors": 0, "new_warnings": 0, "violations": []})
+    return context_checks(result)
+
+
+def project_context(p, out, objs, sheets, pcbs, changes, checks, sides, net_cap, pin_cap, revision_shas, settings, summary=None):
+    """Everything Ask knows about one project: both revisions, the sheet list, the change list, the check results, and 03's headline and wiring support."""
+    revisions = {}
+    for side in ("base", "head"):
+        if side not in sides:
+            revisions[side] = None
+            continue
+        rev = side_context(f"{out}/{side}", objs[side], net_cap, pin_cap)
+        rev["revision"] = revision_shas[side]
+        incomplete = []
+        try:
+            pages = sheet_pages(posixpath.join(side, p["dir"]), p["name"])
+        except (OSError, ValueError, TypeError, IndexError, AttributeError) as exc:
+            pages = []
+            incomplete.append({"document": "schematic", "reason": f"Schematic pages unavailable: {clip(exc, 500)}"})
+        rev["sheets"] = [{k: pg.get(k) for k in ("path", "name", "file", "parent", "page")} for pg in pages]
+        enrich_context(rev, objs[side], rev["sheets"])
+        rev["board"] = None
+        if os.path.isfile(pcbs[side]):
+            try:
+                rev["board"] = board_facts(f"{out}/{side}", pcbs[side])
+            except (OSError, ValueError, TypeError, IndexError, AttributeError) as exc:
+                incomplete.append({"document": "board", "reason": f"Board facts unavailable: {clip(exc, 500)}"})
+        if incomplete:
+            rev["incomplete"] = incomplete
+        revisions[side] = rev
+    head_schematic = os.path.isfile(posixpath.join("head", p["dir"], p["name"] + ".kicad_sch"))
+    return {"name": p["name"], "dir": p["dir"], "status": p["status"],
+            "headline": clip((summary or {}).get("headline"), 200) if isinstance((summary or {}).get("headline"), str) else None,
+            "net_changes": net_change_support(summary),
+            "sheets": [{k: s.get(k) for k in ("path", "name", "file", "parent", "page", "status")} for s in sheets],
+            "revisions": revisions, "changes": context_changes(changes), "checks": complete_context_checks(checks, settings, head_schematic, os.path.isfile(pcbs["head"]))}
+
+
+def ask_index(side_dir):
+    """Revision-scoped exact names with a first-part fallback only when board geometry is unavailable."""
+    ctx = side_context(side_dir, {})
+    if not ctx["netlist_available"]: return {"nets": {}}
+    return {"nets": {n["id"]: {"fallback_ref": n["pins"][0].rsplit(".", 1)[0] if n["pins"] else None} for n in ctx["nets"]}}
+
+
+def context_bytes(doc):
+    return len(json.dumps(doc, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+
+
+def marked(node):
+    """True when any producer mark says something was cut, anywhere in the document: a truthy `*_truncated` flag or count (properties_truncated, detail_truncated, <field>_truncated), a `more` or `*_more` count (pins_more, unchecked_more), or a non-empty incomplete_fields."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key.endswith("_truncated") and value: return True
+            if (key == "more" or key.endswith("_more")) and value is not None: return True
+            if key == "incomplete_fields" and value: return True
+            if marked(value): return True
+    elif isinstance(node, list):
+        return any(marked(item) for item in node)
+    return False
+
+
+def fit_context(build, limit=CONTEXT_LIMIT):
+    """Supported-size ceiling: complete non-pin collections must fit after the five pin stages. `truncated` is true after any stage cut, or when any producer mark is set (`marked`)."""
+    for stage, (net_cap, pin_cap) in enumerate(CONTEXT_STAGES):
+        doc = build(net_cap, pin_cap)
+        doc["truncated"] = stage > 0 or marked(doc)
+        if context_bytes(doc) <= limit: return doc
+    # ponytail: no partial-project answers. Above 200,000 UTF-8 bytes after pin reduction, Ask is disabled for this run.
+    totals = {"projects": len(doc.get("projects", [])), "parts": 0, "nets": 0, "changes": 0}
+    for p in doc.get("projects", []):
+        totals["changes"] += p.get("changes", {}).get("total", 0)
+        for rev in p.get("revisions", {}).values():
+            if rev:
+                for key in ("parts", "nets"): totals[key] += len(rev.get(key, []))
+    disabled = {"version": 1, "kind": "kicad-review-design-context", "projects": [], "truncated": True,
+                "disabled_reason": "Design exceeds the 200,000-byte Ask ceiling after pin reduction. Select fewer projects in a new review; no model request was sent.",
+                "omitted": totals}
+    if context_bytes(disabled) > limit: raise ValueError("context limit cannot hold disabled envelope")
+    return disabled
+
+
 def interface_findings(comps, nets, patterns, where_of):
     """Design-review rules on one revision's netlist. Every finding carries its nets and pins as evidence."""
     out, detected = [], {}
@@ -5565,6 +6096,33 @@ def read_optional_json(path, default=None):
     return json.loads(pathlib.Path(path).read_text()) if pathlib.Path(path).is_file() else default
 
 
+def identity_objects(objs):
+    """One revision's own symbols, read from that revision's raw object dict: uuid is the last key segment, sheet is where.sheet."""
+    out = []
+    for key, o in objs.items():
+        if o.get('kind') == 'symbol':
+            uuid = key.split('/')[-1].strip()
+            if uuid:
+                out.append({'uuid': uuid, 'kind': o['kind'], 'ref': o['ref'], 'sheet': (o.get('where') or {}).get('sheet')})
+    return out
+
+
+def identity_index(nets, objects):
+    """Net names remain exact strings; each net maps to one symbol of the same revision's own objects, never to the other revision's list."""
+    by_ref = {}
+    for obj in objects:
+        by_ref.setdefault(obj['ref'].split(' unit ', 1)[0], []).append(obj)
+    out = {}
+    for name, source in nets.items():
+        ref = source.get('fallback_ref') if isinstance(source, dict) else source
+        candidates = by_ref.get(ref, [])
+        # ponytail: multi-unit symbols have multiple symbol objects sharing the base ref; dropping ambiguous multi-unit candidates leaves complete=false.
+        if len(candidates) == 1:
+            out[str(name)] = {'uuid': candidates[0]['uuid'], 'sheet': candidates[0]['sheet']}
+    # ponytail: one unambiguous stored symbol per net, not a whole-net copper highlight.
+    return {'nets': out, 'complete': len(out) == len(nets)}
+
+
 CHANNELS = ("components","wiring","routing","rules","board","visual")
 
 
@@ -5841,7 +6399,7 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0, bom_sink=No
     if settings.get("design", {}).get("enabled", False):
         attach_pcbdraw(board, out, blobs, allowed_sides)
     index = object_index(objs["base"], objs["head"], libraries=settings["libraries"]["enabled"]) if any(
-        settings[name]["enabled"] for name in ("threads", "issues", "inventory", "libraries")) else None
+        settings.get(name, {}).get("enabled") for name in ("threads", "issues", "inventory", "libraries", "ask")) else None
     if single and index is not None:   # one revision: nothing was added or moved
         for item in index:
             for key in ("added", "action", "pos_before"):
@@ -5855,11 +6413,22 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0, bom_sink=No
     checks = project_checks(p, settings, objs, waivers, single=single)
     if single:
         absolute_checks(checks)
+    ask = None
+    if context is not None:
+        with open("review/detect.json", encoding="utf-8") as fh: revision_shas = json.load(fh)
+        # Rebuilt from bounded facts, never from the report payload or its blobs. summary is 03's electrical_summary, the same object returned as project["summary"].
+        context[p["dir"]] = lambda net_cap, pin_cap: project_context(p, out, objs, sheets, pcbs, changes, checks, sides, net_cap, pin_cap, revision_shas, settings, summary=summary)
+        # An absent side is null, never {}.
+        ask = {"nets": {side: (ask_index(f"{out}/{side}")["nets"] if side in sides else None) for side in ("base", "head")}}
     return {"name": p["name"], "dir": p["dir"], "status": p["status"], "sheets": sheets, "board": board,
             "changes": changes, **({} if single else {"summary": summary}), "checks": checks,
             **({"parts": parts} if parts else {}),
             **({"libraries": libraries} if libraries else {}),
-            **({"objects": index} if index is not None else {})}
+            **({"objects": index} if index is not None else {}),
+            **({"ask": ask} if ask is not None else {}),
+            **({"identity": {side: identity_index(ask["nets"][side], identity_objects(objs[side]))
+                             for side in ("base", "head") if ask["nets"][side] is not None}}
+               if ask is not None else {})}
 
 
 def absolute_checks(checks):
@@ -5969,9 +6538,9 @@ def inline_page(data_js):
     elif has_poster:
         prefix = f'<script>\n{read("review3d.js")}</script>'
     page = page.replace('<script src="review.js"></script>', f"{prefix}<script>\n{read('review.js')}</script>")
-    for asset in ("kicad-colors.js", "appearance-state.js", "board-gl.js", "appearance.js", "board-marks.js", "board-diff.js", "three-studio.js", "image-view.js"):
+    for asset in ("kicad-colors.js", "appearance-state.js", "board-gl.js", "appearance.js", "board-marks.js", "board-diff.js", "three-studio.js", "image-view.js", "ask.js"):
         page = page.replace(f'<script src="{asset}"></script>', f'<script>\n{read(asset)}</script>')
-    if re.search(r'''(?:href|src)=(["'])(?:theme\.js|tokens\.css|review\.css|sample/review-data\.js|review\.js|kicad-colors\.js|board-gl\.js|appearance-state\.js|appearance\.js|board-marks\.js|board-diff\.js|three-studio\.js|image-view\.js)\1''', page): raise RuntimeError("external report assets remain: template did not match")
+    if re.search(r'''(?:href|src)=(["'])(?:theme\.js|tokens\.css|review\.css|sample/review-data\.js|review\.js|kicad-colors\.js|board-gl\.js|appearance-state\.js|appearance\.js|board-marks\.js|board-diff\.js|three-studio\.js|image-view\.js|ask\.js)\1''', page): raise RuntimeError("external report assets remain: template did not match")
     return page
 
 
@@ -6059,7 +6628,7 @@ def merge_supplier(projects, lookup):
 def filtered_settings(settings):
     """Keep opted-out report data compatible; embedded UI bytes may change."""
     report_settings = {k: v for k, v in settings.items()
-                       if k != "release" and not ((k in ("3d", "parts", "digikey", "threads", "issues", "waivers", "inventory", "libraries", "pdf", "downloads", "design") and not v["enabled"]) or (k == "github" and not v["check_runs"]))}
+                       if k != "release" and not ((k in ("3d", "parts", "digikey", "threads", "issues", "waivers", "inventory", "libraries", "pdf", "downloads", "design", "ask") and not v["enabled"]) or (k == "github" and not v["check_runs"]))}
     if not settings["parts"]["enabled"]:
         report_settings["bom"] = {"required_fields": settings["bom"]["required_fields"]}
     if settings["checks"].get("interfaces") == "off":  # opted-out report settings stay identical
@@ -6094,6 +6663,8 @@ def cmd_report(args):
     blobs = {}
     env = os.environ
     settings = load_settings()
+    ask_on = bool(settings.get("ask", {}).get("enabled"))
+    builders = {} if ask_on else None
     report_settings = filtered_settings(settings)
     data = {
         "version": 1,
@@ -6109,7 +6680,7 @@ def cmd_report(args):
     change_offset = 0
     bom_boards = []
     for i, p in enumerate(det["projects"]):
-        project = build_project(p, blobs, settings, waivers, change_offset, bom_boards)
+        project = build_project(p, blobs, settings, waivers, change_offset, bom_boards, context=builders)
         downloads = collect_downloads(p, i, det["head"]) if settings.get("downloads", {}).get("enabled") or settings["checks"].get("release", "off") != "off" else None
         if downloads:
             project["downloads"] = downloads
@@ -6119,6 +6690,12 @@ def cmd_report(args):
         data["bom"] = bom_repository(bom_boards, settings["fabrication"]["preset"], settings["fabrication"].get("part_field"))
     load_supplier(settings, data["projects"])
     assign_ids(data["projects"])
+    if ask_on:
+        doc = fit_context(lambda net_cap, pin_cap: {"version": 1, "kind": "kicad-review-design-context", "repo": env.get("GITHUB_REPOSITORY", ""),
+                                                      "base": det["base"], "head": det["head"], "reason": det["reason"],
+                                                      "projects": [b(net_cap, pin_cap) for b in builders.values()]})
+        with open("review/design-context.json", "w", encoding="utf-8") as fh:
+            json.dump(doc, fh, separators=(",", ":"), ensure_ascii=False)
     if waivers is not None:
         used = {(c["name"], v["waiver_key"]) for p in data["projects"] for c in p["checks"]
                 for v in c["violations"] if v.get("waived")}
@@ -6142,6 +6719,8 @@ def cmd_report(args):
         fh.write(f"pdf={'true' if settings.get('pdf', {}).get('enabled') else 'false'}\npdf_name={name[:-5]}.pdf\n")
         fh.write(f"downloads={'true' if os.path.isdir('review/downloads') and os.listdir('review/downloads') else 'false'}\ndownloads_name=kicad-review-downloads-{det['head'][:7]}\n")
         fh.write(f"threads={'true' if settings['threads']['enabled'] else 'false'}\n")
+        fh.write(f"ask={'true' if ask_on else 'false'}\n")
+        if ask_on: fh.write(f"context_name={name[:-5]}.context.json\n")
 
 
 DESIGN_DIR = "review/design"

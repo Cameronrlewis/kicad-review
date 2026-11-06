@@ -1,5 +1,6 @@
 """Self-checks for kicad_review.py. Run: python3 test_kicad_review.py"""
 import os
+import re
 
 # Only the KiCad interpreter imports pcbnew; ordinary host checks stay dependency-free.
 if os.environ.get("BR03_PCBNEW_TEST") == "1":
@@ -2014,10 +2015,46 @@ with tempfile.TemporaryDirectory() as output:
 assert "google-chrome" in test_wf and "CHROME" in test_wf, "TS-S1 CI browser setup"
 build_fixtures_src = pathlib.Path("ui/build-fixtures.py").read_text(encoding="utf-8")
 assert "inline_page" in build_fixtures_src, "TS-S1 fixture generation uses inline_page"
-for command in ('node ui/check.mjs --no-skip "Download dialog"', 'node ui/check.mjs --no-skip "Multi-board BOM" --page "$PAGES/multiboard.html"', 'node ui/check.mjs --no-skip "Fab limits"', 'node ui/check.mjs --no-skip "Fab limits" --dark', 'node ui/check.mjs --no-skip "Fabrication producer contract" --page "$PAGES/fab.html"', 'node ui/check.mjs --no-skip "Fabrication producer contract" --dark --page "$PAGES/fab.html"', 'node ui/check.mjs --no-skip "Waivers"', 'node ui/check.mjs', 'node ui/check.mjs --dark', 'node ui/check.mjs --no-skip "selection-only address"', 'node ui/check.mjs --no-skip "pasted selection address preserves an explicit position"', 'node ui/check.mjs --no-skip "passing checks with baseline findings"', 'node ui/check.mjs --no-skip 3D --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip "unchanged sheet" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "unchanged project" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "Parts fixture" --page "$PAGES/parts.html"', 'node ui/check.mjs --no-skip "Parts fixture" --dark --page "$PAGES/parts.html"', 'node ui/check.mjs --no-skip "design page"', 'node ui/check.mjs --no-skip "design page" --dark', 'node ui/check.mjs --no-skip "design 3D" --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip "design empty project" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "design PcbDraw card"', 'node ui/check.mjs --no-skip "design revisions thumbnails" --page "$PAGES/design-history.html"', 'node ui/check.mjs --no-skip "design readiness"', 'node ui/check.mjs --no-skip "design Parts" --page "$PAGES/parts.html"', 'node ui/check.mjs --no-skip "design Parts" --dark --page "$PAGES/parts.html"'):
+for command in (
+    'node ui/check.mjs --no-skip "Download dialog"',
+    'node ui/check.mjs --no-skip "Multi-board BOM" --page "$PAGES/multiboard.html"',
+    'node ui/check.mjs --no-skip "Fab limits"',
+    'node ui/check.mjs --no-skip "Fab limits" --dark',
+    'node ui/check.mjs --no-skip "Fabrication producer contract" --page "$PAGES/fab.html"',
+    'node ui/check.mjs --no-skip "Fabrication producer contract" --dark --page "$PAGES/fab.html"',
+    'node ui/check.mjs --no-skip "Waivers"',
+    'node ui/check.mjs',
+    'node ui/check.mjs --dark',
+    'node ui/check.mjs --no-skip "selection-only address"',
+    'node ui/check.mjs --no-skip "pasted selection address preserves an explicit position"',
+    'node ui/check.mjs --no-skip "passing checks with baseline findings"',
+    'node ui/check.mjs --no-skip 3D --page "$PAGES/3d.html"',
+    'node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"',
+    'node ui/check.mjs --no-skip "unchanged sheet" --page "$PAGES/two.html"',
+    'node ui/check.mjs --no-skip "unchanged project" --page "$PAGES/two.html"',
+    'node ui/check.mjs --no-skip "Parts fixture" --page "$PAGES/parts.html"',
+    'node ui/check.mjs --no-skip "Parts fixture" --dark --page "$PAGES/parts.html"',
+    'node ui/check.mjs --no-skip "design page"',
+    'node ui/check.mjs --no-skip "design page" --dark',
+    'node ui/check.mjs --no-skip "design 3D" --page "$PAGES/3d.html"',
+    'node ui/check.mjs --no-skip "design empty project" --page "$PAGES/two.html"',
+    'node ui/check.mjs --no-skip "design PcbDraw card"',
+    'node ui/check.mjs --no-skip "design revisions thumbnails" --page "$PAGES/design-history.html"',
+    'node ui/check.mjs --no-skip "design readiness"',
+    'node ui/check.mjs --no-skip "design Parts" --page "$PAGES/parts.html"',
+    'node ui/check.mjs --no-skip "design Parts" --dark --page "$PAGES/parts.html"',
+    'node ui/check.mjs --no-skip "Ask"',
+    'node ui/check.mjs --no-skip "Ask" --dark',
+    'python3 ui/ask-fixture.py "$PAGES/ask-four.html"',
+    'node ui/check.mjs --no-skip "BR09 fixture" --page "$PAGES/ask-four.html"',
+    'node ui/check.mjs --no-skip "BR09 fixture" --dark --page "$PAGES/ask-four.html"',
+    'node ui/check.mjs --no-skip "MCP unchanged identity links"',
+):
     assert "      - run: " + command in test_wf.splitlines(), "TS-S1 CI missing " + command
 assert test_wf.count("    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n") == test_wf.count("timeout-minutes:") == test_wf.count("runs-on:") == 2, "TS-S1 each CI job (test, dark) has one timeout"
 assert "apt-get" not in test_wf and test_wf.count("npm install") == 1, "TS-S1 only pinned 3D integration dependencies"
+assert test_wf.count("      - run: npm ci --prefix site") == 1, "TS-S1 exactly one locked site install"
+assert test_wf.index("actions/setup-node@") < test_wf.index("- run: npm ci --prefix site") < test_wf.index("- run: node --import ./site/css-loader.mjs --test site/test.mjs"), "TS-S1 locked site install follows setup-node"
 for suffix in ('', ' --dark'):
     assert '      - run: node ui/check.mjs --no-skip "BR02 single renderer head only"' + suffix + ' --page "$PAGES/single.html"' in test_wf
 assert "data['mode'] = 'single'" in build_fixtures_src and 'review-data-3d-processed.js' in build_fixtures_src
@@ -2058,6 +2095,21 @@ assert 'test_kicad_review.py' not in fixture_block, "CI finding 4: fixture gener
 assert '          python3 ui/build-fixtures.py "$PAGES"' in fixture_block.splitlines(), "TS-S1 fixture generation uses build-fixtures.py"
 assert fixture_block.index('export PAGES=') < fixture_block.index('python3 ui/build-fixtures.py "$PAGES"'), "TS-S1 build-fixtures needs PAGES"
 print("ok TS-S1 CI browser matrix")
+
+# MCP deployment must install the same locked site dependencies as tests.
+wf = pathlib.Path('.github/workflows/test.yml').read_text()
+deploy = pathlib.Path('.github/workflows/site-deploy.yml').read_text()
+site_docs = pathlib.Path('site/README.md').read_text()
+root_docs = pathlib.Path('README.md').read_text()
+assert "uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0" in deploy and "node-version: 22" in deploy and deploy.index("actions/setup-node@") < deploy.index("- run: npm ci --prefix site") < deploy.index("- run: node --import ./site/css-loader.mjs --test site/test.mjs"), "deploy pinned setup-node Node 22 before locked install and site test"
+assert 'npm ci --prefix site' in wf and wf.index('npm ci --prefix site') < wf.index('node --import ./site/css-loader.mjs --test site/test.mjs'), "MCP test.yml locked site install before site test"
+assert 'npm ci --prefix site' in deploy and deploy.index('npm ci --prefix site') < deploy.index('node --import ./site/css-loader.mjs --test site/test.mjs'), "MCP site-deploy.yml locked site install before site test"
+assert 'node ui/check.mjs --no-skip "MCP unchanged identity links"' in wf, "MCP browser check in test.yml"
+assert 'OAUTH_KV' in site_docs and 'OAUTH_KV' in root_docs and 'read:design' in root_docs, "MCP OAUTH_KV binding in site/README.md, read:design in README.md"
+assert re.search(r'No\s+model-provider\s+request', root_docs) and re.search(r'one\s+hour', root_docs), "MCP no model request and one hour TTL documented in README.md"
+assert re.search(r'Connect\s+panel', root_docs) and all(re.search(r'no\s+Connect\s+panel\s+is\s+shown', d) for d in (root_docs, site_docs)), "MCP Connect panel wording and absence documented"
+assert re.search(r'32\s+properties', root_docs) and re.search(r'200\s+code\s+points', root_docs) and 'searchFieldsComplete:false' in root_docs, "MCP property limits and searchFieldsComplete documented in README.md"
+print('ok MCP locked installation and settings docs')
 print("ok")
 
 # Parts lines: group by value+footprint+LCSC, normalise LCSC, flag missing numbers and conflicts.
@@ -4445,7 +4497,7 @@ with tempfile.TemporaryDirectory() as d:
         loaded = {"active": {("drc", k): {**entry, "check": "drc", "match": k}, ("erc", entry["match"]): entry},
                   "expired": wd["waivers"]["expired"], "proposed": [entry], "invalid": ["bad entry"]}
         with patch("kicad_review.load_settings", return_value=settings), patch("kicad_review.load_waivers", return_value=loaded), \
-             patch("kicad_review.build_project", side_effect=lambda *args: {"checks": [{"name": "drc", "violations": [{"waiver_key": k, "waived": {"reason": "intended"}}], "status": "pass"}], "changes": []}), \
+             patch("kicad_review.build_project", side_effect=lambda *args, **kwargs: {"checks": [{"name": "drc", "violations": [{"waiver_key": k, "waived": {"reason": "intended"}}], "status": "pass"}], "changes": []}), \
              patch("sys.stdout", new_callable=io.StringIO):
             kicad_review.cmd_report(None)
         data = json.loads(pathlib.Path("review/data.json").read_text())
@@ -4496,7 +4548,7 @@ with tempfile.TemporaryDirectory() as t:
             with patch("kicad_review.inline_page", side_effect=lambda payload: payload), patch("sys.stdout", new_callable=io.StringIO):
                 cmd_report(SimpleNamespace())
             legacy = {"version": 1, "repo": "", "links": review_links(os.environ, det), "base": det["base"], "head": det["head"], "reason": "test",
-                      "settings": {k: ({name: value for name, value in v.items() if name not in ("interfaces", "release", "fab_limits")} if k == "checks" else {name: value for name, value in v.items() if name != "check_limits"} if k == "fabrication" else {"required_fields": v["required_fields"]} if k == "bom" else v) for k, v in DEFAULT_SETTINGS.items() if k not in ("3d", "parts", "digikey", "pdf", "threads", "issues", "waivers", "inventory", "libraries", "design", "github", "interfaces", "release", "downloads")}, "run_id": "", "projects": []}
+                      "settings": {k: ({name: value for name, value in v.items() if name not in ("interfaces", "release", "fab_limits")} if k == "checks" else {name: value for name, value in v.items() if name != "check_limits"} if k == "fabrication" else {"required_fields": v["required_fields"]} if k == "bom" else v) for k, v in DEFAULT_SETTINGS.items() if k not in ("3d", "parts", "digikey", "pdf", "threads", "issues", "waivers", "inventory", "libraries", "design", "ask", "github", "interfaces", "release", "downloads")}, "run_id": "", "projects": []}
             legacy["assets"] = {}  # additive image capability does not enable issues
             assert open("review/data.json").read() == _json.dumps(legacy)
             assert open("review/kicad-review.html").read() == "window.REVIEW_DATA = " + _json.dumps({**{k: v for k, v in legacy.items() if k != "assets"}, "blobs": {}, "assets": {}}, separators=(",", ":")) + ";"
@@ -7688,6 +7740,46 @@ with tempfile.TemporaryDirectory() as tmp:
     finally: os.replace = real_replace
     assert a.read_bytes() == stamped and not list(pathlib.Path(tmp).glob("*.tmp"))
 print('ok BR02 GLB export timestamp normalized; bad input left as written')
+# Ask (spec 09): the [ask] setting.
+import kicad_review as kr
+assert kr.DEFAULT_SETTINGS["ask"] == {"enabled": False}
+def load_ask(toml_text):
+    with tempfile.TemporaryDirectory() as d:
+        old = os.getcwd()
+        os.chdir(d)
+        try:
+            write(d, {"base/kicad-review.toml": toml_text})
+            return kr.load_settings(("base",))
+        finally:
+            os.chdir(old)
+assert load_ask("[ask]\nenabled = true\n")["ask"] == {"enabled": True}
+assert load_ask("")["ask"] == {"enabled": False}
+for bad, message in (('[ask]\nenabled = "yes"\n', "ask.enabled must be true or false"), ("ask = 3\n", "ask must be a table")):
+    try:
+        load_ask(bad)
+        raise AssertionError("invalid [ask] must stop the review")
+    except SystemExit as exc:
+        assert message in str(exc.code), exc.code
+def ask_report_settings(toml_text):
+    with tempfile.TemporaryDirectory() as d:
+        old = os.getcwd()
+        os.chdir(d)
+        try:
+            os.makedirs("review")
+            os.makedirs("base")
+            with open("review/detect.json", "w") as fh:
+                json.dump({"base": "a" * 40, "head": "b" * 40, "reason": "test", "projects": []}, fh)
+            with open("base/kicad-review.toml", "w") as fh:
+                fh.write(toml_text)
+            with patch.dict(os.environ, {"GITHUB_OUTPUT": os.devnull, "GITHUB_STEP_SUMMARY": os.devnull}, clear=True):
+                with patch("kicad_review.inline_page", side_effect=lambda payload: payload), patch("sys.stdout", new_callable=io.StringIO):
+                    kr.cmd_report(SimpleNamespace())
+            return json.load(open("review/data.json"))["settings"]
+        finally:
+            os.chdir(old)
+assert ask_report_settings("[ask]\nenabled = true\n")["ask"] == {"enabled": True}, "enabled Ask must reach REVIEW_DATA.settings"
+assert "ask" not in ask_report_settings(""), "opted-out reports must drop the ask table"
+print("ok ask setting")
 
 # ---- Design page (spec 06). Shared helpers for every DP-S block below. ----
 import json as _dpjson, re as _dpre, base64 as _dpb64, gzip as _dpgz
@@ -7713,6 +7805,8 @@ assert "design" not in kr.filtered_settings(kr.load_settings(("nowhere",))), "an
 _on = json.loads(json.dumps(kr.DEFAULT_SETTINGS)); _on["design"]["enabled"] = True
 assert kr.filtered_settings(_on)["design"] == {"enabled": True}
 assert kr.filtered_settings(_on)["checks"] == kr.filtered_settings({**_on, "design": {"enabled": False}})["checks"]
+_both = json.loads(json.dumps(kr.DEFAULT_SETTINGS)); _both["design"]["enabled"] = _both["ask"]["enabled"] = True
+assert kr.filtered_settings(_both)["design"] == {"enabled": True} and kr.filtered_settings(_both)["ask"] == {"enabled": True}
 print("ok DP-S1 design setting, validation and opt-out")
 
 # DP-S2: a design report reads only the head side, even when the base checkout and renders are on disk.
@@ -9610,14 +9704,14 @@ if hasattr(kr, 'absolute_checks'):
         assert json.loads(json.dumps(current)) == expected, 'FAB snapshot: only comparison fields may change'
     assert fab_failed['new_errors'] == 1 and fab_failed['violations'][0]['new'] is True
 
-if hasattr(kr, 'complete_context_checks'):
-    cfg = copy.deepcopy(kr.DEFAULT_SETTINGS)
-    cfg['fabrication']['check_limits'] = True
-    cfg['checks']['fab_limits'] = 'required'
+if hasattr(kr, 'complete_context_checks'):  # own settings copy: the waiver checks below reuse cfg
+    ctx_cfg = copy.deepcopy(kr.DEFAULT_SETTINGS)
+    ctx_cfg['fabrication']['check_limits'] = True
+    ctx_cfg['checks']['fab_limits'] = 'required'
     ledger_keys = ('vendor','profile','checkedOn','assumedCopperOz','checked','unchecked','unsupported',
                    'coverageWarnings','baselineAvailable','fixed')
     for original in (fab_failed, fab_unsupported, fab_absent):
-        contexts = kr.complete_context_checks([copy.deepcopy(original)], cfg, True,
+        contexts = kr.complete_context_checks([copy.deepcopy(original)], ctx_cfg, True,
                                                original['status'] != 'not_run')
         matches = [c for c in contexts if c['name'] == 'fab_limits']
         assert len(matches) == 1, 'FAB context: supplied check lost or duplicated'
@@ -9629,13 +9723,13 @@ if hasattr(kr, 'complete_context_checks'):
         assert len(current['findings']) == len(original['violations'])
         assert all(v['confidence'] == 'deterministic' and v['evidence_source'] == kr.FAB_EVIDENCE_SOURCE
                    for v in current['findings'])
-    contexts = kr.complete_context_checks(list(copy.deepcopy(produced_fabs).values()), cfg, True, True)
+    contexts = kr.complete_context_checks(list(copy.deepcopy(produced_fabs).values()), ctx_cfg, True, True)
     assert sorted(c['vendor'] for c in contexts if c['name']=='fab_limits') == ['jlcpcb','pcbway'], 'FAB context: retain both vendors'
     for opt_in, level in ((False,'required'), (True,'off')):
-        cfg['fabrication']['check_limits'] = opt_in
-        cfg['checks']['fab_limits'] = level
-        assert kr.fab_checks({'name':'Disabled'}, cfg, 'unused') == []
-        contexts = kr.complete_context_checks([], cfg, True, True)
+        ctx_cfg['fabrication']['check_limits'] = opt_in
+        ctx_cfg['checks']['fab_limits'] = level
+        assert kr.fab_checks({'name':'Disabled'}, ctx_cfg, 'unused') == []
+        contexts = kr.complete_context_checks([], ctx_cfg, True, True)
         assert not any(c['name'] == 'fab_limits' for c in contexts), 'FAB context: disabled check synthesized'
 
 entries,bad = kr.parse_waivers('''
@@ -9772,6 +9866,770 @@ with tempfile.TemporaryDirectory() as td:
     finally: os.chdir(old)
 print('ok BR03 project_pair guards optional rules')
 
+# Ask (spec 09): Ask composes the shared producers; it adds no second export and no fatal path.
+import subprocess
+PCB_TEXT = '(kicad_pcb\n (layers\n  (0 "F.Cu" signal)\n )\n)\n'
+STATS_PARTIAL = {"board": {"has_outline": True, "width": "99 mm", "height": "88 mm"}}  # reused by Task 4's stale-output test
+def stats_fails(cmd, **kw):
+    if "stats" in cmd:
+        pathlib.Path(cmd[cmd.index("-o") + 1]).write_text(json.dumps(STATS_PARTIAL))
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="stats failed after writing")
+    return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+with tempfile.TemporaryDirectory() as t:
+    write(t, {"src/P.kicad_sch": "(kicad_sch)", "src/P.kicad_pcb": PCB_TEXT})
+    with patch.object(kr, "export_netlist") as netlist_export, \
+         patch.object(kr, "export_board_stats", return_value=None) as stats_export, \
+         patch.object(kr, "sheet_pages", return_value=[]), \
+         patch.object(kr.subprocess, "run", side_effect=stats_fails) as run:
+        kr.render_side(f"{t}/src", "P", f"{t}/out", ask=True)
+    netlist_export.assert_called_once_with(f"{t}/src/P.kicad_sch", f"{t}/out")
+    stats_export.assert_called_once_with(f"{t}/src/P.kicad_pcb", f"{t}/out")
+    assert not any("stats" in " ".join(c.args[0]) for c in run.call_args_list), "Ask must not add a second statistics exporter"
+    with patch.object(kr, "export_netlist") as netlist_export, patch.object(kr, "export_board_stats", return_value=None), patch.object(kr, "sheet_pages", return_value=[]), \
+         patch.object(kr.subprocess, "run", side_effect=stats_fails):  # plan omitted this patch; without it the Ask-off call hits real kicad-cli
+        kr.render_side(f"{t}/src", "P", f"{t}/out2")
+    netlist_export.assert_not_called()  # Ask off and netlist off: no netlist request
+# 03's soft failure, reached through the composed call: a failing netlist run writes the marker and never exits.
+def netlist_fails(cmd, **kw):
+    if "netlist" in cmd:
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="boom")
+    return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+with tempfile.TemporaryDirectory() as t:
+    write(t, {"src/P.kicad_sch": "(kicad_sch)", "src/P.kicad_pcb": PCB_TEXT})
+    with patch.object(kr.subprocess, "run", side_effect=netlist_fails), patch.object(kr, "export_board_stats", return_value=None), patch.object(kr, "sheet_pages", return_value=[]):
+        kr.render_side(f"{t}/src", "P", f"{t}/out", ask=True)  # no SystemExit
+    assert not os.path.exists(f"{t}/out/netlist.net") and "boom" in pathlib.Path(t, "out", "netlist.net.error").read_text(encoding="utf-8")
+with tempfile.TemporaryDirectory() as t:
+    old = os.getcwd(); os.chdir(t)
+    try:
+        pr = {"dir": "G", "name": "G", "status": "unchanged"}
+        write(t, {"review/detect.json": json.dumps({"base": "1"*40, "head": "2"*40, "projects": [pr]}),
+                  "base/G/G.kicad_pcb": PCB_TEXT, "head/G/G.kicad_pcb": PCB_TEXT,
+                  "base/G/G.kicad_sch": "(kicad_sch)", "head/G/G.kicad_sch": "(kicad_sch)"})
+        for ask_on in (True, False):
+            settings = copy.deepcopy(kr.DEFAULT_SETTINGS); settings["ask"]["enabled"] = ask_on
+            with patch("kicad_review.load_settings", return_value=settings), patch("kicad_review.render_side") as render:
+                kr.cmd_render(None)
+            assert render.call_args.kwargs["netlist"] is True and render.call_args.kwargs["ask"] is ask_on
+    finally:
+        os.chdir(old)
+print("ok ask shares the netlist and statistics producers")
+
+# Ask (spec 09): parts and nets of one revision.
+nt = netlist({"U1": ("MCU", "LQFP", "MCU:M"), "R1": ("10k", "R_0402", "Device:R")},
+             {"12": [("U1", "1", "PA1", "bidirectional"), ("R1", "1", "", "passive")],
+              "VBUS": [("U1", str(i), "", "passive") for i in range(10, 70)],
+              "unconnected-(U1-Pad2)": [("U1", "2", "", "passive")]})
+nets, pins, unconnected = kr.netlist_context(nt, net_cap=15, pin_cap=64)
+by_id = {n["id"]: n for n in nets}
+assert list(by_id) == ["12", "VBUS"] and all(type(n["id"]) is str for n in nets), "numeric net names stay strings"
+assert by_id["12"]["pins"] == ["U1.1", "R1.1"] and "more" not in by_id["12"]
+assert by_id["VBUS"]["pin_count"] == 60 and len(by_id["VBUS"]["pins"]) == 15 and by_id["VBUS"]["more"] == 45
+assert unconnected == 1 and pins["U1"][0] == {"pin": "1", "net": "12", "fn": "PA1"}
+assert {"pin": "2", "net": None} in pins["U1"] and kr.clip("x" * 300) == "x" * 200
+unit = lambda ref, n, uuid, sheet="/pwr/": {"kind": "symbol", "ref": ref if n == "1" else f"{ref} unit {n}",
+    "props": {"reference": ref, "Value": "MCU", "Footprint": "LQFP", "Datasheet": "https://x/ds.pdf", "MPN": "STM32", "LCSC": "c123", "dnp": "no"},
+    "where": {"sheet": sheet}, "pos": [1, 2, 0]}
+objs = {"/pwr/uuid-1": unit("U1", "1", "uuid-1"), "/pwr/uuid-2": unit("U1", "2", "uuid-2"),
+        "/uuid-3": {**unit("R1", "1", "uuid-3", "/"), "props": {"reference": "R1", "Value": "10k", "Datasheet": "~", "dnp": "yes"}},
+        "/uuid-4": {"kind": "symbol", "ref": "#PWR01", "props": {"reference": "#PWR01"}, "where": {"sheet": "/"}},
+        "/uuid-5": {"kind": "power symbol", "ref": "GND", "props": {}, "where": {"sheet": "/"}}}
+parts = kr.context_parts(objs)
+assert list(parts) == ["R1", "U1"] and parts["U1"]["units"] == 2 and parts["U1"]["uuid"] == "uuid-1"
+assert parts["U1"]["lcsc"] == "C123" and parts["U1"]["mpn"] == "STM32" and parts["U1"]["datasheet"] == "https://x/ds.pdf"
+assert parts["R1"]["dnp"] is True and parts["R1"]["datasheet"] is None and parts["U1"]["sheet"] == "/pwr/"
+assert parts["R1"]["bom"]["excludedReason"] == "dnp" and parts["U1"]["bom"]["included"] is True and parts["U1"]["bom"]["mpn"] == "STM32"
+with tempfile.TemporaryDirectory() as t:
+    ctx = kr.side_context(t, objs)
+    assert ctx["netlist_available"] is False and ctx["nets"] == [] and ctx["netlist_reason"], "no netlist, no nets"
+    assert [p["ref"] for p in ctx["parts"]] == ["R1", "U1"]
+    write(t, {"netlist.net.error": "kicad-cli sch export netlist failed (1): boom"})
+    assert "boom" in kr.side_context(t, objs)["netlist_reason"]
+    pathlib.Path(t, "netlist.net.error").unlink()
+    for corrupt in ("(((", "(garbage)", "(export)", "(export (components))", "(export (nets))",
+                    "(export (components) (nets)) (", "(export (components) (nets)) (garbage)",
+                    '(export (components) (nets)) "unterminated'):
+        write(t, {"netlist.net": corrupt})
+        assert kr.side_context(t, objs)["netlist_available"] is False
+    write(t, {"netlist.net": "(export (components) (nets))"})
+    assert kr.side_context(t, objs)["netlist_available"] is True
+    write(t, {"netlist.net": "((("})
+    bad = kr.side_context(t, objs)
+    assert bad["netlist_available"] is False and "unreadable" in bad["netlist_reason"] and bad["nets"] == []
+    write(t, {"netlist.net": nt})
+    good = kr.side_context(t, objs, net_cap=15, pin_cap=2)
+    assert good["netlist_available"] is True and good["netlist_reason"] is None and good["unconnected_pins"] == 1
+    u1 = next(p for p in good["parts"] if p["ref"] == "U1")
+    assert u1["pin_count"] == 62 and len(u1["pins"]) == 2 and u1["pins_more"] == 60
+    good = kr.side_context(t, objs, net_cap=15, pin_cap=2)
+    kr.enrich_context(good, objs, [{"path":"/pwr/", "name":"Power", "page":"2"}, {"path":"/", "name":"Root", "page":"1"}])
+    u = next(p for p in good["parts"] if p["ref"] == "U1")
+    assert u["page"] == "2" and u["properties"]["MPN"] == "STM32" and "R1" in u["neighbors"] and "12" in u["nets"]
+    n = next(n for n in good["nets"] if n["id"] == "12")
+    assert set(n["pages"]) == {"1", "2"} and n["labels_unavailable"]
+    assert all(n[key] is None for key in ("hierarchical_labels", "global_labels", "local_labels"))
+    assert n["pin_records"] == [{"ref":"U1", "pin":"1"}, {"ref":"R1", "pin":"1"}]
+    assert {entry["net"] for entry in u["pins"]} <= set(u["nets"]) and u["neighbors"] == ["R1"]
+# Review Focus 2: a genuinely board-only project retains parts, not fabricated schematic data.
+with tempfile.TemporaryDirectory() as t:
+    write(t, {"P.kicad_pcb": '(kicad_pcb (footprint "Test:R" (uuid "fp-r7") (layer "F.Cu") (at 10 20) (property "Reference" "R7") (property "Value" "4.7k")))'})
+    footprints = kr.pcb_objects(f"{t}/P.kicad_pcb")
+    board_only = kr.side_context(t, footprints)
+    kr.enrich_context(board_only, footprints, [])
+    assert board_only["nets"] == [] and board_only["netlist_available"] is False
+    assert len(board_only["parts"]) == 1
+    r7 = board_only["parts"][0]
+    assert (r7["ref"], r7["uuid"], r7["value"], r7["footprint"]) == ("R7", "fp-r7", "4.7k", "Test:R")
+    assert r7["source"] == "footprint" and r7["schematic_available"] is False and r7["schematic_reason"]
+    assert r7["sheet"] is None and r7["page"] is None and r7["sheet_name"] is None and r7["units"] is None
+    assert r7["connectivity_available"] is False and r7["connectivity_reason"] == board_only["netlist_reason"]
+    assert r7["pins"] == [] and r7["nets"] == [] and r7["neighbors"] == []
+    assert list(kr.context_parts({**objs, **footprints})) == ["R1", "U1"], "schematic parts take precedence over footprint fallback"
+# Source-field retention: identity keeps 2,000 code points; every cut or omitted property is named, never silent.
+# 45 properties in file order: Note (300 characters) is 5th, so it is kept but clipped; 13 properties after the 32nd are omitted.
+long_part = {**objs["/uuid-3"], "props": {"reference": "R1", "Value": "v" * 2500, "Datasheet": "https://x/ds.pdf", "dnp": "yes", "Note": "n" * 300, **{f"K{i}": "1" for i in range(40)}}}
+lp = kr.context_parts({"/uuid-3": long_part})["R1"]
+assert len(lp["value"]) == 2000 and "value" in lp["incomplete_fields"] and lp["properties_truncated"] is True
+assert len(lp["bom"]["value"]) == 2500, "the BOM identity is never clipped, so grouping stays exact"
+assert lp["properties_omitted"] == 45 - 32 and "properties" in lp["incomplete_fields"] and "properties.Note" in lp["incomplete_fields"]
+assert len(lp["properties"]["Note"]) == 200 and lp["properties"]["Note"] == "n" * 200
+assert parts["R1"]["properties_truncated"] is False and parts["R1"]["incomplete_fields"] == [] and parts["R1"]["value"] == "10k"
+assert kr.context_parts({"/uuid-3": long_part})["R1"]["mpn"] is None, "absent identity stays null, not an empty string"
+# Shared BOM cases (spec 08 fixture): every part's bom is 08's bom_identity, with the same included flags, excludedReason, line keys and quantities.
+# The fixture is 08 Task 3's file, byte-identical (08 handoff); it is required. 08's parts_lines is not on this branch
+# (only bom_identity may be handed off), so line keys and quantities are asserted through 09's own parts[].bom records,
+# grouped the way 10 consumes them. The parts_lines leg is skipped only while the 08 handoff block stands in
+# kicad_review.py; 08's merge replaces that block, and from then on the leg is required (no name-based guess).
+bom_handoff = "# ---- 08 handoff: bom_identity" in pathlib.Path(kr.__file__).read_text(encoding="utf-8")
+bom_cases = json.load(open(pathlib.Path(__file__).parent / "ui" / "fixtures" / "bom-cases.json", encoding="utf-8"))
+assert bom_cases, "shared BOM cases must not be empty"
+if bom_handoff:  # the skip is allowed only while this branch truly lacks 08: a merge that keeps the stand-in fails here
+    kr_src = pathlib.Path(kr.__file__).read_text(encoding="utf-8")
+    assert kr_src.count("\ndef bom_identity(") == 1, "08's bom_identity is merged: delete the 08 handoff block"
+    assert callable(getattr(kr, "parts_lines", None)), "kicad_review.parts_lines is missing or renamed: update the 08 handoff guard"
+    assert not any("category" in l or "refsCompressed" in l for case in bom_cases for l in kr.parts_lines(case["objects"])), \
+        "08's parts_lines is merged: delete the 08 handoff block so the shared parts_lines leg runs"
+for case in bom_cases:
+    for oid, object_ in case["objects"].items():
+        b = kr.bom_identity(object_)
+        assert b["included"] is case["expect"]["included"][oid] and b["excludedReason"] == case["expect"]["excludedReason"][oid], (case["name"], oid, b)
+    expect = sorted([(e["key"], e["refs"], e["quantity"], e["mpn"]) for e in case["expect"]["lines"]])
+    ctx_lines = {}
+    placed_objs = {oid: {**o, "props": {"reference": kr.base_ref(o["ref"]), **o["props"]}} for oid, o in case["objects"].items()}  # project_objects' shape
+    for rec in kr.context_parts(placed_objs).values():
+        if rec["bom"]["included"]:
+            ctx_lines.setdefault(rec["bom"]["key"], {"refs": [], "mpn": rec["bom"]["mpn"]})["refs"].append(rec["bom"]["ref"])
+    assert sorted((k, l["refs"], len(l["refs"]), l["mpn"]) for k, l in ctx_lines.items()) == expect, case["name"]
+    if not bom_handoff:  # 08's bom_identity and parts_lines (08 Task 3) are merged
+        lines = sorted(kr.parts_lines(case["objects"]), key=lambda line: line["key"])
+        assert [(l["key"], l["refs"], len(l["refs"]), l["mpn"]) for l in lines] == expect, case["name"]
+# Forward indexes describe the same pins in netlist order; only single-pin unconnected- nets are unconnected; pin functions are never cut silently.
+fwd = netlist({"U1": ("MCU", "LQFP", "MCU:M"), "R1": ("10k", "R_0402", "Device:R")},
+              {"A": [("R1", "2", "", "passive")], "B": [("U1", "1", "", "passive"), ("R1", "1", "", "passive")],
+               "unconnected-bus": [("U1", "3", "", "passive"), ("R1", "3", "", "passive")],
+               "unconnected-(U1-Pad4)": [("U1", "4", "f" * 61, "passive")]})
+with tempfile.TemporaryDirectory() as t:
+    write(t, {"netlist.net": fwd})
+    fctx = kr.side_context(t, objs, net_cap=1)
+    fb = {n["id"]: n for n in fctx["nets"]}
+    assert fb["B"]["pins"] == ["U1.1"] and fb["B"]["pin_records"] == [{"ref": "U1", "pin": "1"}], fb["B"]
+    assert fb["unconnected-bus"]["pin_count"] == 2 and fctx["unconnected_pins"] == 1, "a connected net named unconnected- stays a net"
+    fu1 = next(p for p in fctx["parts"] if p["ref"] == "U1")
+    assert {"pin": "3", "net": "unconnected-bus"} in fu1["pins"] and "R1" in fu1["neighbors"]
+    cut_fn = next(v for v in fu1["pins"] if v["pin"] == "4")
+    assert cut_fn["fn"] == "f" * 60 and cut_fn["fn_truncated"] is True, cut_fn
+    assert all("fn_truncated" not in v for v in fu1["pins"] if v["pin"] != "4")
+if bom_handoff:
+    print(f"pending 08 merge: 08 handoff block in place, parts_lines leg of {len(bom_cases)} shared BOM cases not asserted "
+          "(bom_identity eligibility and context_parts keys/quantities asserted)")
+placed = {"/bom-u1": {"kind": "symbol", "ref": "R1", "where": {"sheet": "/"}, "props": {"reference": "R1", "Value": "10k", "Footprint": "R_0402", "dnp": "yes"}}}
+assert kr.context_parts(placed)["R1"]["bom"] == kr.bom_identity(placed["/bom-u1"]) and kr.context_parts(placed)["R1"]["bom"]["excludedReason"] == "dnp"
+print("ok ask parts and nets")
+
+# Ask (spec 09): board facts, checks, changes, size.
+assert kr.stat_number("506.97 mm²") == 506.97 and kr.stat_number(None) is None and kr.stat_number("n/a") is None
+assert kr.stat_number(123) is None and kr.stat_number("") is None
+with tempfile.TemporaryDirectory() as t:
+    write(t, {"pcb.kicad_pcb": '(kicad_pcb\n (layers\n  (0 "F.Cu" signal)\n  (4 "In1.Cu" signal)\n  (2 "B.Cu" signal)\n  (5 "F.SilkS" user)\n )\n)\n'})
+    none = kr.board_facts(t, f"{t}/pcb.kicad_pcb")
+    assert none["stats_available"] is False and none["copper_layers"] == ["F.Cu", "In1.Cu", "B.Cu"] and none["layers"][-1] == "F.SilkS"
+    outline_less = {"board": {"has_outline": False, "width": None, "height": None, "area": None, "front_copper_area": "506.97 mm²",
+                              "back_copper_area": "37.305 mm²", "min_track_clearance": "0.2000 mm", "min_track_width": "0.2000 mm",
+                              "min_drill_diameter": "0.3000 mm", "board_thickness": "1.6000 mm"},
+                    "pads": {"smd": 225}, "vias": {"through": 15}, "components": {"total": {"front": 55, "back": 1, "total": 56}}}
+    write(t, {"stats.json": json.dumps(outline_less)})
+    facts = kr.board_facts(t, f"{t}/pcb.kicad_pcb")
+    assert facts["stats_available"] is True and facts["has_outline"] is False and facts["size_mm"] is None
+    assert facts["front_copper_mm2"] == 506.97 and facts["min_track_width_mm"] == 0.2 and facts["components"]["total"] == 56
+    write(t, {"stats.json": json.dumps({**outline_less, "board": {**outline_less["board"], "has_outline": True, "width": "50.0000 mm", "height": "30.5 mm"}})})
+    assert kr.board_facts(t, f"{t}/pcb.kicad_pcb")["size_mm"] == [50.0, 30.5]
+    write(t, {"stats.json": "{not json"})
+    assert kr.board_facts(t, f"{t}/pcb.kicad_pcb")["stats_available"] is False
+    write(t, {"stats.json": json.dumps({"board": None})})
+    assert kr.board_facts(t, f"{t}/pcb.kicad_pcb")["stats_available"] is False, "a non-object board section is unavailable, not a crash"
+    write(t, {"stats.json": json.dumps({"board": {}, "components": "not_a_dict"})})
+    assert kr.board_facts(t, f"{t}/pcb.kicad_pcb")["components"] == {}, "non-dict components section defaults to empty dict"
+    write(t, {"stats.json": json.dumps([1, 2, 3])})
+    assert kr.board_facts(t, f"{t}/pcb.kicad_pcb")["stats_available"] is False, "non-object stats JSON is unavailable"
+with tempfile.TemporaryDirectory() as t:
+    write(t, {"src/P.kicad_pcb": PCB_TEXT, "out/stats.json": json.dumps(STATS_PARTIAL)})
+    with patch("kicad_review.subprocess.run", side_effect=stats_fails):
+        kr.render_side(f"{t}/src", "P", f"{t}/out", ask=True)
+    facts = kr.board_facts(f"{t}/out", f"{t}/src/P.kicad_pcb")
+    assert facts["stats_available"] is False and "stats failed" in facts["stats_reason"]
+    assert "size_mm" not in facts, "failed export never feeds partial or stale facts to the model"
+viol = lambda i, new=True: {"type": "unconnected_items", "severity": "error", "description": f"Missing connection {i}", "items": [f"Pad {i}"] * 6, "new": new, "pos": [999, 999]}
+checks = [{"name": "erc", "title": "ERC", "level": "required", "status": "fail", "errors": 20, "warnings": 0, "new_errors": 20, "new_warnings": 0,
+           "violations": [viol(i) for i in range(20)]},
+          {"name": "drc", "title": "DRC", "level": "required", "status": "not_run", "reason": "no board", "errors": 0, "warnings": 0, "new_errors": 0, "new_warnings": 0, "violations": []},
+          {"name": "interfaces", "title": "Interfaces", "level": "informational", "status": "warn", "errors": 0, "warnings": 1, "new_errors": 0, "new_warnings": 1,
+           "violations": [{**viol(1), "severity": "warning"}]}]
+cc = {c["name"]: c for c in kr.context_checks(checks)}
+assert cc["erc"]["confidence"] == "deterministic" and cc["erc"]["evidence_source"] == "kicad-cli sch erc"
+assert len(cc["erc"]["findings"]) == 15 and cc["erc"]["more"] == 5 and len(cc["erc"]["findings"][0]["items"]) == 4
+assert "pos" not in json.dumps(cc), "ERC and DRC positions never reach the model"
+assert cc["drc"]["status"] == "not_run" and cc["drc"]["reason"] == "no board", "checks that did not run are listed"
+assert cc["interfaces"]["confidence"] == "heuristic"
+mixed = {**checks[0], "violations": [{**viol(i), "confidence": conf, "evidence_source": source} for i, (conf, source) in enumerate([
+    ("deterministic", "netlist"), ("heuristic", "pattern matcher"), ("datasheet-backed", "https://vendor.example/ds.pdf page 3")])]}
+assert [(v["confidence"], v["evidence_source"]) for v in kr.context_checks([mixed])[0]["findings"]] == [(v["confidence"], v["evidence_source"]) for v in mixed["violations"]]
+unknown = kr.context_checks([{**checks[0], "name": "future", "violations": [viol(0)]}])[0]
+assert unknown["findings"][0]["confidence"] == "heuristic" and "unavailable" in unknown["evidence_source"]
+upstream = kr.context_checks([{**checks[0], "confidence": "datasheet-backed", "evidence_source": "vendor datasheet page 3", "violations": [viol(0)]}])[0]
+assert upstream["confidence"] == upstream["findings"][0]["confidence"] == "datasheet-backed"
+assert upstream["evidence_source"] == upstream["findings"][0]["evidence_source"] == "vendor datasheet page 3"
+rows = [{"id": f"c{i}", "action": "added", "kind": "wire", "ref": "", "where": {"sheet": "/"}, "props": {"points": "(0, 0)"}} for i in range(200)]
+rows.insert(0, {"id": "c0", "action": "modified", "kind": "symbol", "ref": "R16", "where": {"sheet": "/"}, "changes": [["Value", "10k", "4.7k"]],
+                "channel": "components", "weight": "heavy"})
+ch = kr.context_changes(rows)
+assert ch["total"] == 201 and len(ch["rows"]) == 150 and ch["more"] == 51 and ch["by_kind"] == {"symbol": 1, "wire": 200}
+assert ch["rows"][0]["changes"] == [["Value", "10k", "4.7k"]] and ch["rows"][0]["weight"] == "heavy" and ch["rows"][0]["sheet"] == "/"
+# An oversized design is cut in stages; counts and a truncated flag stay.
+big = netlist({"U1": ("MCU", "", "MCU:M")}, {f"N{i}": [("U1", str(j), "", "passive") for j in range(100)] for i in range(500)})
+def build(net_cap, pin_cap):
+    nets, _, _ = kr.netlist_context(big, net_cap, pin_cap)
+    return {"version": 1, "projects": [{"revisions": {"head": {"nets": nets}}}]}
+doc = kr.fit_context(build)
+size = len(json.dumps(doc, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+head_nets = doc["projects"][0]["revisions"]["head"]["nets"]
+assert size <= kr.CONTEXT_LIMIT and doc["truncated"] is True, size
+assert head_nets[0]["pin_count"] == 100 and len(head_nets[0]["pins"]) < 100 and head_nets[0]["more"] > 0
+fixed = kr.fit_context(lambda nc, pc: {"version":1, "projects":[{"revisions":{"head":{"parts":[{"ref":str(i),"value":"µ"*500,"pins":[]} for i in range(500)],"nets":[]}},"changes":{"total":12}}]})
+assert kr.context_bytes(fixed) <= kr.CONTEXT_LIMIT and fixed["disabled_reason"] and fixed["omitted"] == {"projects":1,"parts":500,"nets":0,"changes":12}
+# Fixed collections and project metadata can overflow even with every pin list empty.
+many_projects = [{"name": "µ"*500, "revisions": {"head": {"parts": [], "nets": [{"id": "N"*500, "pins": []}]}}, "changes": {"total": 7, "rows": [{"detail": "x"*500}]}} for _ in range(200)]
+ceiling = kr.fit_context(lambda nc, pc: {"version": 1, "projects": many_projects})
+assert ceiling["omitted"] == {"projects": 200, "parts": 0, "nets": 200, "changes": 1400} and ceiling["projects"] == []
+assert kr.context_bytes(ceiling) <= kr.CONTEXT_LIMIT and "Select fewer projects" in ceiling["disabled_reason"]
+boundary = {"version": 1, "projects": [], "padding": "", "truncated": False}
+boundary["padding"] = "µ"*((kr.CONTEXT_LIMIT-kr.context_bytes(boundary))//2)
+boundary["padding"] += "x"*(kr.CONTEXT_LIMIT-kr.context_bytes(boundary))
+assert kr.context_bytes(kr.fit_context(lambda nc, pc: copy.deepcopy(boundary))) == kr.CONTEXT_LIMIT
+boundary["padding"] += "x"
+# JSON true is one byte shorter than false; measure that final metadata too.
+at_next_stage = kr.fit_context(lambda nc, pc: copy.deepcopy(boundary))
+assert at_next_stage["truncated"] is True and kr.context_bytes(at_next_stage) == kr.CONTEXT_LIMIT
+boundary["padding"] += "x"
+assert kr.fit_context(lambda nc, pc: copy.deepcopy(boundary))["disabled_reason"]
+check_settings = copy.deepcopy(kr.DEFAULT_SETTINGS)
+missing_checks = {c["name"]: c for c in kr.complete_context_checks([], check_settings, False, False)}
+assert missing_checks["erc"]["reason"] == "no schematic" and missing_checks["drc"]["reason"] == "no board"
+assert missing_checks["interfaces"]["reason"] == "disabled in settings"
+ASK_REVISION_FIELDS = {"revision", "sheets", "parts", "nets", "unconnected_pins", "netlist_available", "netlist_reason", "board"}  # Shared spec 10 fixture contract.
+with patch("kicad_review.side_context", side_effect=lambda *a,**kw: {"parts":[],"nets":[],"unconnected_pins":0,"netlist_available":True,"netlist_reason":None}), patch("kicad_review.sheet_pages", side_effect=lambda root,name: [{"path":"/","name":root,"page":"1" if root.startswith("base") else "2"}]), patch("kicad_review.os.path.isfile", return_value=False):
+    for sides in (("base","head"),("base",),("head",)):
+        status = "added" if sides == ("head",) else "removed" if sides == ("base",) else "modified"
+        record=kr.project_context({"name":"P","dir":"P","status":status},"review/P",{"base":{},"head":{}},[],{"base":"base/P.kicad_pcb","head":"head/P.kicad_pcb"},[],[],sides,15,15,{"base":"a"*40,"head":"b"*40},check_settings)
+        for side in ("base","head"):
+            rev=record["revisions"][side]
+            if side not in sides: assert rev is None
+            else:
+                assert rev["revision"] == ("a" if side=="base" else "b")*40 and rev["sheets"][0]["page"] == ("1" if side=="base" else "2")
+                assert set(rev) == ASK_REVISION_FIELDS
+                assert "pins" not in rev, "the reverse connectivity index is parts[].pins, not revisions.*.pins"
+with tempfile.TemporaryDirectory() as t:
+    old = os.getcwd(); os.chdir(t)
+    try:
+        pathlib.Path("head/P").mkdir(parents=True)
+        pathlib.Path("head/P/P.kicad_sch").write_text("(kicad_sch (unbalanced", encoding="utf-8")
+        pathlib.Path("head/P/P.kicad_pcb").write_text("(kicad_pcb (unbalanced", encoding="utf-8")
+        pathlib.Path("review/P/head").mkdir(parents=True)
+        pathlib.Path("review/P/head/netlist.net").write_text("(export (components) (nets))", encoding="utf-8")
+        record = kr.project_context(
+            {"name":"P","dir":"P","status":"added"}, "review/P", {"base":{},"head":{}}, [],
+            {"base":"base/P/P.kicad_pcb","head":"head/P/P.kicad_pcb"}, [], [], ("head",), 15, 15,
+            {"base":"a"*40,"head":"b"*40}, check_settings)
+        rev = record["revisions"]["head"]
+        reasons = {item["document"]: item["reason"] for item in rev["incomplete"]}
+        assert rev["sheets"] == [] and rev["board"] is None
+        assert "malformed S-expression" in reasons["schematic"]
+        assert "malformed S-expression" in reasons["board"]
+    finally:
+        os.chdir(old)
+small = kr.fit_context(lambda nc, pc: {"version": 1, "projects": []})
+assert small["truncated"] is False
+# Typed change detail is bounded, never silently dropped: row type, channel, weight and every full count survive.
+big_detail = {"kind": "members", "added": [f"J{i}.1" for i in range(300)], "removed": [], "beforeNets": ["A"], "afterNets": ["B"],
+              "transitions": [{"pin": str(i), "before": ["A"], "after": ["B"]} for i in range(200)]}
+dr = kr.context_changes([{"id": "d1", "action": "modified", "kind": "net-members", "ref": "N", "where": {"board": True},
+                          "channel": "wiring", "weight": "heavy", "detail": big_detail}])
+row = dr["rows"][0]
+assert row["kind"] == "net-members" and row["channel"] == "wiring" and row["weight"] == "heavy"
+assert row["detail_truncated"] is True and row["detail"]["omitted_counts"] == {"added": 300, "transitions": 200}
+assert len(row["detail"]["added"]) == 15 and row["detail"]["beforeNets"] == ["A"] and row["detail"]["kind"] == "members" and dr["detail_truncated"] == 1
+small_row = kr.context_changes([{"id": "s", "action": "modified", "kind": "net-members", "ref": "N", "where": {"board": True}, "detail": {"kind": "members", "added": ["J1.1"]}}])["rows"][0]
+assert small_row["detail"] == {"kind": "members", "added": ["J1.1"]} and "detail_truncated" not in small_row
+non_dict_row = kr.context_changes([{"id": "nd", "action": "modified", "kind": "wire", "ref": "", "detail": "x" * 2500}])["rows"][0]
+assert non_dict_row["detail"] == {"omitted": True} and non_dict_row["detail_truncated"] is True
+# 03's signed copper detail: outlines are counted, never sent; the row keeps its type, layer and signed areas.
+area = {"kind": "area", "layer": "F.Cu", "addedMm2": 12.5, "removedMm2": 0.0, "addedContours": [[[float(i), 0.0]] * 200 for i in range(40)], "removedContours": []}
+ar = kr.context_changes([{"id": "a1", "action": "modified", "kind": "copper", "ref": "F.Cu", "where": {"board": True}, "channel": "board", "weight": "heavy", "detail": area}])["rows"][0]
+assert ar["detail"]["kind"] == "area" and ar["detail"]["layer"] == "F.Cu" and ar["detail"]["addedMm2"] == 12.5
+assert ar["detail"]["addedContours"] == {"omitted": True} and ar["detail"]["omitted_counts"] == {"addedContours": 40} and ar["detail"]["removedContours"] == []
+assert ar["detail_truncated"] is True and ar["channel"] == "board" and ar["weight"] == "heavy"
+# 04's fab coverage ledger survives into the context check; long lists keep 15 items and a full count.
+fab = {**checks[0], "name": "fab_limits", "vendor": "jlcpcb", "title": "Fab limits", "profile": "jlcpcb-multilayer", "checkedOn": "2026-10-01", "assumedCopperOz": 1,
+       "checked": ["track width"], "unchecked": [f"limit {i}" for i in range(20)], "unsupported": None,
+       "coverageWarnings": ["F.Cu: copper thickness unknown"], "baselineAvailable": False, "fixed": 0, "violations": []}
+# 04 owns FAB_EVIDENCE_SOURCE (04 is not merged yet). Verify 04's exact constant when merged, or fallback to it in the test fixture.
+FAB_EVIDENCE_SOURCE_04 = ('kicad-cli pcb drc; isolated board-only and vendor DRC passes per revision; '
+                          'vendor-only findings paired between head and base by multiset identity; '
+                          'fab_limits.json dated profile; coverage limited to checked limits '
+                          '(see unchecked, unsupported and coverageWarnings)')
+if hasattr(kr, "FAB_EVIDENCE_SOURCE"):
+    assert kr.FAB_EVIDENCE_SOURCE == FAB_EVIDENCE_SOURCE_04, "04's FAB_EVIDENCE_SOURCE matches expected value"
+fab_source = getattr(kr, "FAB_EVIDENCE_SOURCE", FAB_EVIDENCE_SOURCE_04)
+# 04 supplies two same-name sections: identities survive projection and completion, even with no board.
+fab_sections = [{**fab, "vendor": vendor, "profile": profile,
+                 "confidence": "deterministic", "evidence_source": fab_source}
+                for vendor, profile in (("jlcpcb", "jlcpcb-multilayer"), ("pcbway", "pcbway-standard"))]
+for has_board in (True, False):
+    supplied = [dict(c) for c in fab_sections]
+    if not has_board:
+        supplied = [{**c, "status": "not_run", "reason": "no board", "errors": 0, "warnings": 0,
+                     "new_errors": 0, "new_warnings": 0, "violations": []} for c in supplied]
+    for projected in (kr.context_checks(supplied), kr.complete_context_checks(supplied, check_settings, True, has_board)):
+        sections = [c for c in projected if c["name"] == "fab_limits"]
+        assert len(sections) == 2
+        assert [(c["name"], c["vendor"]) for c in sections] == [("fab_limits", "jlcpcb"), ("fab_limits", "pcbway")]
+        assert [c["profile"] for c in sections] == [c["profile"] for c in supplied]
+        assert all(c["confidence"] == "deterministic" and c["evidence_source"] == fab_source for c in sections)
+        if not has_board:
+            assert all(c["status"] == "not_run" and c["reason"] == "no board" and c["findings"] == [] for c in sections)
+assert not any(c["name"] == "fab_limits" for c in kr.complete_context_checks([], check_settings, True, False)), "disabled/absent fab checks are not synthesized"
+fc = kr.context_checks([fab])[0]
+assert fc["vendor"] == "jlcpcb"
+assert fc["unchecked"] == [f"limit {i}" for i in range(15)] and fc["unchecked_more"] == 5 and fc["baselineAvailable"] is False
+assert fc["profile"] == "jlcpcb-multilayer" and fc["coverageWarnings"] == ["F.Cu: copper thickness unknown"] and fc["fixed"] == 0 and fc["unsupported"] is None
+# Ledger clips are never silent: a string or item over 200 code points is cut, named in <field>_truncated, and feeds the aggregate flag.
+long_fab = {**fab, "profile": "p" * 250, "coverageWarnings": ["c" * 250, "short"], "checked": ["track width"]}
+lf = kr.context_checks([long_fab])[0]
+assert lf["profile"] == "p" * 200 and lf["profile_truncated"] is True
+assert lf["coverageWarnings"] == ["c" * 200, "short"] and lf["coverageWarnings_truncated"] is True and "checked_truncated" not in lf
+clean_fab = {"name": "fab_limits", "title": "Fab limits", "level": "required", "status": "pass", "errors": 0, "warnings": 0, "new_errors": 0,
+             "new_warnings": 0, "violations": [], "profile": "jlcpcb-multilayer", "checked": ["track width"], "unchecked": ["x"]}
+assert kr.fit_context(lambda nc, pc: {"version": 1, "projects": [{"checks": [lf], "revisions": {}}]})["truncated"] is True, "a ledger clip marks the whole context"
+assert kr.fit_context(lambda nc, pc: {"version": 1, "projects": [{"checks": kr.context_checks([clean_fab]), "revisions": {}}]})["truncated"] is False
+# Aggregate truncation: a part with 33 properties and one 300-character value is truncated, with its per-field marks named.
+wide = {"/uuid-w": {"kind": "symbol", "ref": "R9", "where": {"sheet": "/"}, "props": {"reference": "R9", "Value": "1k", "Note": "n" * 300, **{f"K{i}": "1" for i in range(30)}}}}
+assert len(wide["/uuid-w"]["props"]) == 33
+wide_parts = list(kr.context_parts(wide).values())
+wdoc = kr.fit_context(lambda nc, pc: {"version": 1, "kind": "kicad-review-design-context", "repo": "Cameronrlewis/repo", "base": "0" * 40, "head": "a" * 40, "reason": "push",
+                                      "projects": [{"dir": "", "name": "test", "revisions": {"head": {"parts": wide_parts, "nets": []}}}]})
+wp = wdoc["projects"][0]["revisions"]["head"]["parts"][0]
+assert wdoc["truncated"] is True and wp["properties_truncated"] is True and wp["properties_omitted"] == 1
+assert "properties" in wp["incomplete_fields"] and "properties.Note" in wp["incomplete_fields"] and len(wp["properties"]["Note"]) == 200
+fixture_path = pathlib.Path(__file__).parent / "site" / "fixtures" / "producer-truncated-context.json"
+if os.environ.get("REGENERATE_FIXTURES") == "1":
+    fixture_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(fixture_path, "w", encoding="utf-8") as fh:
+        json.dump(wdoc, fh, separators=(",", ":"), ensure_ascii=False)
+with open(fixture_path, "r", encoding="utf-8") as fh:
+    committed_doc = json.load(fh)
+assert committed_doc == wdoc, f"{fixture_path} drift; run REGENERATE_FIXTURES=1 python3 test_kicad_review.py"
+clean_part = list(kr.context_parts({"/uuid-3": objs["/uuid-3"]}).values())
+assert kr.fit_context(lambda nc, pc: {"version": 1, "projects": [{"revisions": {"head": {"parts": clean_part, "nets": []}}}]})["truncated"] is False
+# 09 owns net_changes: 03's wiring status decides availability; a missing summary is unavailable, zero complete rows are available.
+assert kr.net_change_support(None) == {"available": False, "complete": False}
+assert kr.net_change_support({}) == {"available": False, "complete": False}
+assert kr.net_change_support({"channels": []}) == {"available": False, "complete": False}
+assert kr.net_change_support({"channels": [{"channel": "other", "status": "complete"}]}) == {"available": False, "complete": False}
+assert kr.net_change_support({"channels": [{"channel": "wiring", "status": "complete"}]}) == {"available": True, "complete": True}
+assert kr.net_change_support({"channels": [{"channel": "wiring", "status": "incomplete"}]}) == {"available": True, "complete": False}
+assert kr.net_change_support({"channels": [{"channel": "wiring", "status": "not_applicable"}]}) == {"available": False, "complete": False}
+summary = {"headline": "1 nets added", "channels": [{"channel": "wiring", "status": "complete"}]}
+with patch("kicad_review.side_context", return_value={"parts": [], "nets": [], "unconnected_pins": 0, "netlist_available": True, "netlist_reason": None}), \
+     patch("kicad_review.sheet_pages", return_value=[]), patch("kicad_review.os.path.isfile", return_value=False):
+    for summary_in, expected in ((summary, ("1 nets added", {"available": True, "complete": True})), (None, (None, {"available": False, "complete": False}))):
+        rec = kr.project_context({"name": "P", "dir": "P", "status": "modified"}, "review/P", {"base": {}, "head": {}}, [],
+                                 {"base": "base/P.kicad_pcb", "head": "head/P.kicad_pcb"}, [], [], ("head",), 15, 15,
+                                 {"base": "a" * 40, "head": "b" * 40}, check_settings, summary=summary_in)
+        assert (rec["headline"], rec["net_changes"]) == expected and rec["revisions"]["base"] is None
+print("ok ask board facts checks changes size")
+
+# Ask (spec 09): report writes the context beside the report and omits Ask data and exports when Ask is off; shared inlined assets may change.
+def run_report(ask_on):
+    with tempfile.TemporaryDirectory() as t:
+        old = os.getcwd(); os.chdir(t)
+        try:
+            project = {"dir": "P", "name": "P", "status": "modified"}
+            net = lambda r: netlist({"U1": ("MCU", "", "MCU:M"), "R1": (r, "", "Device:R")},
+                                    {"12": [("U1", "1", "PA1", "bidirectional"), ("R1", "1", "", "passive")]})
+            write(t, {"review/detect.json": json.dumps({"base": "b" * 40, "head": "c" * 40, "reason": "fixture", "projects": [project]}),
+                      "review/P/base/netlist.net": net("10k"), "review/P/head/netlist.net": net("4.7k")})
+            ask_symbol = lambda value: {**sym("R1", value, "C1"), "where": {"sheet": "/"}, "props": {**sym("R1", value, "C1")["props"], "reference": "R1"}}
+            objects = {"base": {"/r": ask_symbol("10k")}, "head": {"/r": ask_symbol("4.7k")}}
+            rows = [{"action": "modified", "kind": "symbol", "ref": "R1", "where": {"sheet": "/"}, "pos": None, "box": None, "changes": [["Value", "10k", "4.7k"]]}]
+            settings = copy.deepcopy(kr.DEFAULT_SETTINGS); settings["ask"]["enabled"] = ask_on
+            out = f"{t}/gh-output"
+            real_build_project = kr.build_project
+            def build_with_report_images(p, blobs, *args, **kwargs):
+                result = real_build_project(p, blobs, *args, **kwargs)
+                board = result.setdefault("board", {})
+                board["pcbdraw"] = {"head": {"front": "ask-pcbdraw-front", "back": "ask-pcbdraw-back", "note": ""}}
+                board["poster3d"] = {"head": "ask-poster3d"}
+                blobs.update({"ask-pcbdraw-front": "ASK_FRONT_IMAGE_SENTINEL", "ask-pcbdraw-back": "ASK_BACK_IMAGE_SENTINEL", "ask-poster3d": "ASK_POSTER_IMAGE_SENTINEL"})
+                return result
+            # project_pair passes its issues list as a third argument, so the stand-in accepts it (as the opted-out report test does).
+            with patch("kicad_review.build_project", side_effect=build_with_report_images), \
+                 patch("kicad_review.project_objects", side_effect=lambda path, name, issues=None: objects[path.split("/")[0]]), \
+                 patch("kicad_review.diff_objects", return_value=rows), patch("kicad_review.project_checks", return_value=[]), \
+                 patch("kicad_review.load_settings", return_value=settings), patch.dict(os.environ, {"GITHUB_OUTPUT": out, "GITHUB_REPOSITORY": "o/r"}):
+                kr.cmd_report(None)
+            ctx = json.loads(pathlib.Path("review/design-context.json").read_text(encoding="utf-8")) if os.path.exists("review/design-context.json") else None
+            # data.json drops the blobs table, so the report-only image blobs are read from the embedded payload.
+            embedded = json.loads(pathlib.Path("review/kicad-review.html").read_text().split("window.REVIEW_DATA = ", 1)[1].split(";</script>", 1)[0])
+            data = {**json.loads(pathlib.Path("review/data.json").read_text()), "blobs": embedded["blobs"]}
+            return ctx, data, pathlib.Path(out).read_text()
+        finally:
+            os.chdir(old)
+ctx, data, outputs = run_report(True)
+assert data["projects"][0]["board"]["pcbdraw"]["head"]["front"] == "ask-pcbdraw-front"
+assert data["projects"][0]["board"]["poster3d"]["head"] == "ask-poster3d"
+assert data["blobs"]["ask-poster3d"] == "ASK_POSTER_IMAGE_SENTINEL"
+context_text = json.dumps(ctx)
+assert all(token not in context_text for token in ('"pcbdraw"', '"poster3d"', '"blobs"', "ask-pcbdraw-front", "ask-pcbdraw-back", "ask-poster3d", "ASK_FRONT_IMAGE_SENTINEL", "ASK_BACK_IMAGE_SENTINEL", "ASK_POSTER_IMAGE_SENTINEL")), "report image references and blobs must never enter model context"
+head = ctx["projects"][0]["revisions"]["head"]
+assert ctx["version"] == 1 and ctx["kind"] == "kicad-review-design-context" and ctx["head"] == "c" * 40 and ctx["truncated"] is False
+assert head["nets"][0]["id"] == "12" and head["nets"][0]["pins"] == ["U1.1", "R1.1"] and head["parts"][0]["value"] == "4.7k"
+assert ctx["projects"][0]["revisions"]["base"]["parts"][0]["value"] == "10k" and ctx["projects"][0]["changes"]["rows"][0]["ref"] == "R1"
+assert head["revision"] == "c"*40 and "sheets" in head
+assert ctx["projects"][0]["revisions"]["base"]["revision"] == "b"*40
+assert "sheets" in ctx["projects"][0]["revisions"]["base"]
+assert "ask=true\n" in outputs and "context_name=kicad-review-bbbbbbb-ccccccc-pass.context.json\n" in outputs
+assert data["settings"]["ask"] == {"enabled": True} and data["projects"][0]["ask"] == {"nets": {"base": {"12": {"fallback_ref":"U1"}}, "head": {"12": {"fallback_ref":"U1"}}}} and "objects" in data["projects"][0]
+ctx_off, data_off, outputs_off = run_report(False)
+assert ctx_off is None and "ask=false\n" in outputs_off and "context_name" not in outputs_off
+assert "ask" not in data_off["settings"] and "ask" not in data_off["projects"][0] and "objects" not in data_off["projects"][0], "Ask off adds no optional Ask data"
+with tempfile.TemporaryDirectory() as t:
+    write(t, {"base/netlist.net": netlist({}, {"REMOVED":[("U1","1","","passive")]}), "head/netlist.net": "(export (components) (nets))"})
+    assert "REMOVED" in kr.ask_index(f"{t}/base")["nets"] and "REMOVED" not in kr.ask_index(f"{t}/head")["nets"]
+    write(t, {"base/netlist.net.error":"failed after partial output"})
+    assert kr.ask_index(f"{t}/base")["nets"] == {}
+print("ok ask context is written beside the report")
+
+# Ask (spec 09): the workflow uploads the context only when Ask is on, and never fails the review over it.
+wf = pathlib.Path(".github/workflows/review.yml").read_text(encoding="utf-8")
+assert "steps.report.outputs.context_name" in wf and "review/design-context.json" in wf
+copy_step = wf[wf.index("- name: Copy design context"):]
+copy_step = copy_step[:copy_step.index("- name: Screenshots of changed drawings")]
+assert copy_step.count("if: steps.report.outputs.ask == 'true'") == 2 and copy_step.count("continue-on-error: true") == 2, copy_step
+assert "archive: false" in copy_step and "retention-days: 90" in copy_step
+assert wf.index("- name: Upload report") < wf.index("- name: Copy design context") < wf.index("- name: Screenshots of changed drawings")
+# 06 must be merged first. Its inert Ask-guarded hook is required once 06 merges.
+# 09 Task 5 enables the snapshot producer and tests ask-on and ask-off outputs.
+snapshot_merged = (
+    hasattr(kr, "cmd_snapshot")
+    or "design" in getattr(kr, "DEFAULT_SETTINGS", {})
+    or any(line.strip().startswith("- name:") and "snapshot" in line.lower() for line in wf.splitlines())
+)
+if snapshot_merged:
+    assert "- name: Upload design snapshot context" in wf, "merge 06 before 09 snapshot integration"
+    snap = wf[wf.index("- name: Upload design snapshot context"):]
+    snap = snap[:snap.index("\n      - name:", 1)] if "\n      - name:" in snap[1:] else snap
+    assert "steps.snapshot.outputs.context_name" in snap and "archive: false" in snap and "steps.snapshot.outputs.ask == 'true'" in snap, snap
+    assert "continue-on-error: true" in snap and "path: review/design/${{ steps.snapshot.outputs.context_name }}" in snap, snap
+    assert "retention-days: ${{ vars.KICAD_REVIEW_SNAPSHOT_DAYS || 90 }}" in snap, snap
+    assert "retention-days: 90" not in snap, "snapshot context follows the repository snapshot retention variable, not comparison-report retention"
+else:
+    # 06 is unmerged (plan-context.md:60; controller: Plans 02, 04, 06 NOT merged).
+    # Guard against partial merges or renaming: fail if any part of 06 lands without the context upload hook.
+    assert not hasattr(kr, "cmd_snapshot"), "06's cmd_snapshot is merged: Upload design snapshot context hook must be present in review.yml"
+    assert "design" not in getattr(kr, "DEFAULT_SETTINGS", {}), "06's design settings are merged: Upload design snapshot context hook must be present in review.yml"
+    assert not any(line.strip().startswith("- name:") and "snapshot" in line.lower() for line in wf.splitlines()), \
+        "06 snapshot workflow steps are present: Upload design snapshot context hook must be present in review.yml"
+    print("pending 06 merge: 06's Upload design snapshot context hook not in review.yml (plan-context.md:60; flip to unconditional assert once 06 merges)")
+print("ok ask context upload step")
+
+
+# Ask (spec 09, Task 3C): label kinds come from KiCad probes; any difference from the real netlist fails closed.
+import hashlib
+LBL = lambda kind, text, x, y, u: f'({kind} "{text}" (at {x} {y} 0) (effects (font (size 1.27 1.27))) (uuid "{u}"))'
+ROOT = ('(kicad_sch (version 20260306) (generator "eeschema") (uuid "r-uuid") (lib_symbols) '
+        + LBL("label", "SDA", 20, 20, "l-1") + LBL("global_label", "VBUS", 30, 30.5, "g-1")
+        + '(sheet (at 40 50) (size 20 10) (uuid "s-a") (property "Sheetname" "A" (at 40 49 0)) (property "Sheetfile" "power.kicad_sch" (at 40 61 0)) (instances (project "P" (path "/r-uuid" (page "2")))))'
+        + '(sheet (at 80 50) (size 20 10) (uuid "s-b") (property "Sheetname" "B" (at 80 49 0)) (property "Sheetfile" "power.kicad_sch" (at 80 61 0)) (instances (project "P" (path "/r-uuid" (page "3")))))'
+        + '(sheet_instances (path "/" (page "1"))))')
+CHILD = '(kicad_sch (version 20260306) (generator "eeschema") (uuid "c-uuid") (lib_symbols) ' + LBL("hierarchical_label", "EN", 10, 0, "h-1") + ')'
+with tempfile.TemporaryDirectory() as t:
+    write(t, {"src/P.kicad_sch": ROOT, "src/power.kicad_sch": CHILD, "src/P.kicad_pro": "{}"})
+    probes = kr.label_probes(f"{t}/src", "P", f"{t}/work")
+    assert [(p["ref"], p["kind"], p["text"], p["sheet"]) for p in probes] == [
+        ("KRPROBE1", "label", "SDA", "/"), ("KRPROBE2", "global_label", "VBUS", "/"),
+        ("KRPROBE3", "hierarchical_label", "EN", "/s-a/"), ("KRPROBE4", "hierarchical_label", "EN", "/s-b/")], probes
+    root_copy = pathlib.Path(t, "work", "P.kicad_sch").read_text(encoding="utf-8")
+    child_copy = pathlib.Path(t, "work", "power.kicad_sch").read_text(encoding="utf-8")
+    assert kr.parse_sexpr(root_copy)[0] == "kicad_sch"
+    assert '(lib_id "kicad_review_probe:P") (at 30 30.5 0)' in root_copy and "(junction (at 30 30.5)" in root_copy, "verbatim anchor, probe plus junction"
+    assert child_copy.count('(lib_id "kicad_review_probe:P")') == 1, "one probe symbol per label, one reference per instance"
+    assert '(path "/r-uuid/s-a" (reference "KRPROBE3")' in child_copy and '(path "/r-uuid/s-b" (reference "KRPROBE4")' in child_copy
+    assert pathlib.Path(t, "src", "P.kicad_sch").read_text(encoding="utf-8") == ROOT, "the source is never edited"
+    assert pathlib.Path(t, "work", "P.kicad_pro").is_file()
+    for name, files, needle in (
+        ("bus", {"src/power.kicad_sch": CHILD[:-1] + '(bus (pts (xy 0 0) (xy 0 20)) (uuid "b-1")))'}, "bus"),
+        ("bus label", {"src/power.kicad_sch": CHILD[:-1] + LBL("label", "D[0..7]", 1, 1, "l-9") + ")"}, "bus"),
+        ("reserved", {"src/power.kicad_sch": CHILD.replace('"EN"', '"KRPROBE9"')}, "reserved"),
+        ("outside", {"src/P.kicad_sch": ROOT.replace('"power.kicad_sch" (at 40', '"../x.kicad_sch" (at 40'), "x.kicad_sch": CHILD}, "outside")):
+        write(t, {"src/P.kicad_sch": ROOT, "src/power.kicad_sch": CHILD}); write(t, files)
+        try:
+            kr.label_probes(f"{t}/src", "P", f"{t}/work-{name.replace(' ', '-')}")
+            raise AssertionError(f"{name} must fail closed")
+        except ValueError as exc:
+            assert needle in str(exc), (name, exc)
+# Verification against synthetic netlists (shapes copied from the real 10.0.0 exports).
+comps = {"R1": ("1k", "R_0402", "Device:R"), "R2": ("1k", "R_0402", "Device:R")}
+probe_comps = {**comps, **{f"KRPROBE{i}": ("probe", "", "kicad_review_probe:P") for i in range(1, 6)}}
+real = {"/SDA": [("R1", "1", "", "passive"), ("R2", "1", "", "passive")], "VBUS": [("R1", "2", "", "passive")], "/A/EN": [("R2", "2", "", "passive")]}
+P = lambda i: (f"KRPROBE{i}", "1", "", "passive")
+probed = {"/SDA": real["/SDA"] + [P(1)], "VBUS": real["VBUS"] + [P(2), P(4)], "/A/EN": real["/A/EN"] + [P(3)], "/FLOAT": [P(5)]}
+probes = [{"ref": "KRPROBE1", "kind": "label", "text": "SDA", "sheet": "/", "uuid": "l-1"},
+          {"ref": "KRPROBE2", "kind": "global_label", "text": "VBUS", "sheet": "/", "uuid": "g-1"},
+          {"ref": "KRPROBE3", "kind": "hierarchical_label", "text": "EN", "sheet": "/s-a/", "uuid": "h-1"},
+          {"ref": "KRPROBE4", "kind": "label", "text": "LOC", "sheet": "/", "uuid": "l-4"},
+          {"ref": "KRPROBE5", "kind": "label", "text": "FLOAT", "sheet": "/", "uuid": "l-5"}]
+erc = {"sheets": [{"path": "/", "violations": [{"type": "label_dangling", "items": [{"uuid": "l-5"}]}]}]}
+orig = netlist(comps, real)
+doc = kr.label_membership(orig, netlist(probe_comps, probed), probes, erc)
+assert doc["netlist_sha256"] == hashlib.sha256(orig.encode()).hexdigest() and doc["unattached"] == 1 and doc["probes"] == 5
+assert doc["nets"]["VBUS"] == {"global_labels": [{"text": "VBUS", "sheet": "/"}], "local_labels": [{"text": "LOC", "sheet": "/"}], "hierarchical_labels": []}
+assert doc["nets"]["/A/EN"]["hierarchical_labels"] == [{"text": "EN", "sheet": "/s-a/"}] and "/FLOAT" not in doc["nets"]
+moved = {**probed, "/SDA": [real["/SDA"][0], P(1)], "VBUS": probed["VBUS"] + [real["/SDA"][1]]}
+renamed = {("Net-(R1-Pad1)" if k == "/SDA" else k): v for k, v in probed.items()}
+for why, nets_, comps_, erc_, needle in (
+    ("a pin moved", moved, probe_comps, erc, "differs"),
+    ("a net renamed", renamed, probe_comps, erc, "differs"),
+    ("a probe missing", {k: [n for n in v if n[0] != "KRPROBE3"] for k, v in probed.items()}, probe_comps, erc, "exactly one"),
+    ("a probe twice", {**probed, "/SDA": probed["/SDA"] + [P(3)]}, probe_comps, erc, "exactly one"),
+    ("a part added", probed, {**probe_comps, "R9": ("1k", "R", "Device:R")}, erc, "parts differ"),
+    ("dangling not in ERC", probed, probe_comps, {"sheets": []}, "dangling")):
+    try:
+        kr.label_membership(orig, netlist(comps_, nets_), probes, erc_)
+        raise AssertionError(f"{why} must fail closed")
+    except ValueError as exc:
+        assert needle in str(exc), (why, exc)
+# The soft producer: labels.json on success, a one-line marker on any failure, stale output removed, never SystemExit.
+def probed_export(cmd, **kw):
+    pathlib.Path(cmd[cmd.index("-o") + 1]).write_text(netlist(probe_comps, probed), encoding="utf-8")
+    return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+with tempfile.TemporaryDirectory() as t:
+    write(t, {"out/netlist.net": orig, "out/erc.json": json.dumps(erc), "out/labels.json.error": "stale"})
+    with patch.object(kr, "label_probes", return_value=probes), patch.object(kr.subprocess, "run", side_effect=probed_export) as run:
+        kr.export_label_membership(f"{t}/src", "P", f"{t}/out")
+    assert run.call_args.args[0][:6] == ["kicad-cli", "sch", "export", "netlist", "--format", "kicadsexpr"]
+    assert not pathlib.Path(t, "out", "labels.json.error").exists()
+    assert json.loads(pathlib.Path(t, "out", "labels.json").read_text(encoding="utf-8"))["nets"]["VBUS"]["local_labels"] == [{"text": "LOC", "sheet": "/"}]
+    with patch.object(kr, "label_probes", return_value=probes), patch.object(kr.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, stdout="", stderr="boom")):
+        kr.export_label_membership(f"{t}/src", "P", f"{t}/out")
+    assert not pathlib.Path(t, "out", "labels.json").exists() and "boom" in pathlib.Path(t, "out", "labels.json.error").read_text(encoding="utf-8")
+    write(t, {"out/netlist.net.error": "kicad-cli sch export netlist failed (1): gone"})
+    with patch.object(kr, "label_probes") as never:
+        kr.export_label_membership(f"{t}/src", "P", f"{t}/out")
+    never.assert_not_called(); assert "gone" in pathlib.Path(t, "out", "labels.json.error").read_text(encoding="utf-8")
+with tempfile.TemporaryDirectory() as t:
+    write(t, {"src/P.kicad_sch": "(kicad_sch)", "src/P.kicad_pcb": PCB_TEXT})
+    for ask_on in (True, False):
+        with patch.object(kr, "export_netlist"), patch.object(kr, "export_board_stats", return_value=None), patch.object(kr, "sheet_pages", return_value=[]), \
+             patch.object(kr, "kicad_cli"), patch.object(kr, "export_label_membership") as labels:
+            kr.render_side(f"{t}/src", "P", f"{t}/out", netlist=True, ask=ask_on)
+        assert labels.call_count == (1 if ask_on else 0), "Ask-only: Ask-off runs no extra KiCad command"
+print("ok ask label kinds are KiCad-verified or fail closed")
+
+
+# Ask (spec 09, Task 3D): verified label lists fill the nets; anything else keeps the null fallback with a reason.
+with tempfile.TemporaryDirectory() as t:
+    write(t, {"netlist.net": nt})
+    digest = hashlib.sha256(pathlib.Path(t, "netlist.net").read_text(encoding="utf-8").encode("utf-8")).hexdigest()
+    many = [{"text": f"L{i}", "sheet": "/"} for i in range(20)]
+    write(t, {"labels.json": json.dumps({"version": 1, "netlist_sha256": digest, "unattached": 0, "probes": 21,
+              "nets": {"12": {"local_labels": many, "global_labels": [{"text": "G", "sheet": "/pwr/"}], "hierarchical_labels": []}}})})
+    ctx = kr.side_context(t, objs, net_cap=15, pin_cap=2)
+    n12, vbus = (next(n for n in ctx["nets"] if n["id"] == k) for k in ("12", "VBUS"))
+    assert n12["labels_unavailable"] is None and n12["global_labels"] == [{"text": "G", "sheet": "/pwr/"}] and n12["hierarchical_labels"] == []
+    assert len(n12["local_labels"]) == 15 and n12["local_labels_more"] == 5
+    assert vbus["labels_unavailable"] is None and all(vbus[k] == [] for k in ("local_labels", "global_labels", "hierarchical_labels")), "verified: no labels"
+    write(t, {"labels.json": json.dumps({"version": 1, "netlist_sha256": "0" * 64, "nets": {}})})
+    stale = next(n for n in kr.side_context(t, objs)["nets"] if n["id"] == "12")
+    assert stale["local_labels"] is None and "this revision" in stale["labels_unavailable"]
+    write(t, {"labels.json.error": "label kinds unavailable: x.kicad_sch has buses; bus membership is not resolved"})
+    failed = next(n for n in kr.side_context(t, objs)["nets"] if n["id"] == "12")
+    assert failed["global_labels"] is None and "bus membership" in failed["labels_unavailable"]
+    pathlib.Path(t, "labels.json.error").unlink(); pathlib.Path(t, "labels.json").unlink()
+    legacy = next(n for n in kr.side_context(t, objs)["nets"] if n["id"] == "12")
+    assert legacy["hierarchical_labels"] is None and legacy["labels_unavailable"], "no producer output: Task 3's fail-closed fallback"
+    # Malformed labels.json: non-dict root, unparseable JSON, or malformed nets shape fails closed.
+    write(t, {"labels.json": "{"})
+    bad_json = next(n for n in kr.side_context(t, objs)["nets"] if n["id"] == "12")
+    assert bad_json["local_labels"] is None and bad_json["labels_unavailable"]
+    write(t, {"labels.json": json.dumps(["not", "a", "dict"])})
+    non_dict = next(n for n in kr.side_context(t, objs)["nets"] if n["id"] == "12")
+    assert non_dict["local_labels"] is None and "this revision" in non_dict["labels_unavailable"]
+    for malformed_nets in (None, [1, 2], {"12": "not-a-dict"}, {"12": {"local_labels": "not-a-list"}}):
+        write(t, {"labels.json": json.dumps({"version": 1, "netlist_sha256": digest, "nets": malformed_nets})})
+        malformed = next(n for n in kr.side_context(t, objs)["nets"] if n["id"] == "12")
+        assert malformed["local_labels"] is None and "malformed" in malformed["labels_unavailable"]
+        try:
+            kr.read_label_membership(t, pathlib.Path(t, "netlist.net").read_text(encoding="utf-8"))
+            assert False, "expected ValueError on malformed nets"
+        except ValueError as exc:
+            assert "malformed" in str(exc)
+    # Task 4 size test: net label lists count toward CONTEXT_LIMIT.
+    def build_with_labels(net_cap, pin_cap):
+        nets, _, _ = kr.netlist_context(big, net_cap, pin_cap)
+        for i, n in enumerate(nets):
+            n["local_labels"] = [{"text": f"L{i}_{j}", "sheet": f"/sheet/{j}"} for j in range(10)]
+        return {"version": 1, "projects": [{"revisions": {"head": {"nets": nets}}}]}
+    doc_labels = kr.fit_context(build_with_labels)
+    assert kr.context_bytes(doc_labels) <= kr.CONTEXT_LIMIT and doc_labels["truncated"] is True
+print("ok ask nets carry verified label kinds")
+
+# Task 13: Documentation: README, example settings, site setup
+readme = pathlib.Path("README.md").read_text(encoding="utf-8")
+site_readme = pathlib.Path("site/README.md").read_text(encoding="utf-8")
+site_ask = pathlib.Path("site/ask.js").read_text(encoding="utf-8")
+example = pathlib.Path("examples/kicad-review.toml").read_text(encoding="utf-8")
+parsed = kr.tomllib.loads(example)
+assert parsed.get("ask", {}).get("enabled") is False
+assert "[ask]" in example and "enabled = false" in example.split("[ask]", 1)[1][:400]
+for needle in (
+    "## Ask (optional)",
+    "design-context.json",
+    "kicad-review-<base>-<head>-<pass|fail>.context.json",
+    "| `ask.enabled` | `false` |",
+    "third-party model provider",
+    "`projects[].ask` (optional",
+):
+    assert needle in readme, needle
+
+# User-facing README must not cite internal plan numbers (01, 03, 06)
+assert "(03)" not in readme and "(01)" not in readme and "(06)" not in readme, "README cites internal plan numbers"
+
+for needle in (
+    "ANTHROPIC_API_KEY",
+    "ASK_KV",
+    "ASK_DAILY_LIMIT",
+    "ASK_MODEL",
+    "ASK_SUMMARY_MODEL",
+    "claude-sonnet-5-5",
+    "503",
+    "wrangler kv namespace create ASK_KV",
+):
+    assert needle in site_readme, needle
+
+# Verify documented defaults in site/README.md match implementation in site/ask.js
+daily_limit_match = re.search(r"dailyLimit\s*=\s*\(env\)\s*=>.*?:\s*(\d+)", site_ask)
+assert daily_limit_match and int(daily_limit_match.group(1)) == 50, "ASK_DAILY_LIMIT default 50 in site/ask.js"
+
+setup_503_match = re.search(
+    r"if\s*\(!env\.ANTHROPIC_API_KEY\s*\|\|\s*!env\.ASK_KV\)\s*return\s*json\([^,]+,\s*(\d+)\)",
+    site_ask,
+)
+assert setup_503_match and int(setup_503_match.group(1)) == 503, "503 on missing setup in site/ask.js"
+
+assert re.search(r"env\.ASK_SUMMARY_MODEL\s*\|\|\s*env\.ASK_MODEL\s*\|\|\s*'claude-sonnet-5-5'", site_ask), (
+    "ASK_SUMMARY_MODEL falls back to ASK_MODEL then claude-sonnet-5-5 in site/ask.js"
+)
+assert re.search(r"env\.ASK_MODEL\s*\|\|\s*'claude-sonnet-5-5'", site_ask), (
+    "ASK_MODEL default claude-sonnet-5-5 in site/ask.js"
+)
+assert "ASK_SUMMARY_MODEL` (defaults to `ASK_MODEL`, or `claude-sonnet-5-5`" in site_readme, (
+    "site/README.md documents ASK_SUMMARY_MODEL fallback"
+)
+assert "export function askOptedIn" in site_ask, "TOML-subset reader in site/ask.js"
+print("ok ask documentation")
+
+# MCP (spec 10): exact four-layer board facts in physical copper order.
+four = "ui/fixtures/vf-order-4.kicad_pcb"
+facts = kr.board_facts("/nonexistent-mcp-facts", four)
+assert set(facts["layers"]) == {"F.Cu", "In1.Cu", "In2.Cu", "B.Cu"}
+assert facts["copper_layers"] == ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"], facts["copper_layers"]
+assert facts.get("size_mm") is None
+print("ok mcp board facts")
+
+# MCP identities are additive; unchanged parts remain targetable.
+objects = {'/root/uuid-r': {'kind': 'symbol', 'ref': 'R1', 'where': {'sheet': '/'},
+            'props': {'reference': 'R1', 'Value': '10k', 'Footprint': 'R_0402', 'Voltage': '50V'}}}
+parts = kr.context_parts(objects)
+assert parts['R1']['uuid'] == 'uuid-r'
+assert parts['R1']['properties']['Voltage'] == '50V'
+# Each revision's map comes from its own raw objects (09's input shape: key is sheet path + UUID, where.sheet is the sheet).
+base_objects = objects
+head_objects = {**objects, '/root/uuid-new': {'kind': 'symbol', 'ref': 'R2', 'where': {'sheet': '/'}, 'props': {'reference': 'R2', 'Value': '4.7k'}}}
+# The unchanged R1 is in both maps, so a base-side net on an unchanged part resolves; R2 is head-only.
+assert kr.identity_index({'12': 'R1'}, kr.identity_objects(head_objects)) == {
+    'nets': {'12': {'uuid': 'uuid-r', 'sheet': '/'}}, 'complete': True}
+assert kr.identity_index({'12': 'R1'}, kr.identity_objects(base_objects)) == {
+    'nets': {'12': {'uuid': 'uuid-r', 'sheet': '/'}}, 'complete': True}, 'an unchanged part must reach the base map'
+assert kr.identity_index({'N': {'fallback_ref': 'R99'}}, []) == {'nets': {}, 'complete': False}
+# Removed nets stay navigable on base: a base UUID is only ever placed in the base map, never the head map.
+base_only = {'/root/uuid-base-r9': {'kind': 'symbol', 'ref': 'R9', 'where': {'sheet': '/'}, 'props': {'reference': 'R9'}}}
+assert kr.identity_index({'REMOVED': {'fallback_ref': 'R9'}}, kr.identity_objects(base_only))['complete'] is True
+assert kr.identity_index({'REMOVED': {'fallback_ref': 'R9'}}, kr.identity_objects(head_objects)) == {'nets': {}, 'complete': False}
+assert kr.identity_index({'12': {'fallback_ref': 'R1'}}, kr.identity_objects(head_objects))['complete'] is True
+
+# Empty or missing UUID is omitted, never substituted.
+empty_uuid_objs = {'/root/': {'kind': 'symbol', 'ref': 'R3', 'where': {'sheet': '/'}},
+                   '': {'kind': 'symbol', 'ref': 'R4', 'where': {'sheet': '/'}}}
+assert kr.identity_objects(empty_uuid_objs) == []
+assert kr.identity_index({'NET': 'R3'}, kr.identity_objects(empty_uuid_objs)) == {'nets': {}, 'complete': False}
+
+# Multi-unit symbols have several candidates; dropping ambiguous candidates leaves complete=False.
+multi_unit_objs = {
+    '/root/u1-a': {'kind': 'symbol', 'ref': 'U1 unit 1', 'where': {'sheet': '/'}},
+    '/root/u1-b': {'kind': 'symbol', 'ref': 'U1 unit 2', 'where': {'sheet': '/'}},
+}
+assert kr.identity_index({'NET_MULTI': 'U1'}, kr.identity_objects(multi_unit_objs)) == {'nets': {}, 'complete': False}
+
+# build_project includes identity when Ask context is present, and omits it when opted out.
+p_out = kr.build_project({'dir': 'test', 'name': 'test', 'status': 'modified'}, {}, kr.DEFAULT_SETTINGS)
+assert 'identity' not in p_out, 'opted-out report must not include identity'
+with tempfile.TemporaryDirectory() as td:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(td)
+        os.makedirs('review', exist_ok=True)
+        with open('review/detect.json', 'w') as fh:
+            json.dump({'base': '0' * 40, 'head': '1' * 40, 'reason': 'test', 'projects': []}, fh)
+        os.makedirs('review/test/head/sch', exist_ok=True)
+        with open('review/test/head/sch/test.svg', 'w') as fh:
+            fh.write('<svg viewBox="0 0 100 100"><g/></svg>')
+        with open('review/test/head/erc.json', 'w') as fh:
+            fh.write('{"sheets": []}')
+        os.makedirs('head/test', exist_ok=True)
+        with open('head/test/test.kicad_sch', 'w') as fh:
+            fh.write('(kicad_sch (uuid root) (sheet_instances (path "/" (page "1"))))')
+        ctx = {}
+        with patch('kicad_review.project_pair', return_value=({'base': {}, 'head': head_objects}, [])), \
+             patch('kicad_review.project_checks', return_value=[]), \
+             patch('kicad_review.ask_index', return_value={'nets': {'12': {'fallback_ref': 'R1'}}}):
+            res = kr.build_project({'dir': 'test', 'name': 'test', 'status': 'modified'}, {}, kr.DEFAULT_SETTINGS, context=ctx)
+            assert 'identity' in res
+            assert res['identity']['head']['nets']['12']['uuid'] == 'uuid-r'
+            assert res['identity']['head']['complete'] is True
+            assert 'base' not in res['identity']
+    finally:
+        os.chdir(old_cwd)
+
+print('ok MCP stable identities and net focus index')
 
 def test_br03_summary():
     from kicad_review import electrical_summary, classify_change
@@ -11004,25 +11862,28 @@ with tempfile.TemporaryDirectory() as d:
                     kr.cmd_report(None)
                 after_html = pathlib.Path("review/kicad-review.html").read_bytes()
                 ui_overhead = len(after_html) - len(main_html)
-                # 06 (design page) embeds its own UI bytes in every report, design.enabled off included, and fe2206c
-                # predates it. Measure 06's growth the same way (its pre-merge tip against its base) and bound only 07's bytes.
-                design_sizes = {}
-                for design_commit in ("10ffebe", "b88d357"):
-                    if subprocess.run(["git", "-C", str(repo_dir), "cat-file", "-e", f"{design_commit}^{{commit}}"], capture_output=True).returncode:
-                        break
-                    with tempfile.TemporaryDirectory(prefix="downloads-design-") as design_root:
-                        design_archive = subprocess.run(["git", "-C", str(repo_dir), "archive", design_commit, "kicad_review.py", "ui", "image-palettes.json"], check=True, capture_output=True).stdout
-                        with tarfile.open(fileobj=io.BytesIO(design_archive)) as tar:
-                            tar.extractall(design_root, **({"filter": "data"} if hasattr(tarfile, "data_filter") else {}))
-                        design_spec = importlib.util.spec_from_file_location(f"downloads_design_{design_commit}", pathlib.Path(design_root, "kicad_review.py"))
-                        design_mod = importlib.util.module_from_spec(design_spec); design_spec.loader.exec_module(design_mod)
-                        with patch.object(design_mod, "load_settings", return_value=copy.deepcopy(design_mod.DEFAULT_SETTINGS)):
-                            design_mod.cmd_report(None)
-                        design_sizes[design_commit] = len(pathlib.Path("review/kicad-review.html").read_bytes())
-                if len(design_sizes) == 2:
-                    ui_overhead -= design_sizes["b88d357"] - design_sizes["10ffebe"]
+                def report_bytes_at(commit):
+                    with tempfile.TemporaryDirectory(prefix=f"report-{commit}-") as tree:
+                        archive = subprocess.run(["git", "-C", str(repo_dir), "archive", commit, "kicad_review.py", "ui", "image-palettes.json"], check=True, capture_output=True).stdout
+                        with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+                            tar.extractall(tree, **({"filter": "data"} if hasattr(tarfile, "data_filter") else {}))
+                        spec = importlib.util.spec_from_file_location(f"report_{commit}", pathlib.Path(tree, "kicad_review.py"))
+                        mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+                        with patch.object(mod, "load_settings", return_value=copy.deepcopy(mod.DEFAULT_SETTINGS)):
+                            mod.cmd_report(None)
+                        return len(pathlib.Path("review/kicad-review.html").read_bytes())
+                # Design pages and Ask both add always-on UI after fe2206c; subtract each branch's growth so
+                # this assertion continues to bound only the Download UI introduced by this test section.
+                if all(subprocess.run(["git", "-C", str(repo_dir), "cat-file", "-e", f"{c}^{{commit}}"], capture_output=True).returncode == 0 for c in ("10ffebe", "b88d357")):
+                    ui_overhead -= report_bytes_at("b88d357") - report_bytes_at("10ffebe")
                 else:
                     print("skip 06 design-page byte subtraction: 10ffebe or b88d357 not present in this checkout")
+                if all(subprocess.run(["git", "-C", str(repo_dir), "cat-file", "-e", f"{c}^{{commit}}"], capture_output=True).returncode == 0 for c in ("205159f", "10ffebe")):
+                    ask_overhead = report_bytes_at("205159f") - report_bytes_at("10ffebe")
+                    assert 0 < ask_overhead < ui_overhead, (ask_overhead, ui_overhead)
+                    ui_overhead -= ask_overhead
+                else:
+                    print("skip 09 Ask byte subtraction: 205159f or 10ffebe not present in this checkout")
                 with patch("kicad_review.load_settings", return_value=copy.deepcopy(DEFAULT_SETTINGS)):
                     kr.cmd_report(None)  # restore the current report for the checks below
                 assert 0 < ui_overhead < 12000, f"always-on Download UI must add less than 12 KB uncompressed (overhead: {ui_overhead})"
@@ -11097,7 +11958,7 @@ with tempfile.TemporaryDirectory() as d:
                    {"kind": "step", "label": "3D model (STEP)", "file": None, "error": "skipped: export took longer than 120 s"}])
         pathlib.Path("review/detect.json").write_text(json.dumps({"base": "a" * 40, "head": "b" * 40, "reason": "t", "projects": [
             {"dir": "p", "name": "b", "status": "modified"}, {"dir": "q", "name": "q", "status": "modified"}, {"dir": "missing", "name": "m", "status": "modified"}]}))
-        named = lambda p, *rest: {**shown, "name": p["name"] + " </script><b>", "dir": p["dir"]}
+        named = lambda p, *rest, **kw: {**shown, "name": p["name"] + " </script><b>", "dir": p["dir"]}
         with patch("kicad_review.load_settings", return_value=on), patch("kicad_review.build_project", side_effect=named), patch.dict(os.environ, {"GITHUB_OUTPUT": "gh-out.txt"}):
             kr.cmd_report(None)
         marker = "<script>window.REVIEW_DATA = "

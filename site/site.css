@@ -257,6 +257,7 @@ select { max-width: min(100%, 40ch); text-overflow: ellipsis; }
 .bench-menu summary::-webkit-details-marker { display:none; }
 .bench-menu[open] > summary { color:var(--accent); background:var(--surface-2); }
 .bench-popover { position:absolute; right:0; top:calc(100% + 5px); z-index:100; min-width:220px; max-width:min(480px,calc(100vw - 20px)); padding:8px; color:var(--text); background:var(--surface); border:1px solid var(--line); border-radius:3px; box-shadow:0 8px 24px #0006; }
+.bench-popover .bench-popover { position:static; box-shadow:none; border:0; padding:6px 0; max-width:none; min-width:0; }
 .bench-popover a,.bench-popover button,.bench-popover label { display:block; width:100%; text-align:left; box-sizing:border-box; padding:6px 8px; font:inherit; color:var(--text); text-decoration:none; background:transparent; border:0; border-radius:2px; }
 .bench-popover button { cursor:pointer; }
 .bench-popover a:hover,.bench-popover button:hover { background:var(--surface-2); color:var(--accent); }
