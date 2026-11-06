@@ -58,8 +58,9 @@ export async function readReleaseSnapshot(gh, token, root, asset) {
 }
 
 // Files whose change alters a design snapshot. Settings files that every folder reads are global.
-const designInput = (path) => /\.kicad_(?:pro|sch|pcb|sym|mod|dru|wks)$|\.(?:step|stp|wrl|glb|gz)$/i.test(path);
-const globalInput = (path) => /(?:^|\/)(?:kicad-review\.toml|sym-lib-table|fp-lib-table)$/i.test(path); // ponytail: a new global settings file must be added here
+// Only repository-root copies are global: the action reads kicad-review.toml from the root, and a nested library table belongs to its own folder.
+const designInput = (path) => /\.kicad_(?:pro|sch|pcb|sym|mod|dru|wks)$|\.(?:step|stp|wrl|glb|gz)$|(?:^|\/)(?:sym|fp)-lib-table$/i.test(path);
+const globalInput = (path) => /^(?:kicad-review\.toml|sym-lib-table|fp-lib-table)$/i.test(path); // ponytail: a new global settings file must be added here
 export const affects = (path, dir) => globalInput(path) || (designInput(path) && (dir === '' || path === dir || path.startsWith(`${dir}/`)));
 // Renames count for both names: a file moved into or out of the folder changes its design.
 export const changesProject = (files, dir) => (files || []).some((f) => affects(f.filename || '', dir) || affects(f.previous_filename || '', dir));

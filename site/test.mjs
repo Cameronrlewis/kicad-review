@@ -5534,7 +5534,7 @@ test('BR02 measurement wrapper fixture keeps one opaque report frame that receiv
 });
 
 // ---- Design page: the newest snapshot for a branch, tag or commit ----
-import { findDesign, readSnapshot, readReleaseSnapshot, refOk, designName, projectKey, dirFromKey, projectsFromTree, changesProject, canonicalFolder, designQuery, scanHistory, CursorNotFoundError, thumbnailsFor } from './design.js';
+import { findDesign, readSnapshot, readReleaseSnapshot, refOk, designName, projectKey, dirFromKey, projectsFromTree, changesProject, affects, canonicalFolder, designQuery, scanHistory, CursorNotFoundError, thumbnailsFor } from './design.js';
 import { designMissingPage, projectsPage, designsPage } from './pages.js';
 // The snapshot payload readSnapshot parses: one report for the whole commit, with every project folder listed.
 const payload = (sha, dirs = ['A', 'B']) => ({ mode: 'single', head: sha, snapshot: { sha, committedAt: '2026-10-24T10:00:00Z', message: 'Move R16 <b>bold</b>' }, projects: dirs.map((dir) => ({ dir })) });
@@ -5998,6 +5998,8 @@ test('a folder page filters commit details and includes root-level inputs that a
   const b = await (await designGet('/r/Cameronrlewis/repo/p/B/designs', [['/repos/Cameronrlewis/repo/', (url) => gh(url.replace('https://api.github.com', ''))]])).text();
   assert.deepEqual([...b.matchAll(/\/p\/B\/design\/([0-9a-f]{40})"/g)].map((m) => m[1]), [sha40(3), sha40(5), sha40(7), sha40(8), sha40(9), sha40(10)]);
   assert.ok(calls.filter((path) => path.includes('/commits?')).every((path) => !new URL(`https://x${path}`).searchParams.has('path')), 'history listings are unfiltered so root inputs reach detail filtering');
+  for (const nested of ['B/sym-lib-table', 'B/fp-lib-table', 'B/kicad-review.toml']) assert.ok(!affects(nested, 'A'), `${nested} never affects A`);
+  assert.ok(affects('B/sym-lib-table', 'B') && affects('B/fp-lib-table', 'B') && !affects('B/kicad-review.toml', 'B'), 'a nested library table belongs to its own folder');
   assert.match(a, new RegExp(`name="head" value="${sha40(1)}"`), 'Compare with newest targets the default-branch tip');
   assert.equal((a.match(/Compare with newest/g) || []).length, 7, 'every row except the tip itself');
 });
