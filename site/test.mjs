@@ -6984,31 +6984,25 @@ test('MCP live review uses wiring support, zero changes and removed projects',as
   assert.equal((await reviewLive(access, 7, SHA, 15, pagedGh(thread('t3', { nodes: [] })))).readiness.state, 'unknown');
 });
 
-test('MCP live review pages every thread comment within the GitHub request budget', async () => {
+test('MCP live review reports the full comment count without reading comments beyond the validated limit', async () => {
   const access = { ...mcpAccessFixture(), repository: { owner: { login: 'Cameronrlewis' }, name: 'repo' } };
   const comment = (n) => ({ databaseId: n, body: n === 1 ? threadBody({ anchor, text: 'first', link: 'https://s/r' }) : `reply ${n}`, author: { login: 'r' }, createdAt: '', url: '' });
   const range = (from, to) => Array.from({ length: to - from + 1 }, (_, i) => comment(from + i));
+  let calls = 0;
   const gh = async (path, token, init) => {
+    calls++;
     if (path !== '/graphql') return new Response('[]');
-    const { query, variables } = JSON.parse(init.body);
-    if (query.includes('t0:node')) {
-      assert.equal(variables.i0, 't_long'); assert.equal(variables.a0, 'c50');
-      return new Response(JSON.stringify({ data: { t0: { comments: { totalCount: 120, pageInfo: { hasNextPage: false, endCursor: 'c120' }, nodes: range(51, 120) } } } }));
-    }
+    const { query } = JSON.parse(init.body);
+    assert.doesNotMatch(query, /t0:node/, 'later comment pages are not requested');
     return new Response(JSON.stringify({ data: { repository: { pullRequest: { headRefOid: SHA, reviewThreads: { totalCount: 1, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [
       { id: 't_long', isResolved: false, resolvedBy: null, comments: { totalCount: 120, pageInfo: { hasNextPage: true, endCursor: 'c50' }, nodes: range(1, 50) } },
     ] } } } } }));
   };
-  const full = (await reviewLive(access, 7, SHA, 120, gh)).openThreads.items[0].comments;
-  assert.deepEqual(full.items.map(c => c.id), range(1, 120).map(c => c.databaseId));
-  assert.equal(full.total, 120); assert.equal(full.truncated, false);
-  const capped = (await reviewLive(access, 7, SHA, 15, gh)).openThreads.items[0].comments;
-  assert.equal(capped.returned, 15); assert.equal(capped.total, 120); assert.equal(capped.truncated, true);
-  // Reviews and threads use the whole budget: the comment page is not read and the list stays marked truncated.
-  const spent = await reviewLive(access, 7, SHA, 120, budgeted(gh, 2));
-  const partial = spent.openThreads.items[0].comments;
-  assert.equal(partial.returned, 50); assert.equal(partial.total, null); assert.equal(partial.truncated, true);
-  assert.equal(spent.readiness.state, 'needs_work');
+  const args = validateTool('get_review', { repo: 'Cameronrlewis/repo', pr: 7, limit: 50 });
+  const comments = (await reviewLive(access, args.pr, SHA, args.limit, gh)).openThreads.items[0].comments;
+  assert.deepEqual(comments.items.map(c => c.id), range(1, 50).map(c => c.databaseId));
+  assert.equal(comments.returned, 50); assert.equal(comments.total, 120); assert.equal(comments.truncated, true);
+  assert.equal(calls, 2, 'only the reviews and initial threads requests are made');
 });
 
 import {runTool,projectTool} from './mcp-data.js';
@@ -8828,4 +8822,3 @@ test('finding 9: malformed compare body and OAuth callback /user errors keep coo
     assert.match(await res.text(), /Sign-in didn&#39;t complete/);
   } finally { restore(); }
 });
-

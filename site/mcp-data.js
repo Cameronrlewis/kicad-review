@@ -1,4 +1,4 @@
-import { parseThreads, ghPages, loadReviewThreads, loadThreadComments, validComments } from './threads.js';
+import { parseThreads, ghPages, loadReviewThreads, validComments } from './threads.js';
 import { latestDecisions } from './readiness.js';
 
 // MCP trust boundaries: live GitHub authorization per call and byte-bounded input/output.
@@ -402,19 +402,23 @@ export async function reviewLive(access, pr, sha, limit = 15, gh) {
     loadReviewThreads(gh, access.token, { owner, repo: name, name, number: pr }).catch(() => null),
   ]);
   let open = null;
+  let commentTotals = null;
   const complete = !!threads && !(threads instanceof Response) && threads.present && Array.isArray(threads.nodes)
     && threads.head === sha && threads.nodes.every((node) => validComments(node?.comments));
-  // Later comment pages of open threads, after reviews and threads so they never starve those reads of budget.
-  // A failed or budget-stopped read keeps each comment list marked truncated.
-  const commentsComplete = complete && await loadThreadComments(gh, access.token, threads.nodes.filter(n => !n.isResolved)).then(r => !r, () => false);
   if (complete) {
-    try { open = parseThreads({ data: { repository: { pullRequest: { reviewThreads: { nodes: threads.nodes } } } } }).filter(t => !t.resolved); } catch { /* malformed */ }
+    try {
+      open = parseThreads({ data: { repository: { pullRequest: { reviewThreads: { nodes: threads.nodes } } } } }).filter(t => !t.resolved);
+      commentTotals = new Map(threads.nodes.map(node => [String(node.id), node.comments.totalCount]));
+    } catch { /* malformed */ }
   }
   const isComplete = complete && open !== null;
   const decisions = reviews?.ok ? latestDecisions(reviews.items, sha) : null;
   return {
     head: sha,
-    openThreads: page((open || []).map(t => ({ id: t.id, anchor: projectLists(t.anchor, limit), comments: page(t.comments.map(c => ({ ...projectLists(c, limit), body: String(c.body).slice(0, 1000) })), limit, commentsComplete ? t.comments.length : null, !commentsComplete) })), limit, open ? open.length : null, !isComplete),
+    openThreads: page((open || []).map(t => {
+      const total = commentTotals?.get(t.id) ?? null;
+      return { id: t.id, anchor: projectLists(t.anchor, limit), comments: page(t.comments.map(c => ({ ...projectLists(c, limit), body: String(c.body).slice(0, 1000) })), limit, total, total === null || total > t.comments.length) };
+    }), limit, open ? open.length : null, !isComplete),
     readiness: {
       head: sha,
       decisions: page((decisions || []).map(d => projectLists(d, limit)), limit, decisions ? decisions.length : null, !decisions),
