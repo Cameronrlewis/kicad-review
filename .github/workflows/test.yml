@@ -68,7 +68,7 @@ jobs:
           const onePixelPng = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
           const html = designsPage({
             user: 'cameronrlewis', owner: 'ORG-LONG-NAME', repo: 'REPO-VERY-LONG-IDENTIFIER-2026',
-            key: projectKey('Student Design Teams/Horizon'), ref: 'main', rows, tip: rows[0].sha,
+            key: projectKey('Example Projects/Main Board'), ref: 'main', rows, tip: rows[0].sha,
             next: rows[24].sha, truncated: true, thumbs: new Map([[rows[0].sha, onePixelPng]]), first: true, started: false,
           }).replace('</body>', '<script>window.__dpSiteFixture="design-history.html";window.reviewReady=true;</script></body>');
           fs.writeFileSync(`${process.env.PAGES}/design-history.html`, html);
