@@ -6741,10 +6741,10 @@ return true;
     return true;`],
   ["Ask single design: an unready Ask falls back to Checks, never a hidden Changes tab", "v=board", askOpen + `
     // ponytail: askOpen leaves Ask ready; drop readiness so the unready fallback under test applies.
-    document.body.classList.add('design-single'); ASK.ready = false;
+    const mode = D.mode; D.mode = 'single'; document.body.classList.add('design-single'); ASK.ready = false;
     S.t = 'ask'; renderPanel();
     const landed = S.t;
-    document.body.classList.remove('design-single');
+    D.mode = mode; document.body.classList.remove('design-single');
     return landed === 'checks' || 'single design fell back to ' + landed;`],
   ...['top','flipped'].map(view => ["BR09 fixture keeps the 4-layer board in KiCad order with the tab open: " + view, "v=board", askOpen + `
     const scene=await loadBoardScene(proj().board?.geometry?.head);

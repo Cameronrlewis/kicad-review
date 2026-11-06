@@ -2674,8 +2674,6 @@ async function askGo(kind, name, preferredSide = "head") {
   const i = symbol >= 0 ? symbol : objects.findIndex(match);
   if (i >= 0) await goToObject(i); // Desktop object navigation preserves the object's revision before drawing.
 }
-// A comparison report falls back to Changes; a single-design page (06's body.design-single) has no Changes tab, so it falls back to Checks.
-const fallbackTab = () => document.body.classList.contains("design-single") ? "checks" : "changes";
 // Shared focus: askGo keeps its own entry point for Ask links, and 10's focusIdentity (spec 10, Task 13) implements the same whole-net highlight from project.identity. Whichever of 09 or 10 merges second consumes the other's function; the symbol fallback above is never presented as a whole-net highlight.
 
 function askReset() { if (ASK.project !== proj().dir) Object.assign(ASK, { project: proj().dir, insight: null, insightId: null, asked: false, insightError: "", log: [], busy: false, current: null, status: "", draft: "", remaining: null }); }
