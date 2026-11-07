@@ -359,7 +359,7 @@ export function bomLines(parts) {
   }
   return [...groups.values()].map(g => ({ ...g, quantity: g.refs.length, refs: g.refs.sort((a, b) => a.localeCompare(b, 'en', { numeric: true })) }));
 }
-// Verbatim quoting per Task 7 plan; spreadsheet formula prefix neutralization is intentionally omitted for vendor compatibility.
+// Quote every cell verbatim; spreadsheet formula prefix neutralization is intentionally omitted for vendor compatibility.
 const csvCell = value => '"' + String(value ?? '').replaceAll('"', '""') + '"';
 export function bomProjection(name, args, loaded, origin) {
   const { revision: r, doc } = loaded, limit = args.limit ?? 15;

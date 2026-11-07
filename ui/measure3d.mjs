@@ -2,7 +2,7 @@
 // Frame-aware copy of the study tools/measure.mjs: probes, readiness, clicks and Review3D reads run in the
 // selected report context (the hosted wrapper's sandboxed iframe with --report-frame); screenshots and Input.* stay top-session.
 // Desktop profile only: --phone, its Pixel 7 profile, touch input and throttling were dropped with phone support
-// (owner decision 2026-10-29, spec boardrepo/02-3d-viewer.md); the summary keeps phone:false for schema compatibility.
+// Phone measurement is unsupported; the summary keeps phone:false for schema compatibility.
 // node ui/measure3d.mjs <url> <outdir> [--report-frame SEL] [--interaction-target SEL] [--cold] [--click-text T]... [--ready-expr E]
 //   [--rotate] [--zoom] [--zoom-steps N] [--settle MS] [--port P]
 // Env MEASURE_PROJECT/MEASURE_LAYERS/MEASURE_REVISION: reject a wrong project, view, mode, layer count or revision before sampling.

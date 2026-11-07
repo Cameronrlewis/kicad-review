@@ -168,7 +168,7 @@ export async function* answerEvents(body, remaining) {
 }
 
 const MAX_CONTEXT = 400_000;   // bytes; the workflow aims for 200,000
-// 06's design snapshot artifact: its context sits beside it as kicad-design-<sha7>.context.json in the same run.
+// A design snapshot's context sits beside it as kicad-design-<sha7>.context.json in the same run.
 const snapshotName = /^kicad-design-[0-9a-f]{7}\.html$/;
 const anthropicUrl = 'https://api.anthropic.com/v1/messages';
 // ponytail: coalesce same-isolate cold misses; cross-isolate exact-once generation is deferred and is not promised.

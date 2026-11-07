@@ -972,7 +972,7 @@ for angle, (dx, dy) in [(0, (4.0, 0.0)), (90, (0.0, 4.0)), (180, (-4.0, 0.0)), (
 
 print('ok inherited symbol geometry')
 
-# Task 2.2: hotspot manifests resolve by sheet-instance path, never by export name.
+# Hotspot manifests resolve by sheet-instance path, never by export name.
 def hotspot_regressions():
     import base64, gzip, json, math
 
@@ -1032,7 +1032,7 @@ def hotspot_regressions():
     assert kr.hotspot_box([]) is None and kr.hotspot_box([[1, 5], [-2, 3]]) == [-2, 3, 1, 5]
 
     # A nonzero-origin viewBox survives blob serialization and decode exactly.
-    # Task 4 owns mapped_viewbox(); this pins the same parse and the blob round trip it relies on.
+    # Pin the mapped_viewbox() parse and the blob round trip that relies on it.
     with TemporaryDirectory() as root:
         write(root, {'Board.kicad_sch': '(kicad_sch (uuid root) (paper A4))',
                      'export/Board.svg': '<svg xmlns="http://www.w3.org/2000/svg" viewBox="10 20 40 30"><path d="M0 0"/></svg>'})
@@ -2179,7 +2179,7 @@ assert diff_parts(new, footprint)[0]["action"] == "footprint", "same value and L
 assert parts_lines({"r": sym("R1", "1k", "C1", ds="HTTPS://x/r.pdf")})[0]["datasheet"] == "HTTPS://x/r.pdf", "scheme is case-insensitive"
 print("ok parts diff")
 
-# BOM view helpers: categories, reference ranges, summary (spec 08).
+# BOM view helpers: categories, reference ranges, and summary.
 from kicad_review import BOM_CATEGORIES, bom_category, bom_summary, ref_ranges
 assert ref_ranges(["R1", "R3", "R7", "R8", "R9", "R10", "R11", "R12", "R17"]) == "R1, R3, R7-R12, R17"
 assert ref_ranges([f"C{n}" for n in (1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 14, 15, 17)]) == "C1-C8, C11-C12, C14-C15, C17"
@@ -2264,7 +2264,7 @@ for prop, values in (("Manufacturer", ("Yageo", "Vishay")), ("Datasheet", ("http
     assert {l[prop.lower()] for l in combined["lines"]} == set(values)
 print("ok bom lines")
 
-# Vendored planner (Task 4A): the body is the pinned upstream bom_csv.py, and the licence header sits above it.
+# Vendored planner: the body is the pinned upstream bom_csv.py, and the licence header sits above it.
 import hashlib as _vh
 _vendored = pathlib.Path(__file__).with_name("vendor") / "bom_csv.py"
 _data = _vendored.read_bytes()
@@ -2363,7 +2363,7 @@ for lcsc_alias in LCSC_FIELDS:
             assert read(custom['fab'])[1][3] == '', 'explicit missing custom field must not fall back to aliases'
 raw_csv = read(bom_exports(raw_lines, 'jlcpcb', None, raw_objs)['csv'])
 assert raw_csv[1][2:5] == ['10k', 'R_0805', 'R1, R2'], 'raw parser Value/Footprint serialize without coercion at grouping time'
-# Owner decision 2026-10-26: option A, separate writers. Pin the release-writer behaviour without executing KiCad.
+# The report and release package use separate writers. Pin the release-writer behaviour without executing KiCad.
 import kicad_review as _bomkr
 from unittest.mock import patch
 with tempfile.TemporaryDirectory() as d:
@@ -2408,7 +2408,7 @@ else:
     raise AssertionError("a 2,049-byte record with its CRLF must be refused, including the reserved CRLF bytes")
 print("ok bom files")
 
-# Repository BOM (Owner decision 2026-10-26: combined BOM): board-qualified references; lines join only on identical identity.
+# Combined repository BOM: board-qualified references; lines join only on identical identity.
 import json as _rjson
 import kicad_review as kr
 _fixture = _rjson.loads(pathlib.Path(__file__).with_name("ui").joinpath("fixtures", "bom-multiboard.json").read_text(encoding="utf-8"))
@@ -2914,7 +2914,7 @@ digikey_lookup({"A": {"mpn": "A", "manufacturer": None}, "B": {"mpn": "B", "manu
 assert pauses == [0.6]
 print("ok DigiKey token errors, 404, statuses, and pacing")
 
-# Task 2 review regressions. Each transport is local; no real HTTP requests.
+# Review regressions. Each transport is local; no real HTTP requests.
 import unittest
 import inspect
 import http.client
@@ -5168,7 +5168,7 @@ print("ok per-commit project render cache hits retain both revisions")
 assert '-e KICAD_IMAGE' in pathlib.Path('.github/workflows/review.yml').read_text(), "host and container cache identity must match"
 assert 'restore-renders' in pathlib.Path('.github/workflows/review.yml').read_text(), "warm caches must not pull the KiCad image"
 
-# BR02 Task 2: raw copper exports, shared posters and revision-scoped metadata.
+# Raw copper exports, shared posters, and revision-scoped metadata.
 def br02_export_contract():
     import pathlib, subprocess, tempfile
     from unittest.mock import patch
@@ -5709,7 +5709,7 @@ def br02_task2a_prepare_contract():
 br02_task2a_prepare_contract()
 
 
-# BR02 Task 4A: verified additive coverage and digest artifacts.
+# Verified additive coverage and digest artifacts.
 import gzip, hashlib, json, os, pathlib, tempfile
 with tempfile.TemporaryDirectory() as t:
     old=os.getcwd();os.chdir(t)
@@ -6460,7 +6460,7 @@ def test_br03_net_rows():
 
 def test_br03_net_unknown_pair():
     from kicad_review import diff_nets
-    # The Task 1 marker is unknown evidence, never an observed empty/disconnected net.
+    # The marker represents unknown evidence, never an observed empty or disconnected net.
     for base, head in [({"BAD":None}, {"BAD":{"U1.1"}}),
                        ({"BAD":{"U1.1"}}, {"BAD":None}),
                        ({"BAD":None}, {}), ({}, {"BAD":None}),
@@ -6939,7 +6939,7 @@ import pathlib
 test_br03_cmd_copper()
 print("ok BR03 cmd_copper bounded orchestration")
 
-# BR03 Task 6.1: one bounded, validated netlist export shared by electrical and interfaces consumers.
+# One bounded, validated netlist export shared by electrical and interfaces consumers.
 BR03_EMPTY_NETLIST = '(export (components) (nets))'
 
 
@@ -7002,7 +7002,7 @@ def test_br03_netlist_export():
         assert len(reason) == 500 and '\n' not in reason and 'line one line two' in reason
         # Empty nets are valid evidence, and numeric pin names plus escaped quotes stay strings.
         validate_netlist(r'(export (nets (net (name "A\\\"B") (node (ref U1) (pin "12")))))')
-        # Since spec 01, render_side also walks sheet pages; stub it so only the netlist branch is observed.
+        # render_side also walks sheet pages; stub it so only the netlist branch is observed.
         with patch('kicad_review.os.path.exists',side_effect=lambda f:str(f).endswith('.kicad_sch')), \
              patch('kicad_review.kicad_cli'), patch('kicad_review.sheet_pages',return_value=[]), \
              patch('kicad_review.export_netlist') as export:
@@ -7081,7 +7081,7 @@ test_br03_interfaces_unavailable()
 print("ok BR03 shared bounded netlist evidence and interfaces unavailable result")
 
 
-# BR03 Task 6.3: pairwise electrical assembly never turns unknown schematic evidence into removals.
+# Pairwise electrical assembly never turns unknown schematic evidence into removals.
 def test_br03_electrical_pair():
     from kicad_review import electrical_changes, read_copper
     with tempfile.TemporaryDirectory() as td:
@@ -7278,7 +7278,7 @@ for pin in ('4', '5', '6'): assert by_pin[pin]['geometry']['segments']
 (fixture_dir / 'image-pick-records.json').write_text(json.dumps(records, sort_keys=True) + '\n')
 print('ok producer-backed image pick records')
 
-# Task 4: write_image_assets and image_pair
+# write_image_assets and image_pair
 blobs = {}
 key = kr.add_blob(blobs, '{"version":1,"units":"mm","views":[]}')
 raw = gzip.decompress(base64.b64decode(blobs[key]))
@@ -7737,7 +7737,7 @@ with tempfile.TemporaryDirectory() as tmp:
     finally: os.replace = real_replace
     assert a.read_bytes() == stamped and not list(pathlib.Path(tmp).glob("*.tmp"))
 print('ok BR02 GLB export timestamp normalized; bad input left as written')
-# Ask (spec 09): the [ask] setting.
+# Ask: the [ask] setting.
 import kicad_review as kr
 assert kr.DEFAULT_SETTINGS["ask"] == {"enabled": False}
 def load_ask(toml_text):
@@ -7778,7 +7778,7 @@ assert ask_report_settings("[ask]\nenabled = true\n")["ask"] == {"enabled": True
 assert "ask" not in ask_report_settings(""), "opted-out reports must drop the ask table"
 print("ok ask setting")
 
-# ---- Design page (spec 06). Shared helpers for every DP-S block below. ----
+# ---- Design page. Shared helpers for every DP-S block below. ----
 import json as _dpjson, re as _dpre, base64 as _dpb64, gzip as _dpgz
 from tempfile import TemporaryDirectory as _DpTmp
 _dp_erc = lambda uuid, kind: _dpjson.dumps({"sheets": [{"uuid_path": "/", "violations": [{"type": kind, "severity": "error", "description": kind,
@@ -7893,7 +7893,7 @@ with _DpTmp() as t:
         os.chdir(old_cwd)
 print("ok DP-S2B single-revision project skips base libraries, release and interface checks")
 
-# DP-S5: 02's still can exist without a model; all base artifacts are unreadable in single mode.
+# A board still can exist without a model; all base artifacts are unreadable in single mode.
 import builtins, contextlib, struct as _dpstruct, zlib as _dpzlib
 
 def _dpchunk(kind, data):
@@ -8360,7 +8360,7 @@ with _DpTmp() as t:
             write(t,{"review/detect.json":json.dumps(detected)})
             def render(src,name,out,**kw):
                 write(t,{f"{out}/sch/P.svg":'<svg viewBox="0 0 20 10"><path d="M0 0H10"/></svg>', f"{out}/pcb/P-F_Cu.svg":'<svg viewBox="0 0 20 10"><path d="M0 0H10"/></svg>', f"{out}/erc.json":"{}", f"{out}/drc.json":"{}"})
-            # 02's export_glb is the only still producer: it writes the raw and served model and the poster.
+            # export_glb is the only still producer: it writes the raw and served model and the poster.
             glb = lambda p,side,out,**kw: write(t,{f"{out}/board.raw.glb":"model", f"{out}/board.glb":"model"}) or pathlib.Path(out,"poster.png").write_bytes(_dp_png)
             os.chdir(t)
             try:
@@ -8533,8 +8533,8 @@ with _DpTmp() as t:
         os.chdir(old_cwd)
 print("ok DP-S4L trusted supplier results reach historical snapshots")
 
-# DP-S4M: a snapshot-only run checks downloads-snapshot/ under the trusted policy, even with release checks off.
-# 07's download_directory/download_policy_key and [downloads] section are not on this branch yet; stand-ins follow 07's interface.
+# A snapshot-only run checks downloads-snapshot/ under the trusted policy, even with release checks off.
+# When download helpers or settings are unavailable, stand-ins follow their public interface.
 with _DpTmp() as t:
     old_cwd = os.getcwd()
     try:
@@ -8566,7 +8566,7 @@ with _DpTmp() as t:
             pathlib.Path(cache, "fab-snapshot", "P.zip").write_bytes(b"zip")
             assert kr.missing_products(cache, p, "head", settings, purposes) == []
             assert kr.missing_products(cache, p, "head", settings, ("comparison",)) == []
-        # 02's still and model: a 1600x1000 poster and non-empty raw+processed GLB, or the .failed marker of an attempted export.
+        # A valid still and model require a 1600x1000 poster and non-empty raw and processed GLBs, or an attempted export's .failed marker.
         write(t, {"head/P/P.kicad_pcb": _dp_pcb("")})
         on3d = json.loads(json.dumps(kr.DEFAULT_SETTINGS)); on3d["3d"]["enabled"] = True
         assert kr.missing_products(cache, p, "head", on3d, ("comparison",)) == ["poster", "glb"]
@@ -9630,7 +9630,7 @@ for c in (fab_failed, fab_unsupported, fab_absent):
 assert fab_failed['new_errors'] == fab_failed['errors'] == 1
 assert fab_absent['checked'] == [] and fab_absent['reason'] == 'no head board'
 
-# Base/head pairing (Owner decision 2026-10-26): multiset identity, so one base occurrence matches one head occurrence.
+# Base/head pairing uses multiset identity, so one base occurrence matches one head occurrence.
 with tempfile.TemporaryDirectory() as td:
     p, source, out, cfg, sections = fab_test_render(pathlib.Path(td))
     cfg['fail_on'] = 'new'
@@ -9776,7 +9776,7 @@ def fab_four_report(root, board):
     cfg['fabrication']['check_limits']=True
     cfg['checks'].update(drc='required',fab_limits='required')
     p={'name':'Four','dir':'','status':'modified'}
-    # Read the Task 3 fixture and its generated project in place, unmodified.
+    # Read the fixture and its generated project in place, unmodified.
     source=board.resolve()
     with patch.object(kr,'board_path',side_effect=fab_head_only(source)):
         kr.render_fab(p,'head',str(root/'head'))
@@ -9813,7 +9813,7 @@ if os.environ.get('KICAD_FAB_FOUR_REPORT'):
 if os.environ.get('KICAD_FAB_VERIFY') == '1':
     fab_capability_probe(pathlib.Path(os.environ['KICAD_FAB_OUT']))
 
-# BR03 Task 6.2: unreadable optional rules keep symbols, drop unknown metadata on both sides, and warn.
+# Unreadable optional rules keep symbols, drop unknown metadata on both sides, and warn.
 import contextlib, hashlib
 from kicad_review import project_pair
 DRU = b'(rule "wide" (constraint clearance (min 0.2mm)))\xff'  # non-UTF-8 bytes: the .dru hash is byte-based
@@ -9863,10 +9863,10 @@ with tempfile.TemporaryDirectory() as td:
     finally: os.chdir(old)
 print('ok BR03 project_pair guards optional rules')
 
-# Ask (spec 09): Ask composes the shared producers; it adds no second export and no fatal path.
+# Ask composes the shared producers; it adds no second export and no fatal path.
 import subprocess
 PCB_TEXT = '(kicad_pcb\n (layers\n  (0 "F.Cu" signal)\n )\n)\n'
-STATS_PARTIAL = {"board": {"has_outline": True, "width": "99 mm", "height": "88 mm"}}  # reused by Task 4's stale-output test
+STATS_PARTIAL = {"board": {"has_outline": True, "width": "99 mm", "height": "88 mm"}}  # reused by the stale-output test
 def stats_fails(cmd, **kw):
     if "stats" in cmd:
         pathlib.Path(cmd[cmd.index("-o") + 1]).write_text(json.dumps(STATS_PARTIAL))
@@ -9883,10 +9883,10 @@ with tempfile.TemporaryDirectory() as t:
     stats_export.assert_called_once_with(f"{t}/src/P.kicad_pcb", f"{t}/out")
     assert not any("stats" in " ".join(c.args[0]) for c in run.call_args_list), "Ask must not add a second statistics exporter"
     with patch.object(kr, "export_netlist") as netlist_export, patch.object(kr, "export_board_stats", return_value=None), patch.object(kr, "sheet_pages", return_value=[]), \
-         patch.object(kr.subprocess, "run", side_effect=stats_fails):  # plan omitted this patch; without it the Ask-off call hits real kicad-cli
+         patch.object(kr.subprocess, "run", side_effect=stats_fails):  # without this patch the Ask-off call hits real kicad-cli
         kr.render_side(f"{t}/src", "P", f"{t}/out2")
     netlist_export.assert_not_called()  # Ask off and netlist off: no netlist request
-# 03's soft failure, reached through the composed call: a failing netlist run writes the marker and never exits.
+# A soft failure reached through the composed call writes the netlist marker and never exits.
 def netlist_fails(cmd, **kw):
     if "netlist" in cmd:
         return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="boom")
@@ -9912,7 +9912,7 @@ with tempfile.TemporaryDirectory() as t:
         os.chdir(old)
 print("ok ask shares the netlist and statistics producers")
 
-# Ask (spec 09): parts and nets of one revision.
+# Ask: parts and nets of one revision.
 nt = netlist({"U1": ("MCU", "LQFP", "MCU:M"), "R1": ("10k", "R_0402", "Device:R")},
              {"12": [("U1", "1", "PA1", "bidirectional"), ("R1", "1", "", "passive")],
               "VBUS": [("U1", str(i), "", "passive") for i in range(10, 70)],
@@ -9992,15 +9992,15 @@ assert lp["properties_omitted"] == 45 - 32 and "properties" in lp["incomplete_fi
 assert len(lp["properties"]["Note"]) == 200 and lp["properties"]["Note"] == "n" * 200
 assert parts["R1"]["properties_truncated"] is False and parts["R1"]["incomplete_fields"] == [] and parts["R1"]["value"] == "10k"
 assert kr.context_parts({"/uuid-3": long_part})["R1"]["mpn"] is None, "absent identity stays null, not an empty string"
-# Shared BOM cases (spec 08 fixture): every part's bom is 08's bom_identity, with the same included flags, excludedReason, line keys and quantities.
-# The fixture is 08 Task 3's file, byte-identical (08 handoff); it is required. 08's parts_lines is not on this branch
-# (only bom_identity may be handed off), so line keys and quantities are asserted through 09's own parts[].bom records,
-# grouped the way 10 consumes them. The parts_lines leg is skipped only while the 08 handoff block stands in
-# kicad_review.py; 08's merge replaces that block, and from then on the leg is required (no name-based guess).
+# Shared BOM cases: every part's bom uses bom_identity, with the same included flags, excludedReason, line keys, and quantities.
+# The shared BOM fixture is byte-identical to the producer fixture and is required. parts_lines may not be available
+# (only bom_identity may be available), so line keys and quantities are asserted through Ask's parts[].bom records,
+# grouped the way MCP consumes them. The parts_lines leg is skipped only while the compatibility block stands in
+# kicad_review.py; once parts_lines is implemented, the leg is required without name-based guessing.
 bom_handoff = "# ---- 08 handoff: bom_identity" in pathlib.Path(kr.__file__).read_text(encoding="utf-8")
 bom_cases = json.load(open(pathlib.Path(__file__).parent / "ui" / "fixtures" / "bom-cases.json", encoding="utf-8"))
 assert bom_cases, "shared BOM cases must not be empty"
-if bom_handoff:  # the skip is allowed only while this branch truly lacks 08: a merge that keeps the stand-in fails here
+if bom_handoff:  # the skip is allowed only while parts_lines is a stand-in; a partial implementation fails here
     kr_src = pathlib.Path(kr.__file__).read_text(encoding="utf-8")
     assert kr_src.count("\ndef bom_identity(") == 1, "08's bom_identity is merged: delete the 08 handoff block"
     assert callable(getattr(kr, "parts_lines", None)), "kicad_review.parts_lines is missing or renamed: update the 08 handoff guard"
@@ -10017,7 +10017,7 @@ for case in bom_cases:
         if rec["bom"]["included"]:
             ctx_lines.setdefault(rec["bom"]["key"], {"refs": [], "mpn": rec["bom"]["mpn"]})["refs"].append(rec["bom"]["ref"])
     assert sorted((k, l["refs"], len(l["refs"]), l["mpn"]) for k, l in ctx_lines.items()) == expect, case["name"]
-    if not bom_handoff:  # 08's bom_identity and parts_lines (08 Task 3) are merged
+    if not bom_handoff:  # bom_identity and parts_lines are available together
         lines = sorted(kr.parts_lines(case["objects"]), key=lambda line: line["key"])
         assert [(l["key"], l["refs"], len(l["refs"]), l["mpn"]) for l in lines] == expect, case["name"]
 # Forward indexes describe the same pins in netlist order; only single-pin unconnected- nets are unconnected; pin functions are never cut silently.
@@ -10043,7 +10043,7 @@ placed = {"/bom-u1": {"kind": "symbol", "ref": "R1", "where": {"sheet": "/"}, "p
 assert kr.context_parts(placed)["R1"]["bom"] == kr.bom_identity(placed["/bom-u1"]) and kr.context_parts(placed)["R1"]["bom"]["excludedReason"] == "dnp"
 print("ok ask parts and nets")
 
-# Ask (spec 09): board facts, checks, changes, size.
+# Ask: board facts, checks, changes, and size.
 assert kr.stat_number("506.97 mm²") == 506.97 and kr.stat_number(None) is None and kr.stat_number("n/a") is None
 assert kr.stat_number(123) is None and kr.stat_number("") is None
 with tempfile.TemporaryDirectory() as t:
@@ -10132,7 +10132,7 @@ check_settings = copy.deepcopy(kr.DEFAULT_SETTINGS)
 missing_checks = {c["name"]: c for c in kr.complete_context_checks([], check_settings, False, False)}
 assert missing_checks["erc"]["reason"] == "no schematic" and missing_checks["drc"]["reason"] == "no board"
 assert missing_checks["interfaces"]["reason"] == "disabled in settings"
-ASK_REVISION_FIELDS = {"revision", "sheets", "parts", "nets", "unconnected_pins", "netlist_available", "netlist_reason", "board"}  # Shared spec 10 fixture contract.
+ASK_REVISION_FIELDS = {"revision", "sheets", "parts", "nets", "unconnected_pins", "netlist_available", "netlist_reason", "board"}  # Shared Ask and MCP fixture contract.
 with patch("kicad_review.side_context", side_effect=lambda *a,**kw: {"parts":[],"nets":[],"unconnected_pins":0,"netlist_available":True,"netlist_reason":None}), patch("kicad_review.sheet_pages", side_effect=lambda root,name: [{"path":"/","name":root,"page":"1" if root.startswith("base") else "2"}]), patch("kicad_review.os.path.isfile", return_value=False):
     for sides in (("base","head"),("base",),("head",)):
         status = "added" if sides == ("head",) else "removed" if sides == ("base",) else "modified"
@@ -10178,17 +10178,17 @@ small_row = kr.context_changes([{"id": "s", "action": "modified", "kind": "net-m
 assert small_row["detail"] == {"kind": "members", "added": ["J1.1"]} and "detail_truncated" not in small_row
 non_dict_row = kr.context_changes([{"id": "nd", "action": "modified", "kind": "wire", "ref": "", "detail": "x" * 2500}])["rows"][0]
 assert non_dict_row["detail"] == {"omitted": True} and non_dict_row["detail_truncated"] is True
-# 03's signed copper detail: outlines are counted, never sent; the row keeps its type, layer and signed areas.
+# Signed copper outlines are counted, never sent; the row keeps its type, layer, and signed areas.
 area = {"kind": "area", "layer": "F.Cu", "addedMm2": 12.5, "removedMm2": 0.0, "addedContours": [[[float(i), 0.0]] * 200 for i in range(40)], "removedContours": []}
 ar = kr.context_changes([{"id": "a1", "action": "modified", "kind": "copper", "ref": "F.Cu", "where": {"board": True}, "channel": "board", "weight": "heavy", "detail": area}])["rows"][0]
 assert ar["detail"]["kind"] == "area" and ar["detail"]["layer"] == "F.Cu" and ar["detail"]["addedMm2"] == 12.5
 assert ar["detail"]["addedContours"] == {"omitted": True} and ar["detail"]["omitted_counts"] == {"addedContours": 40} and ar["detail"]["removedContours"] == []
 assert ar["detail_truncated"] is True and ar["channel"] == "board" and ar["weight"] == "heavy"
-# 04's fab coverage ledger survives into the context check; long lists keep 15 items and a full count.
+# The fab coverage ledger survives into the context check; long lists keep 15 items and a full count.
 fab = {**checks[0], "name": "fab_limits", "vendor": "jlcpcb", "title": "Fab limits", "profile": "jlcpcb-multilayer", "checkedOn": "2026-10-01", "assumedCopperOz": 1,
        "checked": ["track width"], "unchecked": [f"limit {i}" for i in range(20)], "unsupported": None,
        "coverageWarnings": ["F.Cu: copper thickness unknown"], "baselineAvailable": False, "fixed": 0, "violations": []}
-# 04 owns FAB_EVIDENCE_SOURCE (04 is not merged yet). Verify 04's exact constant when merged, or fallback to it in the test fixture.
+# Verify the module's exact FAB_EVIDENCE_SOURCE when available, or use the same fallback in the test fixture.
 FAB_EVIDENCE_SOURCE_04 = ('kicad-cli pcb drc; isolated board-only and vendor DRC passes per revision; '
                           'vendor-only findings paired between head and base by multiset identity; '
                           'fab_limits.json dated profile; coverage limited to checked limits '
@@ -10196,7 +10196,7 @@ FAB_EVIDENCE_SOURCE_04 = ('kicad-cli pcb drc; isolated board-only and vendor DRC
 if hasattr(kr, "FAB_EVIDENCE_SOURCE"):
     assert kr.FAB_EVIDENCE_SOURCE == FAB_EVIDENCE_SOURCE_04, "04's FAB_EVIDENCE_SOURCE matches expected value"
 fab_source = getattr(kr, "FAB_EVIDENCE_SOURCE", FAB_EVIDENCE_SOURCE_04)
-# 04 supplies two same-name sections: identities survive projection and completion, even with no board.
+# Two same-name fab sections retain their identities through projection and completion, even with no board.
 fab_sections = [{**fab, "vendor": vendor, "profile": profile,
                  "confidence": "deterministic", "evidence_source": fab_source}
                 for vendor, profile in (("jlcpcb", "jlcpcb-multilayer"), ("pcbway", "pcbway-standard"))]
@@ -10246,7 +10246,7 @@ with open(fixture_path, "r", encoding="utf-8") as fh:
 assert committed_doc == wdoc, f"{fixture_path} drift; run REGENERATE_FIXTURES=1 python3 test_kicad_review.py"
 clean_part = list(kr.context_parts({"/uuid-3": objs["/uuid-3"]}).values())
 assert kr.fit_context(lambda nc, pc: {"version": 1, "projects": [{"revisions": {"head": {"parts": clean_part, "nets": []}}}]})["truncated"] is False
-# 09 owns net_changes: 03's wiring status decides availability; a missing summary is unavailable, zero complete rows are available.
+# Wiring status decides net-change availability; a missing summary is unavailable, while zero complete rows are available.
 assert kr.net_change_support(None) == {"available": False, "complete": False}
 assert kr.net_change_support({}) == {"available": False, "complete": False}
 assert kr.net_change_support({"channels": []}) == {"available": False, "complete": False}
@@ -10264,7 +10264,7 @@ with patch("kicad_review.side_context", return_value={"parts": [], "nets": [], "
         assert (rec["headline"], rec["net_changes"]) == expected and rec["revisions"]["base"] is None
 print("ok ask board facts checks changes size")
 
-# Ask (spec 09): report writes the context beside the report and omits Ask data and exports when Ask is off; shared inlined assets may change.
+# Ask: the report writes context beside the report and omits Ask data and exports when Ask is off; shared inlined assets may change.
 def run_report(ask_on):
     with tempfile.TemporaryDirectory() as t:
         old = os.getcwd(); os.chdir(t)
@@ -10325,7 +10325,7 @@ with tempfile.TemporaryDirectory() as t:
     assert kr.ask_index(f"{t}/base")["nets"] == {}
 print("ok ask context is written beside the report")
 
-# Ask (spec 09): the workflow uploads the context only when Ask is on, and never fails the review over it.
+# Ask: the workflow uploads context only when Ask is on and never fails the review over it.
 wf = pathlib.Path(".github/workflows/review.yml").read_text(encoding="utf-8")
 assert "steps.report.outputs.context_name" in wf and "review/design-context.json" in wf
 copy_step = wf[wf.index("- name: Copy design context"):]
@@ -10334,7 +10334,7 @@ assert copy_step.count("if: steps.report.outputs.ask == 'true'") == 2 and copy_s
 assert "archive: false" in copy_step and "retention-days: 90" in copy_step
 assert wf.index("- name: Upload report") < wf.index("- name: Copy design context") < wf.index("- name: Screenshots of changed drawings")
 # 06 must be merged first. Its inert Ask-guarded hook is required once 06 merges.
-# 09 Task 5 enables the snapshot producer and tests ask-on and ask-off outputs.
+# The snapshot producer is tested with Ask both on and off.
 snapshot_merged = (
     hasattr(kr, "cmd_snapshot")
     or "design" in getattr(kr, "DEFAULT_SETTINGS", {})
@@ -10349,8 +10349,8 @@ if snapshot_merged:
     assert "retention-days: ${{ vars.KICAD_REVIEW_SNAPSHOT_DAYS || 90 }}" in snap, snap
     assert "retention-days: 90" not in snap, "snapshot context follows the repository snapshot retention variable, not comparison-report retention"
 else:
-    # 06 is unmerged (plan-context.md:60; controller: Plans 02, 04, 06 NOT merged).
-    # Guard against partial merges or renaming: fail if any part of 06 lands without the context upload hook.
+    # Snapshot support is unavailable. Guard against partial integration or renaming:
+    # fail if any snapshot producer lands without the context upload hook.
     assert not hasattr(kr, "cmd_snapshot"), "06's cmd_snapshot is merged: Upload design snapshot context hook must be present in review.yml"
     assert "design" not in getattr(kr, "DEFAULT_SETTINGS", {}), "06's design settings are merged: Upload design snapshot context hook must be present in review.yml"
     assert not any(line.strip().startswith("- name:") and "snapshot" in line.lower() for line in wf.splitlines()), \
@@ -10359,7 +10359,7 @@ else:
 print("ok ask context upload step")
 
 
-# Ask (spec 09, Task 3C): label kinds come from KiCad probes; any difference from the real netlist fails closed.
+# Ask label kinds come from KiCad probes; any difference from the real netlist fails closed.
 import hashlib
 LBL = lambda kind, text, x, y, u: f'({kind} "{text}" (at {x} {y} 0) (effects (font (size 1.27 1.27))) (uuid "{u}"))'
 ROOT = ('(kicad_sch (version 20260306) (generator "eeschema") (uuid "r-uuid") (lib_symbols) '
@@ -10452,7 +10452,7 @@ with tempfile.TemporaryDirectory() as t:
 print("ok ask label kinds are KiCad-verified or fail closed")
 
 
-# Ask (spec 09, Task 3D): verified label lists fill the nets; anything else keeps the null fallback with a reason.
+# Verified Ask label lists fill the nets; anything else keeps the null fallback with a reason.
 with tempfile.TemporaryDirectory() as t:
     write(t, {"netlist.net": nt})
     digest = hashlib.sha256(pathlib.Path(t, "netlist.net").read_text(encoding="utf-8").encode("utf-8")).hexdigest()
@@ -10489,7 +10489,7 @@ with tempfile.TemporaryDirectory() as t:
             assert False, "expected ValueError on malformed nets"
         except ValueError as exc:
             assert "malformed" in str(exc)
-    # Task 4 size test: net label lists count toward CONTEXT_LIMIT.
+    # Net label lists count toward CONTEXT_LIMIT.
     def build_with_labels(net_cap, pin_cap):
         nets, _, _ = kr.netlist_context(big, net_cap, pin_cap)
         for i, n in enumerate(nets):
@@ -10499,7 +10499,7 @@ with tempfile.TemporaryDirectory() as t:
     assert kr.context_bytes(doc_labels) <= kr.CONTEXT_LIMIT and doc_labels["truncated"] is True
 print("ok ask nets carry verified label kinds")
 
-# Task 13: Documentation: README, example settings, site setup
+# Documentation: README, example settings, and site setup.
 readme = pathlib.Path("README.md").read_text(encoding="utf-8")
 site_readme = pathlib.Path("site/README.md").read_text(encoding="utf-8")
 site_ask = pathlib.Path("site/ask.js").read_text(encoding="utf-8")
@@ -10554,7 +10554,7 @@ assert "ASK_SUMMARY_MODEL` (defaults to `ASK_MODEL`, or `claude-sonnet-5-5`" in 
 assert "export function askOptedIn" in site_ask, "TOML-subset reader in site/ask.js"
 print("ok ask documentation")
 
-# MCP (spec 10): exact four-layer board facts in physical copper order.
+# MCP: exact four-layer board facts in physical copper order.
 four = "ui/fixtures/vf-order-4.kicad_pcb"
 facts = kr.board_facts("/nonexistent-mcp-facts", four)
 assert set(facts["layers"]) == {"F.Cu", "In1.Cu", "In2.Cu", "B.Cu"}
@@ -10568,7 +10568,7 @@ objects = {'/root/uuid-r': {'kind': 'symbol', 'ref': 'R1', 'where': {'sheet': '/
 parts = kr.context_parts(objects)
 assert parts['R1']['uuid'] == 'uuid-r'
 assert parts['R1']['properties']['Voltage'] == '50V'
-# Each revision's map comes from its own raw objects (09's input shape: key is sheet path + UUID, where.sheet is the sheet).
+# Each revision's map comes from its own raw objects: the key is sheet path plus UUID, and where.sheet is the sheet.
 base_objects = objects
 head_objects = {**objects, '/root/uuid-new': {'kind': 'symbol', 'ref': 'R2', 'where': {'sheet': '/'}, 'props': {'reference': 'R2', 'Value': '4.7k'}}}
 # The unchanged R1 is in both maps, so a base-side net on an unchanged part resolves; R2 is head-only.
@@ -10748,7 +10748,7 @@ test_br03_build_integration()
 print('ok BR03 build integration, rule dedup and stable IDs')
 
 def test_br03_hotspot_contract():
-    """01's real sheet_hotspots + add_blob output is the literal fixture 03's browser checks consume."""
+    """The real sheet_hotspots and add_blob output is the literal fixture consumed by browser checks."""
     with tempfile.TemporaryDirectory() as td:
         manifests={}
         for side in ('base','head'):
@@ -10984,7 +10984,7 @@ def dl_project(root, name, sch=True, pcb=True):
     (src / f"{name}.kicad_pro").write_text("{}")
     if sch: (src / f"{name}.kicad_sch").write_text("(kicad_sch)")
     if pcb: (src / f"{name}.kicad_pcb").write_text(PCB)
-    # 02's raw head export, as its render step would leave it beside the project source.
+    # The raw head export as the render step would leave it beside the project source.
     pathlib.Path(root, "out").mkdir(parents=True, exist_ok=True)
     pathlib.Path(root, "out", "board.raw.glb").write_bytes(b"glTF-raw")
     return str(src)
@@ -11050,7 +11050,7 @@ try:
     t4 = tempfile.mkdtemp()
     only_sch = dl_export({"name": "S", "dir": ""}, dl_project(t4, "S", pcb=False), f"{t4}/out", dl_settings, "b" * 40)
     assert [e["kind"] for e in only_sch] == ["pdf"], only_sch
-    # Preset-specific output and header assertions. The KiBot template checks are in the Task 3A block.
+    # Preset-specific output and header assertions. The KiBot template checks are below.
     for preset in ("jlcpcb", "pcbway"):
         case = tempfile.mkdtemp(); source = dl_project(case, "P")
         cfg = copy.deepcopy(dl_settings); cfg["fabrication"]["preset"] = preset
@@ -11159,7 +11159,7 @@ finally:
     kr.subprocess.run = dl_real
 print("ok export_downloads commands, reuse, isolation and awkward projects")
 
-# ---- Task 3A: pinned KiBot v1.9.1 templates ----
+# ---- Pinned KiBot v1.9.1 templates ----
 TEMPLATES = pathlib.Path(kr.__file__).with_name("kibot_templates") / "v1.9.1"
 PINS = {"JLCPCB.kibot.yaml": "9dcc65bf1fa6e8a7e54e708088e37a9a312b06eb01dbfacdf3d19a4a433f8ca6",
         "PCBWay.kibot.yaml": "6b908fe676409b032004e4d31b421a1772788a310b5365125442bbd505e6b12c"}
@@ -11264,7 +11264,7 @@ finally:
     kr.subprocess.run = dl_real
 print("ok KiBot v1.9.1 pins and fabrication checks")
 
-# ---- Task 3B: JLCPCB CPL rotation correction ----
+# ---- JLCPCB CPL rotation correction ----
 import math
 CPL = kr.load_cpl_table()
 assert hashlib.sha256(kr.CPL_TABLE.read_bytes()).hexdigest() == kr.CPL_TABLE_SHA256
@@ -11405,7 +11405,7 @@ with tempfile.TemporaryDirectory() as cpl_dir:
             pass
 print("ok synthetic CPL CSV regression and pin validation")
 
-# Task 3B fix: unterminated override fields must not be silently repaired.
+# Unterminated override fields must not be silently repaired.
 with tempfile.TemporaryDirectory() as cpl_dir:
     override = pathlib.Path(cpl_dir, "P.cpl-overrides.csv")
     override.write_text('Designator,Rotation,Offset X,Offset Y\nU1,90,0,"0\n', encoding="utf-8")
@@ -11417,7 +11417,7 @@ with tempfile.TemporaryDirectory() as cpl_dir:
         raise AssertionError("accepted an unterminated CPL override quote")
 print("ok CPL overrides reject unterminated quotes")
 
-# Task 3B fix: whole-degree overrides are periodic even beyond float range.
+# Whole-degree overrides are periodic even beyond float range.
 with tempfile.TemporaryDirectory() as cpl_dir:
     override = pathlib.Path(cpl_dir, "P.cpl-overrides.csv")
     huge_degrees = 360 * 10**397 + 90  # 400 digits, exactly equivalent to +90 degrees.
@@ -11428,7 +11428,7 @@ with tempfile.TemporaryDirectory() as cpl_dir:
         assert kr.jlc_position("Bottom", 30.0, -1.0, 2.0, huge_rule) == (bottom, 1.5, 1.0)
 print("ok CPL oversized positive and negative rotations")
 
-# Task 3B fix: arithmetic/CSV failures stay inside fabrication; other exports survive.
+# Arithmetic and CSV failures stay inside fabrication; other exports survive.
 with tempfile.TemporaryDirectory() as case, patch("kicad_review.subprocess.run", side_effect=dl_fake):
     dl_mode.clear()
     source = dl_project(case, "P")
@@ -11469,8 +11469,8 @@ with tempfile.TemporaryDirectory() as case, patch("kicad_review.subprocess.run",
     assert {p.name: p.read_bytes() for p in cached.iterdir()} == original, "CPL failure changed release evidence"
 print("ok CPL overflow and malformed CSV fabrication isolation")
 
-# Synthetic board CPL regression: raw KiCad export and committed corrected output (Task 3B, Step 6;
-# amended per Owner decision 2026-10-27 and AGENTS.md private-design rule: generic names only).
+# Synthetic board CPL regression: raw KiCad export and committed corrected output.
+# The fixture uses generic names and contains no private design data.
 FIXTURES = pathlib.Path(kr.__file__).with_name("cpl_rotations") / "fixtures"
 with open(FIXTURES / "cpl-rotation-pos-raw.csv", newline="", encoding="utf-8") as f:
     raw_rows = list(csv.reader(f))
@@ -11631,7 +11631,7 @@ with tempfile.TemporaryDirectory() as d:
         assert len(download_calls) == 1 and download_calls[0][0]["name"] == "b" and download_calls[0][2] == "review/p/head", download_calls
     finally:
         os.chdir(cwd)
-# The head requests 02's raw GLB even with the 3D viewer off; the base never does so for downloads (needs 02's cmd_render gate).
+# The head requests a raw GLB even with the 3D viewer off; the base never does so for downloads.
 # Head download GLB export gates poster and viewer copies: only raw GLB is requested when 3D is off.
 with tempfile.TemporaryDirectory() as d:
     os.chdir(d)
@@ -11680,7 +11680,7 @@ with tempfile.TemporaryDirectory() as d, patch.object(kr, "IMAGE_RENDERER", "ver
         dl_set["downloads"]["enabled"] = True
         rel_set = copy.deepcopy(DEFAULT_SETTINGS)
         rel_set["checks"]["release"] = "informational"
-        # 06's missing_products also validates the head's other products; give the fixture those, so only the raw GLB varies.
+        # missing_products also validates the head's other products; give the fixture those so only the raw GLB varies.
         (c / "downloads").mkdir(); kr.write_download_manifest(str(c / "downloads"), [], policy=dl_set)
         (c / "fab").mkdir(); (c / "fab" / "P-review-jlcpcb-gerbers.zip").write_bytes(b"zip")
         # downloads.enabled requires board.raw.glb on head
@@ -12021,7 +12021,7 @@ assert "docs/superpowers" not in readme, "plan paths stay out of shipped assets"
 assert "02's" not in readme, "plan numbers stay out of shipped assets"
 print("ok downloads documented")
 
-# DP-S3I: the snapshot integrates 01's assets and 07's downloads under its own report family; Ask stays an inert hook without 09.
+# A snapshot integrates report assets and downloads under its own report family; Ask stays an inert hook without its producer.
 with _DpTmp() as t:
     old_cwd = os.getcwd()
     try:
@@ -12037,7 +12037,7 @@ with _DpTmp() as t:
         det = {"base": "b" * 40, "head": head, "reason": "push: new commit vs previous branch tip",
                "snapshot": {"ref": "main", "sha": head, "committedAt": "2026-10-24T10:00:00+00:00", "message": "Move R16"},
                "projects": [{"dir": "H", "name": "H", "status": "modified"}, {"dir": "Gone", "name": "Gone", "status": "removed"}]}
-        # 07's per-render manifests: the comparison's downloads/ and the trusted snapshot policy's downloads-snapshot/.
+        # Per-render manifests use downloads/ for comparisons and downloads-snapshot/ for the trusted snapshot policy.
         def _dp_stage(folder, content, purpose):
             os.makedirs(folder, exist_ok=True)
             pathlib.Path(folder, "fab-H-ccccccc.zip").write_bytes(content)
@@ -12147,18 +12147,18 @@ assert _wf.index("- name: Upload report") < _wf.index("- name: Build design snap
 assert "snapshot_only" not in _wf.split("workflow_call:")[1].split("jobs:")[0], "the reusable workflow takes no input of its own: the caller's event inputs are read"
 _caller = pathlib.Path("examples/kicad-review.yml").read_text(encoding="utf-8")
 assert "snapshot_only:" in _caller and "type: boolean" in _caller and "required: false" in _caller.split("base:")[1].split("head:")[0]
-# Optional Ask hook: 06 emits ask=false with no context_name, even if settings request Ask; no 09 producer is required.
-# Keep the guard/name/path contract for 09 to enable after 06 merges and the owner records build hosted Ask.
-# The ask=true branch below is a static reserved-contract check, not a requirement to build 09 or upload real context in 06.
+# The optional Ask hook emits ask=false with no context_name when no context producer is available.
+# Keep the guard, name, and path contract so hosted Ask can enable context uploads later.
+# The ask=true branch below is a static reserved-contract check, not a requirement to upload real context.
 assert "          name: ${{ steps.snapshot.outputs.name }}" in _wf, "the HTML artifact must carry its design name, which 09's loadContext reads"
 _ctx = _wf[_wf.index("- name: Upload design snapshot context"):].split("\n      - name:")[0]
 assert "        if: steps.snapshot.outputs.ask == 'true'" in _ctx and "        continue-on-error: true" in _ctx, _ctx   # ask on: uploads; ask off: the guard skips the step
 assert "          archive: false" in _ctx and "          name: ${{ steps.snapshot.outputs.context_name }}" in _ctx, _ctx
 assert "          path: review/design/${{ steps.snapshot.outputs.context_name }}" in _ctx and "          retention-days: ${{ vars.KICAD_REVIEW_SNAPSHOT_DAYS || 90 }}" in _ctx, _ctx
 assert _wf.index("- name: Upload design snapshot") < _wf.index("- name: Upload design snapshot context") < _wf.index("- name: Screenshots of changed drawings")
-# ask on: the context step's only condition is the ask guard, so it uploads kicad-design-<sha7>.context.json (named by context_name, which 09's loadContext computes from the HTML name)
+# Ask on: the context step's only condition is the Ask guard, so it uploads kicad-design-<sha7>.context.json named by context_name.
 assert [line.strip() for line in _ctx.splitlines() if line.strip().startswith("if:")] == ["if: steps.snapshot.outputs.ask == 'true'"], _ctx
-# ask off: Task 4A's DP-S3I snapshot-only run with ask off emits ask=false and no context_name, so this guard is false and no context artifact is uploaded
+# Ask off: a snapshot-only run emits ask=false and no context_name, so this guard is false and no context artifact is uploaded.
 # the HTML upload must not carry the context, and context_name appears only in the guarded context upload
 assert "context_name" not in _wf[_wf.index("- name: Upload design snapshot"):_wf.index("- name: Upload design snapshot context")], "the HTML upload must not carry the context"
 assert _wf.count("steps.snapshot.outputs.context_name") == 2, "context_name appears only in the guarded context upload"

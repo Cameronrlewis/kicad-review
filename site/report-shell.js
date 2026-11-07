@@ -57,7 +57,7 @@ export function declaredAssets(data) {
 }
 
 // Authenticated lazy shell: drop model/index payloads that have a valid same-run asset
-// descriptor and no other consumer. Blob IDs in model3d/parts3d stay unchanged; 01's
+// descriptor and no other consumer. Blob IDs in model3d/parts3d stay unchanged; shared
 // image/hotspot and poster blobs are kept because something other than those slots names them.
 export function lazy3dData(input) {
   // Deliberate deviation from structuredClone(input): deep clone everything but the blob payloads,

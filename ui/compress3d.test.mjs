@@ -28,7 +28,7 @@ function quietDocument(document) {
 }
 
 function fixturePaths() {
-  // Task 1's actual exports of ui/fixtures/3d-four-layer.kicad_pcb, not fabricated GLBs.
+  // Actual exports of ui/fixtures/3d-four-layer.kicad_pcb, not fabricated GLBs.
   // Preserve both KiCad hierarchies in CI without relying on a developer's scratch folder.
   assert.ok(process.env.OUT, 'OUT is required for integration test scratch');
   return ['10.0.0','10.0.6'].map(version=>{

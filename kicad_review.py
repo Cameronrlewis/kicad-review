@@ -439,9 +439,9 @@ def render_side(src_dir, name, out, netlist=False, ask=False):
     if os.path.exists(sch):
         kicad_cli("sch", "erc", "--format", "json", "--severity-all", "-o", f"{out}/erc.json", sch)
         if netlist or ask:
-            export_netlist(sch, out)  # 03's producer: bounded, soft, validated; one call per present schematic
+            export_netlist(sch, out)  # bounded, soft, validated; one call per present schematic
             if ask:
-                export_label_membership(src_dir, name, out)  # Task 3C: one probed netlist export, Ask-only, soft
+                export_label_membership(src_dir, name, out)  # one probed netlist export, Ask-only, soft
     if board_error is not None:
         # Incomplete evidence: no DRC report for this side, only the reason.
         pathlib.Path(out, 'drc.json').unlink(missing_ok=True)
@@ -996,19 +996,19 @@ def nonempty_dir(path):
 
 
 def poster_png_valid(path):
-    """02's still: a PNG on the shared 1600x1000 canvas (normalize_poster's output)."""
+    """A PNG on the shared 1600x1000 canvas produced by normalize_poster."""
     return poster_size(path) == (1600, 1000)
 
 
 def glb_valid(cache):
-    """02's export_glb publishes board.raw.glb and board.glb only when it wrote a non-empty file; a failed export deletes its target."""
+    """export_glb publishes board.raw.glb and board.glb only after writing a non-empty file; a failed export deletes its target."""
     return all(pathlib.Path(cache, name).is_file() and pathlib.Path(cache, name).stat().st_size > 0 for name in ("board.raw.glb", "board.glb"))
 
 
 def downloads_valid(cache, purpose, policy):
-    """07's downloads.json envelope in the purpose's folder, written for that purpose and under this policy's download_policy_key.
+    """The downloads.json envelope in the purpose's folder, written for that purpose and under this policy's download_policy_key.
 
-    download_directory and download_policy_key are 07's; this is reached only once 07 adds the [downloads] section."""
+    download_directory and download_policy_key define the configured [downloads] contract."""
     try:
         envelope = json.loads(pathlib.Path(download_directory(str(cache), purpose), "downloads.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -1027,7 +1027,7 @@ def pcbdraw_settled(cache):
 
 
 def raw_glb_valid(cache):
-    """07's download source: 02's uncompressed board.raw.glb, non-empty."""
+    """The download source is a non-empty, uncompressed board.raw.glb."""
     raw = pathlib.Path(cache, "board.raw.glb")
     return raw.is_file() and raw.stat().st_size > 0
 
@@ -1053,7 +1053,7 @@ def missing_products(cache, p, side, settings, purposes):
     """Names of the products this settings object requests that are absent or invalid in the per-side cache directory.
 
     Pure check, never exports. Never lists SVG, schematic or board images (image_cache_complete validates those).
-    A .failed marker is 02's record of a best-effort export that was attempted, so it satisfies the product."""
+    A .failed marker records a best-effort export attempt, so it satisfies the product."""
     missing = []
     cache = pathlib.Path(cache)
     board = os.path.isfile(board_path(p, side))
@@ -1181,14 +1181,14 @@ def render_settings(det):
     snapshot = det.get("snapshot_settings")
     if snapshot:
         settings["design"]["enabled"] = snapshot["design"]["enabled"]
-        # Configuration-independent products are unioned: 02's GLB and still, library drawings, and
-        # 07's downloads and 09's Ask inputs once those sections exist.
+        # Configuration-independent products are unioned: raw GLB and still, library drawings,
+        # downloads, and Ask inputs when their settings are present.
         for section in ("3d", "libraries", "downloads", "ask"):
             if section in settings and section in snapshot:
                 settings[section]["enabled"] |= snapshot[section]["enabled"]
         if snapshot["checks"].get("interfaces", "off") != "off" and settings["checks"].get("interfaces", "off") == "off":
             settings["checks"]["interfaces"] = snapshot["checks"]["interfaces"]
-        # Release checks need the trusted fabrication policy; so will 07's snapshot downloads (its manifest is keyed by it).
+        # Release checks and snapshot downloads need the trusted fabrication policy because their manifests are keyed by it.
         if snapshot["checks"].get("release", "off") != "off" or snapshot.get("downloads", {}).get("enabled", False):
             settings["_snapshot_fabrication"] = snapshot["fabrication"]
             if isinstance(snapshot.get("downloads"), dict):
@@ -1241,7 +1241,7 @@ def render_fabrication(p, side, out, settings, products=("fab", "fab-snapshot"))
 
 
 def glb_revision_matches(out, revision):
-    """07's Task 9A gate input: the full SHA the raw exporter in this folder last ran on."""
+    """Check the full SHA that the raw 3D exporter in this folder last ran on."""
     try:
         return pathlib.Path(out, "board.raw.glb.revision").read_text(encoding="utf-8").strip() == revision
     except (OSError, UnicodeError):
@@ -1256,7 +1256,7 @@ def record_glb_revision(out, revision):
 
 
 def render_downloads(p, side, out, settings, head, purposes, missing):
-    """07's head downloads: downloads/ under the comparison policy, downloads-snapshot/ under the trusted snapshot policy.
+    """Head downloads: downloads/ under the comparison policy, downloads-snapshot/ under the trusted snapshot policy.
 
     A full render (missing is None) makes each folder the run's purposes use; a partial cache hit only the missing ones."""
     src = posixpath.join(side, p["dir"])
@@ -1368,7 +1368,7 @@ def cmd_render(args):
                         sys.exit(f"Fab limits could not run for {p['name']}: {exc}")
                 missing = None  # a full render makes every product
             board = pathlib.Path(board_path(p, side)).is_file()
-            # The trusted snapshot's fabrication/download policy needs head's own raw export (07's Task 9A revision gate).
+            # The trusted snapshot's fabrication/download policy needs a raw export verified against the head revision.
             snapshot_downloads = side == "head" and "snapshot" in purposes and settings.get("_snapshot_fabrication") is not None and board
             if missing is None or {"poster", "glb"} & set(missing) or (snapshot_downloads and "downloads-snapshot" in missing and not glb_revision_matches(out, det.get(side))):
                 own_head_glb = side == "head" and board and (snapshot_downloads or (
@@ -3540,7 +3540,7 @@ def fab_entry(pro, name, settings, fab_dir, dest):
 
 
 def glb_entry(raw, dest):
-    """Copy 02's raw head export; a missing or empty raw file is an error, never a second GLB export here."""
+    """Copy the raw head export; a missing or empty raw file is an error, never a second GLB export here."""
     entry = {"kind": "glb", "label": DOWNLOAD_LABELS["glb"], "file": None, "error": None}
     try:
         if os.path.lexists(dest):
@@ -3606,7 +3606,7 @@ def export_downloads(p, src, out, settings, head, *, policy=None, purpose="compa
     name, dl = p["name"], download_directory(out, purpose)
     pcb, sch = f"{src}/{name}.kicad_pcb", f"{src}/{name}.kicad_sch"
     if purpose == "snapshot" and os.path.exists(pcb):
-        # Task 9A gate: the raw exporter must record its verified source revision.
+        # The raw 3D exporter must record its verified source revision before snapshot downloads are created.
         # Never relabel comparison-head bytes as a different snapshot revision.
         marker = pathlib.Path(out, "board.raw.glb.revision")
         try:
@@ -3629,7 +3629,7 @@ def export_downloads(p, src, out, settings, head, *, policy=None, purpose="compa
         if settings["downloads"]["step"]:
             dest = f"{dl}/{stem}-board.step"
             entries.append(export_one("step", ["pcb", "export", "step", "--subst-models", "-f", "-o", dest, pcb], dest, DOWNLOAD_STEP_TIMEOUT))
-        dest = f"{dl}/{stem}-board.glb"  # 02's uncompressed raw export, copied unchanged; never the Meshopt-compressed viewer GLB
+        dest = f"{dl}/{stem}-board.glb"  # uncompressed raw export, copied unchanged; never the Meshopt-compressed viewer GLB
         entries.append(glb_entry(f"{out}/board.raw.glb", dest))
     for e in entries:
         if e["error"] and e["kind"] != "fab":
@@ -3646,7 +3646,7 @@ KIBOT_LAYER_SUFFIXES = {"F.Cu": ".gtl", "B.Cu": ".gbl", "F.SilkS": ".gto", "B.Si
 
 
 def kibot_differences(preset, gerber_names, bom_rows):
-    """Only the differences Task 3A checks. Everything else is recorded in kibot_templates/v1.9.1/SOURCE.md."""
+    """Check selected KiBot template differences; the complete contract is recorded in kibot_templates/v1.9.1/SOURCE.md."""
     lower = [n.lower() for n in gerber_names]
     diffs = [f"missing {layer} ({suffix})" for layer, suffix in KIBOT_LAYER_SUFFIXES.items()
              if not any(n.endswith(suffix) for n in lower)]
@@ -4124,7 +4124,7 @@ def bom_coverage(objs, settings):
 
 
 def bom_identity(obj):
-    """Canonical BOM contract for one schematic object (spec 08). Fields are unclipped; display clipping belongs to 09."""
+    """Canonical BOM contract for one schematic object. Fields are unclipped; consumers apply display clipping."""
     p = obj.get("props") or {}
     ref = base_ref(obj.get("ref"))  # units of one part share their base reference
     reason = ("not_symbol" if obj.get("kind") != "symbol" else "dnp" if p.get("dnp") == "yes" else
@@ -4194,7 +4194,7 @@ def parts_lines(objs):
     return sorted(lines.values(), key=lambda l: natural(l["refs"][0]))
 
 
-# ---- BOM view: categories, reference ranges and summary (spec 08). ----
+# ---- BOM view: categories, reference ranges and summary. ----
 
 BOM_CATEGORIES = ("Resistors", "Capacitors", "Inductors & Ferrites", "Diodes & LEDs", "Transistors",
                   "ICs & Modules", "Connectors", "Test Points", "Mechanical", "Other")
@@ -4263,9 +4263,9 @@ vendor_bom_csv = importlib.util.module_from_spec(_VENDOR_SPEC)
 _VENDOR_SPEC.loader.exec_module(vendor_bom_csv)
 
 
-# ---- BOM files for the report (spec 08): the generic CSV, the JLCPCB file through the vendored planner, and PCBWay. ----
-# ponytail: ceiling: these writers serve the report only; the release (07) keeps KiCad's own export (Owner decision 2026-10-26:
-# option A). Ceiling of the JLCPCB file: the planner splits by the bytes-less-CRLF rule, so its configured budget reserves two
+# ---- BOM files for the report: the generic CSV, the JLCPCB file through the vendored planner, and PCBWay. ----
+# ponytail: ceiling: these writers serve the report only; the release package keeps KiCad's own export.
+# Ceiling of the JLCPCB file: the planner splits by the bytes-less-CRLF rule, so its configured budget reserves two
 # bytes for the CRLF before planning. A split therefore fits the stricter written-record limit instead of refusing an otherwise
 # splittable group; a reference that cannot fit still refuses the whole file (fail closed).
 
@@ -4364,7 +4364,7 @@ def bom_exports(lines, preset, part_field=None, objects=None):
 
 
 def bom_repository(boards, preset, part_field=None):
-    """Combined BOM across the repository's projects (Owner decision 2026-10-26). A board line joins another board's line
+    """Combined BOM across the repository's projects. A board line joins another board's line
     only when key, category, manufacturer and datasheet all match. Board-qualified references stay distinct;
     quantities add only inside a joined line."""
     names = [b["name"] for b in boards]
@@ -4608,7 +4608,7 @@ def fab_check(p, settings, out_dir, waivers, vendor, *, single=False):
     if not fab_enabled(settings):
         return None
     level = settings['checks']['fab_limits']
-    # Owner decision 2026-10-26: no default comparison values. not_run has no head audit, so it has no base
+    # Do not invent default comparison values. not_run has no head audit, so it has no base
     # comparison and carries no baselineAvailable or fixed key. Every other result takes both from the base audit below.
     empty = {'name':'fab_limits','title':'Fab limits','vendor':vendor,'level':level,
              'errors':0,'new_errors':0,'warnings':0,'new_warnings':0,'violations':[],
@@ -4762,11 +4762,11 @@ def net_members(text, objects, commit):
     suppress a net pair if either side is unknown, not treat it as added/removed.
     Multi-unit anchors are candidates: only the pin manifest can select the owning
     unit (or units for shared pins); positions here are symbol, not pin, positions.
-    Task 8 resolves candidates against that manifest. Missing sheet identity makes
+    Candidate resolution uses that manifest. Missing sheet identity makes
     membership unknown rather than conflating distinct schematic instances.
 
-    Per spec and plan prose, power symbols ('#' references) are skipped rather than
-    fabricated into component pins. Per Open Question 4, missing or unannotated
+    Power symbols ('#' references) are skipped rather than fabricated into component
+    pins. Missing or unannotated
     references (e.g. 'R?', '') fall back to symbol UUID only when exactly one candidate
     exists; otherwise connectivity identity is ambiguous and comparison is suppressed.
     """
@@ -5050,7 +5050,7 @@ def diff_board_pins(base, head, base_pads, head_pads, commits):
                                where={"board": True})
             r.update(document="board", pos=h.get("pos"), box=h.get("box"))
             # Derived row does not own scene changeIds. Keep each revision identity separately.
-            # Board anchors carry board=True and omit sheet (PCBs have no sheet; consumed by Task 8.1/8.2).
+            # Board anchors carry board=True and omit sheet because PCBs have no sheet identity.
             for side, uid, o, pad in (("base", bk, b, bp), ("head", hk, h, hp)):
                 r["anchors"][side] = [{"uuid": uid, "padUuid": pad["uuid"], "ref": o["ref"],
                                        "pin": pad["number"], "pos": o.get("pos"),
@@ -5256,7 +5256,7 @@ def interface_check(p, settings, objs, out_dir, *, single=False):
     return c
 
 
-# ---- Ask: the compact, factual design context a model answers from (spec 09). ----
+# ---- Ask: the compact, factual design context a model answers from. ----
 CONTEXT_LIST = 15
 
 
@@ -5264,7 +5264,7 @@ def clip(value, n=200):
     return str(value if value is not None else "")[:n]
 
 
-FIELD_LIMIT = 2000    # code points kept for identity fields (value, footprint, mpn, lcsc); 10's display cap
+FIELD_LIMIT = 2000    # code points kept for identity fields (value, footprint, mpn, lcsc); MCP display cap
 PROPERTY_LIMIT = 200  # code points kept per extra KiCad property value
 PROPERTY_COUNT = 32   # extra properties kept per part, in file order
 
@@ -5277,7 +5277,7 @@ def keep(value, n):
 
 def netlist_context(text, net_cap, pin_cap):
     """Nets as {id, pin_count, pins[REF.PIN], pin_records[{ref, pin}], more} and, per part, its pins {pin, net, fn, fn_truncated?}. Single-pin unconnected- nets are counted, not listed; a connected net keeps its name whatever it starts with.
-    `text` must be the return value of 03's read_netlist, which already enforces the single export root, unique net names and identity fields. This function adds only the components check the context needs."""
+    `text` must be the return value of read_netlist, which already enforces the single export root, unique net names and identity fields. This function adds only the components check the context needs."""
     root = parse_sexpr(text)
     if not root or root[0] != "export" or find(root, "components") is None:
         raise ValueError("netlist has no components section")
@@ -5321,7 +5321,7 @@ def context_parts(objs):
         clipped = [str(k) for k, v in props[:PROPERTY_COUNT] if keep(v, PROPERTY_LIMIT)[1]]
         rec = parts.setdefault(ref, {
             "ref": ref, "uuid": key.rsplit("/", 1)[-1],
-            "bom": bom_identity(o),  # 08's canonical contract, unclipped; the first unit's identity stands for the merged part, and grouping uses only this field
+            "bom": bom_identity(o),  # canonical and unclipped; the first unit's identity stands for the merged part, and grouping uses only this field
             "value": cut["value"][0], "footprint": cut["footprint"][0], "mpn": cut["mpn"][0], "lcsc": cut["lcsc"][0],
             "datasheet": ds if ds and ds.lower().startswith(("http://", "https://")) else None,
             "sheet": (o.get("where") or {}).get("sheet") if source == "symbol" else None,
@@ -5338,7 +5338,7 @@ def context_parts(objs):
 
 
 def side_context(side_dir, objs, net_cap=40, pin_cap=64):
-    """Parts and nets of one revision, read only through 03's read_netlist (marker first, then strict validation). If the netlist is missing or unusable the nets stay empty and the reason says why; nothing is built from geometry."""
+    """Parts and nets of one revision, read only through read_netlist (marker first, then strict validation). If the netlist is missing or unusable the nets stay empty and the reason says why; nothing is built from geometry."""
     nets, pins, unconnected, reason = [], {}, 0, None
     try:
         text = read_netlist(side_dir)
@@ -5347,7 +5347,7 @@ def side_context(side_dir, objs, net_cap=40, pin_cap=64):
         reason = "no netlist was exported for this revision"
     except ValueError as exc:
         # read_netlist raises the marker's own text when the export failed, and a validation message for a corrupt file.
-        marker = os.path.exists(f"{side_dir}/netlist.net.error")  # ponytail: a reason-text check only; the read itself is 03's
+        marker = os.path.exists(f"{side_dir}/netlist.net.error")  # ponytail: a reason-text check only; read_netlist performs the read
         reason = clip(exc, 500) if marker else f"netlist unreadable: {clip(exc, 200)}"
     except OSError as exc:  # ponytail: unreadable file; reported, never a stack trace in a review
         reason = f"netlist unreadable: {clip(exc, 200)}"
@@ -5397,7 +5397,7 @@ def enrich_context(rev, objs, sheets):
         net["pages"] = [pages[path]["page"] for path in net["sheet_paths"] if path in pages]
 
 
-# ---- Ask: label kinds per net, computed by KiCad on probed copies and verified against the real netlist (Task 3C). ----
+# ---- Ask: label kinds per net, computed by KiCad on probed copies and verified against the real netlist. ----
 PROBE_PREFIX = "KRPROBE"
 LABEL_KINDS = {"label": "local_labels", "global_label": "global_labels", "hierarchical_label": "hierarchical_labels"}
 BUS_TEXT = re.compile(r"\[[^\]]*\.\.[^\]]*\]|\{")
@@ -5505,13 +5505,13 @@ def label_membership(orig_text, probed_text, probes, erc):
 
 
 def export_label_membership(src_dir, name, out):
-    """Ask-only and soft: <out>/labels.json, or a one-line labels.json.error. Never exits; Task 3D falls back to null label fields."""
+    """Ask-only and soft: <out>/labels.json, or a one-line labels.json.error. Never exits; failures leave null label fields."""
     out = pathlib.Path(out)
     target, marker = out / "labels.json", out / "labels.json.error"
     for path in (target, marker):
         path.unlink(missing_ok=True)
     try:
-        orig = read_netlist(out)  # 03's marker first: no netlist, no labels
+        orig = read_netlist(out)  # marker first: no netlist means no labels
         erc = json.loads((out / "erc.json").read_text(encoding="utf-8"))
         with tempfile.TemporaryDirectory() as work:
             probes = label_probes(src_dir, name, work)
@@ -5587,11 +5587,11 @@ def board_facts(side_dir, pcb_path):
     return facts
 
 
-FAB_LEDGER = ("vendor", "profile", "checkedOn", "assumedCopperOz", "checked", "unchecked", "unsupported", "coverageWarnings", "baselineAvailable", "fixed")  # 04's vendor identity and coverage ledger
+FAB_LEDGER = ("vendor", "profile", "checkedOn", "assumedCopperOz", "checked", "unchecked", "unsupported", "coverageWarnings", "baselineAvailable", "fixed")  # vendor identity and coverage ledger
 
 
 def ledger(check):
-    """04's fab coverage fields, copied unchanged except for size. A string or listed item over 200 code points is cut and named in `<field>_truncated`; a list keeps its first 15 items and its full count in `<field>_more`. fit_context reads every mark, so nothing is clipped silently."""
+    """Copy fab coverage fields unchanged except for size. A string or listed item over 200 code points is cut and named in `<field>_truncated`; a list keeps its first 15 items and its full count in `<field>_more`. fit_context reads every mark, so nothing is clipped silently."""
     out = {}
     for key in FAB_LEDGER:
         if key not in check: continue
@@ -5610,7 +5610,7 @@ def ledger(check):
 
 
 def net_change_support(summary):
-    """03's wiring channel: complete with zero rows is available and complete; a missing summary or not_applicable is unavailable."""
+    """For the wiring channel, complete with zero rows is available and complete; a missing summary or not_applicable is unavailable."""
     wiring = next((c for c in (summary or {}).get("channels", []) if c.get("channel") == "wiring"), None)
     return {"available": bool(wiring and wiring.get("status") != "not_applicable"), "complete": bool(wiring and wiring.get("status") == "complete")}
 
@@ -5618,7 +5618,7 @@ def net_change_support(summary):
 DETAIL_BYTES = 2000  # JSON bytes of typed change detail kept verbatim per row
 
 
-GEOMETRY_KEYS = ("addedContours", "removedContours", "contours", "points")  # 03's signed copper outlines and point lists: counted, never sent to the model
+GEOMETRY_KEYS = ("addedContours", "removedContours", "contours", "points")  # signed copper outlines and point lists: counted, never sent to the model
 
 
 def bounded_detail(detail):
@@ -5679,7 +5679,7 @@ def context_changes(changes, cap=150):
             if len(r["changes"]) > 6: row_["changes_more"] = len(r["changes"]) - 6
         elif r.get("props"):
             row_["props"] = {clip(k, 60): clip(v, 100) for k, v in list(r["props"].items())[:6]}
-        for key in ("channel", "weight"):  # spec 03 adds these to change rows; absent on main
+        for key in ("channel", "weight"):  # optional electrical metadata may be absent from change rows
             if r.get(key):
                 row_[key] = r[key]
         if r.get("detail") is not None:
@@ -5704,7 +5704,7 @@ def complete_context_checks(checks, settings, has_schematic, has_board):
 
 
 def project_context(p, out, objs, sheets, pcbs, changes, checks, sides, net_cap, pin_cap, revision_shas, settings, summary=None):
-    """Everything Ask knows about one project: both revisions, the sheet list, the change list, the check results, and 03's headline and wiring support."""
+    """Everything Ask knows about one project: both revisions, the sheet list, the change list, the check results, and electrical headline and wiring support."""
     revisions = {}
     for side in ("base", "head"):
         if side not in sides:
@@ -6369,7 +6369,7 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0, bom_sink=No
             parts["coverage"]["base"] = None
             for line in parts["lines"]:
                 line["new_problems"] = []
-        if bom_sink is not None:  # repository BOM (Task 5A) reads the head lines and objects
+        if bom_sink is not None:  # the repository BOM reads the head lines and objects
             bom_sink.append({"name": p["name"], "lines": lines["head"], "objects": objs["head"]})
     allowed_sides = ("head",) if single else ("base", "head")
     if settings["3d"]["enabled"]:
@@ -6406,7 +6406,7 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0, bom_sink=No
     ask = None
     if context is not None:
         with open("review/detect.json", encoding="utf-8") as fh: revision_shas = json.load(fh)
-        # Rebuilt from bounded facts, never from the report payload or its blobs. summary is 03's electrical_summary, the same object returned as project["summary"].
+        # Rebuilt from bounded facts, never from the report payload or its blobs. summary is electrical_summary, the same object returned as project["summary"].
         context[p["dir"]] = lambda net_cap, pin_cap: project_context(p, out, objs, sheets, pcbs, changes, checks, sides, net_cap, pin_cap, revision_shas, settings, summary=summary)
         # An absent side is null, never {}.
         ask = {"nets": {side: (ask_index(f"{out}/{side}")["nets"] if side in sides else None) for side in ("base", "head")}}
@@ -6427,7 +6427,7 @@ def absolute_checks(checks):
         for v in c["violations"]:
             v["new"] = False
         c["new_errors"] = c["new_warnings"] = 0
-        if "fixed" in c:  # 04's not_run fab result has no base comparison, so it carries no fixed key at all
+        if "fixed" in c:  # a not_run fab result has no base comparison, so it carries no fixed key at all
             c["fixed"] = 0
 
 
@@ -6676,7 +6676,7 @@ def cmd_report(args):
             project["downloads"] = downloads
         data["projects"].append(project)
         change_offset += len(project["changes"])
-    if len(bom_boards) >= 2:  # repository-wide BOM, only when there are several projects (Owner decision 2026-10-26)
+    if len(bom_boards) >= 2:  # a repository-wide BOM is useful only when there are several projects
         data["bom"] = bom_repository(bom_boards, settings["fabrication"]["preset"], settings["fabrication"].get("part_field"))
     load_supplier(settings, data["projects"])
     assign_ids(data["projects"])
@@ -6995,7 +6995,7 @@ def cmd_snapshot(args):
     assign_ids(projects)
     snapshot = det.get("snapshot") or {"ref": "", "sha": det["head"], "committedAt": "", "message": ""}
     report_settings = filtered_settings(settings)
-    report_settings.pop("ask", None)  # 09's optional hook: no Ask on a design page until 09 turns it on
+    report_settings.pop("ask", None)  # design-page report settings omit the optional Ask hook
     data = {"version": 1, "repo": env.get("GITHUB_REPOSITORY", ""), "links": review_links(env, {**det, "base": None}),
             "base": None, "head": det["head"], "reason": "design snapshot", "mode": "single",
             "snapshot": snapshot,
@@ -7003,7 +7003,7 @@ def cmd_snapshot(args):
             "report": {"kind": "design", "head": det["head"],
                        "projects": [{"index": i, "dir": p["dir"], "name": p["name"]} for i, p in enumerate(selected)]},
             "settings": report_settings, "run_id": env.get("GITHUB_RUN_ID", ""), "projects": projects, "blobs": blobs}
-    html = finalize_report(data, f"{DESIGN_DIR}/assets")  # 01's shared finalizer: asset map, sidecars, offline HTML; no local JSON or inline_page here
+    html = finalize_report(data, f"{DESIGN_DIR}/assets")  # shared finalizer: asset map, sidecars, offline HTML; no local JSON or inline_page here
     name = f"kicad-design-{det['head'][:7]}.html"
     os.makedirs(DESIGN_DIR, exist_ok=True)
     for file in (name, "design-snapshot.html"):  # the second is the stable name a release carries

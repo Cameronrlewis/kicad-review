@@ -2587,7 +2587,7 @@ test('missing share secrets keep existing review HTML byte-identical and guest r
     // Deployment provenance is additive to the pinned pre-footer shell.
     .replace('<meta name="deploy-sha" content="unknown">', '')
     .replace('<footer class="deployment" aria-label="Deployment">Deployed commit <code>unknown</code></footer>', '')
-    // Shared theme script and toggle (Stage 1) are normalized out of the pinned digest.
+    // The shared theme script and toggle are normalized out of the pinned digest.
     .replace(/<script>\(\(\) => \{\n  const root[\s\S]*?<\/script>/, '').replace(/<button type="button" class="btn theme-toggle"[\s\S]*?<\/button>/, '').replace(/<svg width="0"[\s\S]*?<\/svg>\s*(?=<header)/, '')
     // BR02 lazy 3D model broker (authenticated wrapper only) is additive.
     .replace(/<script>\(function threeClient\([\s\S]*?<\/script>/, '');
@@ -4063,7 +4063,7 @@ for(const encoded of [true,false])test('BR02 broker gzip transport '+(encoded?'f
   } finally {await new Promise(resolve=>server.close(resolve));}
 });
 
-// Task 9.1: authenticated image delivery and the opaque-frame bridge.
+// Authenticated image delivery and the opaque-frame bridge.
 import { assetFromReport, readStoredData, privateAsset, readExactly } from './worker.js';
 const imageId = 'abcdef123456';
 const imageText = '<svg xmlns="http://www.w3.org/2000/svg"/>';
@@ -5536,7 +5536,7 @@ test('BR02 guest shares keep embedded 3D blobs and never install the model broke
 });
 
 test('BR02 measurement wrapper fixture keeps one opaque report frame that receives the deep link', () => {
-  // ui/measure3d.mjs --report-frame '#review-report' measures this exact page (Task 10A scratch wrapper).
+  // ui/measure3d.mjs --report-frame '#review-report' measures this exact wrapper page.
   const html = reviewPage({ user: 'test', owner: 'o', repo: 'r', id: 12, name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', workflowRunId: 9 });
   const frames = [...html.matchAll(/<iframe\b[^>]*>/g)].map(m => m[0]);
   assert.equal(frames.length, 1);
@@ -6653,7 +6653,7 @@ test('ask route: opt-in comes from the default branch, so a pull request cannot 
 
 test('ask route: the complete shipped example can opt in without removing its arrays', async () => {
   const { readFileSync } = await import('node:fs');
-  // Task 13 later adds an opted-out [ask] table; retain every other byte of the shipped example.
+  // Enabling the opted-out [ask] table must retain every other byte of the shipped example.
   const example = readFileSync(new URL('../examples/kicad-review.toml', import.meta.url), 'utf8');
   const enabled = /^\[ask\]\s*$/m.test(example)
     ? example.replace(/(\[ask\][\s\S]*?\benabled\s*=\s*)false/, '$1true')
@@ -8264,7 +8264,7 @@ function mcpSecurityHarness(){
     const response=await mcpWorker.fetch(authenticated,local,ctx);
     if(response.status!==200)return new Response(null,{status:401});
     assert.ok(providerHelpers,'authenticated apiHandler must expose provider helpers to test observer');
-    // Task 1 verifies this exact installed helper contract before Task 11/12 depend on it.
+    // Exercise the exact installed helper contract used by grant revocation.
     const grants=await providerHelpers.listUserGrants('cam');
     assert.ok(Array.isArray(grants.items));assert.equal(grants.items.length,1,'isolated test account has one grant');
     await providerHelpers.revokeGrant(grants.items[0].id,'cam');
@@ -8352,7 +8352,7 @@ test('MCP OAuth binding and replay matrix',async(t)=>{
   const denied=await sdk.callTool({name:'get_design',arguments:{repo:'Cameronrlewis/repo'}});
   assert.equal(denied.isError,true);assert.equal(JSON.parse(denied.content[0].text).error.code,'UNAVAILABLE');
   assert.equal(harness.artifactReads(),before,'authenticated revoked call cannot reach artifacts');
-  // Task 1 records the selected provider's exact authenticated revocation contract; this adapter exercises it without logging token or response bodies.
+  // This adapter exercises the provider's authenticated revocation contract without logging token or response bodies.
   assert.equal((await harness.revokeGrant('invalid-test-bearer')).status,401,'unauthenticated invocation cannot revoke a grant');
   const revoked=await harness.revokeGrant(grant.access_token);
   assert.equal(revoked.status,200);

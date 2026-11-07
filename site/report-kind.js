@@ -1,4 +1,4 @@
-// Report-family verifier, per 06 Task 4A's interface (06 reuses this file, not a copy).
+// Shared report-family verifier for comparison reports and design snapshots.
 // Comparison names are accepted exactly as before; design names must bind their
 // 7-hex suffix to the full 40-character head SHA from data.report.head.
 export const reviewName = /^kicad-review-([0-9a-f]{7}|none)-([0-9a-f]{7})-(pass|fail)\.html$/;

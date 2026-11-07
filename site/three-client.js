@@ -1,4 +1,4 @@
-// parked for Task 9A: wrapper installs the broker; route serves stored .gz with Content-Encoding: gzip.
+// The wrapper installs the broker; the route serves stored .gz data with Content-Encoding: gzip.
 // Model requests cross the sandbox only through the authenticated report wrapper.
 export function threeClient({ endpoint }) {
   if (typeof endpoint !== 'string' || !/^\/r\/[^/]+\/[^/]+\/a\/\d+\/3d\/$/.test(endpoint)) throw Error('invalid model endpoint');

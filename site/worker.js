@@ -539,7 +539,7 @@ export async function readExactly(response, size, maxBytes = ASSET_3D_LIMITS['bo
   const declared = response.headers.get('Content-Length');
   if (!response.body || !Number.isSafeInteger(size) || size <= 0 || size > maxBytes) return null;
   // A real Content-Encoding (not identity) reply's length counts encoded bytes; the read bound below still caps it.
-  // ponytail: Task 12's deployed gate decides whether Workers decoding of such a reply needs handling; until then it fails closed on the gzip check.
+  // ponytail: encoded replies fail closed on the gzip check until deployed Workers decoding is explicitly supported.
   if (declared != null && (response.headers.get('Content-Encoding') || 'identity').trim().toLowerCase() === 'identity' && Number(declared) !== size) { await response.body.cancel(); return null; }
   // Chunks, not a size-length buffer: the descriptor's claimed size is never allocated up front.
   const chunks = [], reader = response.body.getReader();

@@ -142,7 +142,7 @@ export function projectsPage({ user, owner, repo, projects }) {
     body: `<main class="page design-site"><div class="page-head"><div><h1>Projects</h1><p class="lead">The KiCad project folders on the default branch. Each has its own design page.</p></div></div>${projects.length ? siteTable(['Folder', 'Open'], rows, 'Projects') : '<section class="card empty"><h2>No KiCad project</h2><p>This repository has no folder with a .kicad_pro file on its default branch.</p></section>'}</main>` });
 }
 
-// The KiCad-change history of one project folder. thumbs is a Map of sha to a base64 PNG (Task 8A); a missing thumbnail is a
+// The KiCad-change history of one project folder. thumbs is a Map of sha to a base64 PNG; a missing thumbnail is a
 // plain placeholder. Older resumes after the last row shown (cursor); Newest returns to the first page; a truncated scan says so.
 export function designsPage({ user, owner, repo, key, ref, rows, tip, next, truncated, thumbs, first, started }) {
   const canonical = canonicalFolder(key);

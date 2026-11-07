@@ -110,7 +110,7 @@ check_limits = true
 
 Enabled fabrication limits require ordinary DRC (`checks.drc != "off"`); the incompatible combination is rejected. The default is opt-out (`fabrication.check_limits = false`) with `checks.fab_limits = "informational"`. Setting the check to `off` also disables it. Both JLCPCB and PCBWay are checked on every enabled review; `fabrication.preset` still chooses only the fabrication downloads and BOM preset. JLCPCB uses `jlcpcb-2l` for two copper layers and `jlcpcb-multilayer` for four or six; PCBWay uses `pcbway-std` for two, four or six. Other layer counts are explicitly not checked, never a clean pass. With `github.check_runs = true`, both vendor sections aggregate into one stable `kicad-review / Fab limits` check run, with vendor-qualified project rows.
 
-Both base and head revisions are audited. Fab findings are paired as new, existing or fixed, so `fail_on = "new"` counts only fab errors absent from the base audit, rather than all newly audited errors. Without a usable base audit (for example, an added board or unsupported base layers), every head finding is newly audited and `baselineAvailable` is `false`. Other comparison-mode checks still label newly audited findings rather than claiming historical newness. In spec 06 single-mode presentation, absolute current `errors`/`warnings` are shown and comparison-only new/fixed labels are suppressed; status, `baselineAvailable: false` when supplied, and the full coverage ledger are retained. This includes zero-count unsupported failures and no-board `not_run` results: zero is not proof of a pass. A no-board `not_run` has no `baselineAvailable` or `fixed` field because no head audit exists.
+Both base and head revisions are audited. Fab findings are paired as new, existing or fixed, so `fail_on = "new"` counts only fab errors absent from the base audit, rather than all newly audited errors. Without a usable base audit (for example, an added board or unsupported base layers), every head finding is newly audited and `baselineAvailable` is `false`. Other comparison-mode checks still label newly audited findings rather than claiming historical newness. In single-revision reports, absolute current `errors`/`warnings` are shown and comparison-only new/fixed labels are suppressed; status, `baselineAvailable: false` when supplied, and the full coverage ledger are retained. This includes zero-count unsupported failures and no-board `not_run` results: zero is not proof of a pass. A no-board `not_run` has no `baselineAvailable` or `fixed` field because no head audit exists.
 
 The ordinary board DRC remains authoritative and unchanged. Each disposable vendor pass neutralizes house bounds, then enforces the vendor profile constraints; exclusions are cleared only in that temporary copy. Only ordinary-visible findings are subtracted from the vendor pass. An excluded house finding is not itself a vendor failure, while genuine vendor geometry remains checked despite authored Ignore severities or exclusions. Keeping the ordinary results and vendor-only additions preserves stricter house checks without rewriting the original board or rules. Temporary rules own only the section between `# kicad-review fab limits - start` and `# kicad-review fab limits - end`; authored rules outside it stay intact.
 
@@ -455,9 +455,9 @@ WebGL board. Old reports, invalid scenes, unavailable WebGL2 and context loss al
 stacked SVG images with a diagnostic and reduced Appearance controls. Each layer
 receives opacity once, preserving overlap, all four copper layers and physical
 order (reversed when flipped). Existing SVG Side, Overlay,
-Wipe, Blend and Semantic comparisons remain available. Stage 4 supplies geometry and
-Appearance; Stage 5 enables the new WebGL diff compositor (already integrated in this
-branch). This does not claim the later change-mark styling is complete.
+Wipe, Blend and Semantic comparisons remain available. The WebGL renderer supplies
+geometry and Appearance controls, and its diff compositor combines both revisions.
+Change-mark styling is not yet complete.
 
 ### Local board proof
 

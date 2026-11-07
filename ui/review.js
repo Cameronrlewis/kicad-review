@@ -128,8 +128,8 @@ function designBar(link) {   // commit, ref, date and subject of the design on s
 }
 const designLabel = () => `Design · ${String(D.head || "").slice(0, 7)}`;
 
-// The board still is 02's head poster (`board.poster3d.head`, 1600 x 1000, CSS-scaled to the 8:5 card).
-// designCard is only a placeholder; the image comes from 02's gunzip and poster3d helpers.
+// The board still is the head poster (`board.poster3d.head`, 1600 x 1000, CSS-scaled to the 8:5 card).
+// designCard is only a placeholder; the image comes from the shared gunzip and poster3d helpers.
 function designCard(p) {
   const id = p.board?.poster3d?.head;
   return id ? `<figure class="design-card" data-design-poster="${esc(id)}"><figcaption class="muted">${designLabel()}</figcaption></figure>` : "";
@@ -138,7 +138,7 @@ async function fillDesignCard(p) {   // called by renderNav once the card is in 
   const id = p.board?.poster3d?.head, card = $("#nav [data-design-poster]");
   if (!id || !card) return;
   try {
-    const image = await designPoster(id);   // 02's poster3d("head", id) with no session: HTMLImageElement | null from the page-lifetime cache
+    const image = await designPoster(id);   // poster3d("head", id) with no session: HTMLImageElement | null from the page-lifetime cache
     if (image && card.isConnected && !card.contains(image)) {
       image.className = "design-poster";
       image.alt = `${p.name} board, rendered`;
@@ -153,7 +153,7 @@ async function fillDesignCard(p) {   // called by renderNav once the card is in 
 }
 // The still is a page-lifetime image from Review3D.poster3d with no session, so it works in sheet view and survives a viewer closing.
 const designPoster = id => window.Review3D?.poster3d ? window.Review3D.poster3d("head", id) : Promise.resolve(null);
-const pcbDrawBlobUrl = async id => (await window.Review3D?.blobUrl(id, "image/svg+xml")) ?? null;   // 02's shared gunzip + blob-URL cache
+const pcbDrawBlobUrl = async id => (await window.Review3D?.blobUrl(id, "image/svg+xml")) ?? null;   // shared gunzip and blob-URL cache
 function designPcbDrawCard(p) {
   const head = p.board?.pcbdraw?.head;
   if (!head) return "";
@@ -831,7 +831,7 @@ function currentView(v = S.v) {   // Availability is independent of change statu
 }
 const cssAppearance = rgba => `rgba(${rgba.slice(0,3).map(v=>Math.round(v*255)).join(',')},${rgba[3]})`;
 // Exported paths sharing a source RGB cannot be distinguished semantically.
-// Deterministic Stage 6 mapping: outline includes pins/worksheet; bus includes no-connect;
+// Deterministic semantic mapping: outline includes pins/worksheet; bus includes no-connect;
 // pin names include references/value; junction shares wire. Never classify rendered paint.
 const SCH_THEME_KEYS = {
   '000000':'schematic.background','000084':'schematic.bus',
@@ -1189,7 +1189,7 @@ function trackAppearanceBoard(renderer, canvas, present = true) {
   };
   appearanceBoards.add(renderer);
   const project = S.p;
-  // Stage 4 disposes a lost renderer and shows SVG. Restore by mounting fresh
+  // Context loss disposes the renderer and shows SVG. Restore by mounting fresh
   // geometry through the existing path, which reads the latest store snapshot.
   canvas.addEventListener('webglcontextrestored', () => {
     if (S.p === project && S.v === 'board' && boardView.failed === project) {
@@ -1338,7 +1338,7 @@ const clampBoardZoom = z => Math.max(.1, Math.min(50000, z));
 // common/settings/app_settings.cpp:649-671. Review adds metric 2 and .02 per the navigation spec.
 const BOARD_GRID_MM = [5,2.5,2,1,.5,.25,.2,.1,.05,.025,.02,.01];
 const BOARD_GRID_MIL = [1000,500,250,200,100,50,25,20,10,5,2,1].map(n => n*.0254);
-// Deliberately configurable for measured device calibration (Task 10), not a platform sniff.
+// Deliberately configurable for measured device calibration, not a platform sniff.
 const BOARD_WHEEL_PIXEL_RATE = .0015, BOARD_WHEEL_MAC_ROTATION_RATE = .01;
 let boardCursor = null, deltaAnchor = null, anchorKey = "", lastPosition = null, lastPositionKey = "";
 // bench-t7: pointer updates must not churn unchanged readout text.
@@ -2064,7 +2064,7 @@ function goTo(id) {
   if (view !== S.v) { const library = String(S.v).startsWith("lib:") || tabsChange(view); S.v = view; S.x = S.y = S.z = null; renderNav(); if (library) renderPanel(); }
   return draw().then(zoom);
 }
-// ---- Electrical rows: spec 01's revision-wide hotspot manifests locate anchored pins; copper rows reveal their layer.
+// ---- Electrical rows: revision-wide hotspot manifests locate anchored pins; copper rows reveal their layer.
 async function electricalManifest(sheetPath, side) {
   const id = proj().sheets.find(s => s.path === sheetPath)?.hotspots?.[side];
   if (!id) return null;
@@ -2664,7 +2664,7 @@ async function askGo(kind, name, preferredSide = "head") {
     ASK.status = "Board geometry unavailable for " + name + " (" + side + "); showing a connected part instead, not a net highlight.";
     const ref = p.ask.nets[side][name].fallback_ref;
     const i = objects.findIndex(o => (o.ref === ref || o.ref.startsWith(ref + " unit ")) && (!o.side || o.side === side));
-    // ponytail: desktop goToObject does not write S.revision; spec and plan-context.md:59 mandate revision-aware navigation.
+    // ponytail: desktop goToObject does not write S.revision, so Ask navigation must set the revision explicitly.
     S.revision = side;
     if (i >= 0) await goToObject(i); else { await draw(); saveHash(); }
     askRefresh(); return;
@@ -2674,7 +2674,7 @@ async function askGo(kind, name, preferredSide = "head") {
   const i = symbol >= 0 ? symbol : objects.findIndex(match);
   if (i >= 0) await goToObject(i); // Desktop object navigation preserves the object's revision before drawing.
 }
-// Shared focus: askGo keeps its own entry point for Ask links, and 10's focusIdentity (spec 10, Task 13) implements the same whole-net highlight from project.identity. Whichever of 09 or 10 merges second consumes the other's function; the symbol fallback above is never presented as a whole-net highlight.
+// Shared focus: askGo keeps its own entry point for Ask links, while focusIdentity applies the same whole-net highlight from project.identity. The symbol fallback above is never presented as a whole-net highlight.
 
 function askReset() { if (ASK.project !== proj().dir) Object.assign(ASK, { project: proj().dir, insight: null, insightId: null, asked: false, insightError: "", log: [], busy: false, current: null, status: "", draft: "", remaining: null }); }
 function renderAsk() {
