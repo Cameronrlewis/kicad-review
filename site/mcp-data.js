@@ -67,6 +67,8 @@ export function bounded(value) {
 }
 
 const SHA40 = /^[0-9a-f]{40}$/;
+const snapshotName = /^kicad-design-([0-9a-f]{7})\.html$/;
+const artifactHead = (name) => reviewName.exec(name)?.[2] ?? snapshotName.exec(name)?.[1];
 
 // A git ref, full SHA, or pr:<n> (the PR source head, never its synthetic merge commit) resolved to one full commit.
 // The whole ref is one encoded path segment, slashes included.
@@ -93,8 +95,8 @@ export async function selectContext(access, sha, deps, accept = async () => true
     const response = await gh(`${access.root}/actions/artifacts?per_page=100&page=${number}`, access.token);
     if (!response.ok) throw new McpError('ARTIFACTS_UNAVAILABLE', 'Review artifacts unavailable');
     const body = await json(response), rows = Array.isArray(body?.artifacts) ? body.artifacts : [];
-    const candidates = rows.filter((a) => !a.expired && reviewName.test(a.name || '') && /^\d{1,20}$/.test(String(a.id)))
-      .filter((a) => !sha || a.name.split('-').at(-2) === sha.slice(0, 7))
+    const candidates = rows.filter((a) => !a.expired && artifactHead(a.name || '') && /^\d{1,20}$/.test(String(a.id)))
+      .filter((a) => !sha || artifactHead(a.name) === sha.slice(0, 7))
       .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)) || Number(b.id) - Number(a.id));
     for (const artifact of candidates) {
       if (++examined > 30) throw new McpError('HISTORY_LIMIT', 'Search exceeded 30 matching contexts; narrow the requested ref or request a new review');

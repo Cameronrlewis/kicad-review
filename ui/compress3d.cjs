@@ -136,7 +136,7 @@ function budgetWarnings(counts,metadata) {
   const warnings=[...(metadata.warnings || [])];
   if(counts.triangles>600000)warnings.push('triangle budget exceeded after one body-only pass');
   const changed=new Set(metadata.footprints.filter(f=>metadata.keep?.includes(f.ref)).map(f=>f.uuid)).size;
-  if(counts.primitives>=100+changed)warnings.push('hard draw-call budget exceeded: owner decision required');
+  if(counts.primitives>=100+changed)warnings.push('hard draw-call budget exceeded: needs review');
   return warnings;
 }
 

@@ -1625,7 +1625,7 @@ return true;
     if (!ledger || !ledger.textContent.includes('Current-design audit: no base fab comparison was run.') ||
         ledger.textContent.includes('newly audited') || !ledger.textContent.includes('holeToHoleMixedMm') ||
         !ledger.textContent.includes('copper thickness unknown')) return 'single-mode fab coverage/provenance lost';
-    // 06 owns the surrounding single-mode presentation; run its integration assertions only when merged.
+    // When the shared single-mode helper is present, verify the surrounding presentation too.
     if (typeof single === 'function') {
       p.checks = [c];
       for (const [status, unsupported] of [['fail', null], ['fail', 'not checked: unsupported layers'], ['not_run', 'no head board']]) {
@@ -2249,7 +2249,7 @@ return true;
   ...['worker-start','context-loss'].map(fault=>[
     'BR02 processed fallback whole screen '+fault,'v=3d&m=side', `
     if(!proj().board.parts3d)return 'skip';
-    // The shared shell is owned by 05; require the whole viewport to fit.
+    // Require the shared fallback shell to fit within the whole viewport.
     const Worker=window.Worker;
     try {
       if('${fault}'==='worker-start')window.Worker=class {constructor(){throw Error('3D worker unavailable. Retry.')}};

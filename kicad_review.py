@@ -3614,7 +3614,7 @@ def export_downloads(p, src, out, settings, head, *, policy=None, purpose="compa
         except (OSError, UnicodeError):
             revision = None
         if revision != head:
-            raise ValueError("snapshot GLB revision must match the requested full SHA (Task 9A gate)")
+            raise ValueError("snapshot GLB revision must match the requested full SHA before downloads are exported")
     shutil.rmtree(dl, ignore_errors=True)
     os.makedirs(dl, exist_ok=True)
     stem = f"{safe_name(name)}-{head[:7]}"
@@ -4137,7 +4137,7 @@ def bom_identity(obj):
     return {"included": reason is None, "excludedReason": reason, "ref": ref, "value": value, "footprint": footprint,
             "lcsc": lcsc, "mpn": mpn, "manufacturer": manufacturer,
             "datasheet": datasheet, "category": category,
-            # ensure_ascii=False, compact separators. 10 uses this key as received from 09 and never recomputes it.
+            # This canonical compact key is shared unchanged by context and BOM consumers.
             "key": json.dumps([value, footprint, lcsc or "", mpn or "", category, manufacturer, datasheet], ensure_ascii=False, separators=(",", ":"))}
 
 
@@ -6981,10 +6981,11 @@ def cmd_snapshot(args):
         emit(built="false")
         return
     blobs = {}
+    ask_on = bool(settings.get("ask", {}).get("enabled"))
+    builders = {} if ask_on else None
     waivers = load_waivers(env.get("WAIVERS_REF")) if settings["waivers"]["enabled"] else None
     selected = [p for p in det["projects"] if p["status"] != "removed"]  # every index (downloads, context links) follows this order
-    # 06 is Ask-independent: context remains None until 09 fills the optional hook.
-    projects = [build_project(p, blobs, settings, waivers, change_offset=0, single=True) for p in selected]
+    projects = [build_project(p, blobs, settings, waivers, change_offset=0, single=True, context=builders) for p in selected]
     shutil.rmtree("review/design-downloads", ignore_errors=True)  # never review/downloads: that is the comparison's bundle
     for i, (p, project) in enumerate(zip(selected, projects)):
         if settings.get("downloads", {}).get("enabled") or settings["checks"].get("release", "off") != "off":
@@ -6995,7 +6996,6 @@ def cmd_snapshot(args):
     assign_ids(projects)
     snapshot = det.get("snapshot") or {"ref": "", "sha": det["head"], "committedAt": "", "message": ""}
     report_settings = filtered_settings(settings)
-    report_settings.pop("ask", None)  # design-page report settings omit the optional Ask hook
     data = {"version": 1, "repo": env.get("GITHUB_REPOSITORY", ""), "links": review_links(env, {**det, "base": None}),
             "base": None, "head": det["head"], "reason": "design snapshot", "mode": "single",
             "snapshot": snapshot,
@@ -7006,6 +7006,13 @@ def cmd_snapshot(args):
     html = finalize_report(data, f"{DESIGN_DIR}/assets")  # shared finalizer: asset map, sidecars, offline HTML; no local JSON or inline_page here
     name = f"kicad-design-{det['head'][:7]}.html"
     os.makedirs(DESIGN_DIR, exist_ok=True)
+    if ask_on:
+        doc = fit_context(lambda net_cap, pin_cap: {"version": 1, "kind": "kicad-review-design-context",
+                                                      "repo": env.get("GITHUB_REPOSITORY", ""), "base": None,
+                                                      "head": det["head"], "reason": "design snapshot", "mode": "single",
+                                                      "projects": [b(net_cap, pin_cap) for b in builders.values()]})
+        with open(f"{DESIGN_DIR}/{name[:-5]}.context.json", "w", encoding="utf-8") as fh:
+            json.dump(doc, fh, separators=(",", ":"), ensure_ascii=False)
     for file in (name, "design-snapshot.html"):  # the second is the stable name a release carries
         with open(f"{DESIGN_DIR}/{file}", "w", encoding="utf-8") as fh:
             fh.write(html)
@@ -7028,10 +7035,13 @@ def cmd_snapshot(args):
         with open(f"{DESIGN_DIR}/thumbnail-plan.json", "w", encoding="utf-8") as fh:
             json.dump({"sha": snapshot["sha"], "committedAt": snapshot["committedAt"], "projects": thumb_projects}, fh)
     print(f"{DESIGN_DIR}/{name}: {len(html) / 1e6:.2f} MB, {len(blobs)} embedded drawings")
-    # ask stays false and context_name is never emitted: 09 owns producing kicad-design-<sha7>.context.json and switching it on.
-    emit(built="true", name=name, thumbnails="true" if thumb_projects else "false", ask="false",
-         downloads="true" if any(project.get("downloads") for project in projects) else "false",
-         downloads_name=f"kicad-design-downloads-{det['head'][:7]}")  # the bundle the review site's download route looks up
+    outputs = {"built": "true", "name": name, "thumbnails": "true" if thumb_projects else "false",
+               "ask": "true" if ask_on else "false",
+               "downloads": "true" if any(project.get("downloads") for project in projects) else "false",
+               "downloads_name": f"kicad-design-downloads-{det['head'][:7]}"}
+    if ask_on:
+        outputs["context_name"] = f"{name[:-5]}.context.json"
+    emit(**outputs)  # the downloads bundle and context artifact use the snapshot report's name family
 
 
 DOWNLOADS_NOT_STORED = "not stored: this run could not upload its download files"

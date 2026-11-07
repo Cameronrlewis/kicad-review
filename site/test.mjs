@@ -7411,6 +7411,32 @@ test('MCP shared loader keeps metadata status and refuses ZIP bodies',async()=>{
     }
   } finally {globalThis.fetch=old;}
 });
+test('snapshot context with a null base loads for Ask and MCP selection',async()=>{
+  const report={...artifactsFixture().artifacts[0],name:'kicad-design-aaaaaaa.html'};
+  const contextArtifact={id:91,name:'kicad-design-aaaaaaa.context.json',expired:false,digest:'snapshot-digest',workflow_run:{id:77}};
+  const doc=mcpDoc();
+  doc.base=null;doc.reason='design snapshot';doc.mode='single';doc.projects[0].revisions.base=null;
+  const gh=async path=>{
+    if(path.endsWith('/artifacts/90'))return new Response(JSON.stringify(report));
+    if(path.endsWith('/actions/runs/77'))return mcpRun();
+    if(path.includes('/runs/77/artifacts?'))return new Response(JSON.stringify({artifacts:[contextArtifact]}));
+    if(path.endsWith('/artifacts/91/zip'))return new Response(null,{status:302,headers:{Location:'https://ctx.blob.core.windows.net/snapshot-context'}});
+    assert.fail('unexpected snapshot context endpoint '+path);
+  };
+  const old=globalThis.fetch;
+  globalThis.fetch=async url=>{
+    assert.equal(String(url),'https://ctx.blob.core.windows.net/snapshot-context');
+    return new Response(JSON.stringify(doc));
+  };
+  try{
+    const loaded=await loadContext('Cameronrlewis','repo','90','secret',gh,verifyAs());
+    assert.equal(loaded.doc.mode,'single');assert.equal(loaded.doc.base,null);
+    assert.equal(loaded.doc.projects[0].revisions.base,null);
+    const listing=async()=>new Response(JSON.stringify({total_count:1,artifacts:[report]}));
+    const selected=await selectContext(mcpAccessFixture(),SHA,{gh:listing,loadContext:async()=>loaded});
+    assert.equal(selected.reportId,'90');assert.equal(selected.doc.head,SHA);
+  }finally{globalThis.fetch=old;}
+});
 import {budgeted,runTool as runMcpTool} from './mcp-data.js';
 test('MCP context search uses the report provenance check and a per-call GitHub budget',async()=>{
   const access={...mcpAccessFixture(),repository:{...mcpAccessFixture().repository,id:5}};
