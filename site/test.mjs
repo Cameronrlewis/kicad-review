@@ -5771,7 +5771,7 @@ test('the repository-wide design link goes to the folder picker when there are s
   assert.equal(projectKey(''), '%2F');
   assert.equal(dirFromKey(projectKey('')), '');
   assert.equal(new URL(`https://x/r/o/r/p/${projectKey('')}/design`).pathname, '/r/o/r/p/%2F/design');
-  assert.equal(dirFromKey(encodeURIComponent('Student Design Teams/Horizon')), 'Student Design Teams/Horizon');
+  assert.equal(dirFromKey(encodeURIComponent('Example Projects/Main Board')), 'Example Projects/Main Board');
   const one = await designGet('/r/Cameronrlewis/repo/design', [['/git/trees/', () => json({ tree: [{ type: 'blob', path: 'Only/Only.kicad_pro' }] })]]);
   assert.equal(one.headers.get('Location'), '/r/Cameronrlewis/repo/p/Only/design');
 });
@@ -5908,8 +5908,8 @@ test('designQuery and folder validation canonicalizes and re-encodes via project
   assert.equal(canonicalFolder(''), '');
   assert.equal(canonicalFolder('/'), '');
   assert.equal(canonicalFolder('%2F'), '');
-  assert.equal(canonicalFolder('Student Design Teams/Horizon'), 'Student Design Teams/Horizon');
-  assert.equal(canonicalFolder('Student%20Design%20Teams%2FHorizon'), 'Student Design Teams/Horizon');
+  assert.equal(canonicalFolder('Example Projects/Main Board'), 'Example Projects/Main Board');
+  assert.equal(canonicalFolder('Example%20Projects%2FMain%20Board'), 'Example Projects/Main Board');
   // Traversal and injection inputs are rejected or sanitized
   assert.equal(canonicalFolder('..'), null);
   assert.equal(canonicalFolder('%2e%2e'), null);
@@ -6202,9 +6202,9 @@ test('render accepts 204 dispatch response, redirects with ?started=1, and rende
 test('designsPage renders thumbnail image when thumbs has a hit, placeholder otherwise, and displays decoded canonical dir in lead', () => {
   const hitMap = new Map([[tipSha, 'iVBORw0KGgo=']]);
   const row = { sha: tipSha, message: 'msg', author: 'auth', date: '2026-10-24T10:00:00Z' };
-  const htmlHit = designsPage({ user: 'u', owner: 'o', repo: 'r', key: 'Student%20Design%20Teams%2FHorizon', ref: 'main', rows: [row], tip: tipSha, next: null, truncated: false, thumbs: hitMap, started: false, first: true });
+  const htmlHit = designsPage({ user: 'u', owner: 'o', repo: 'r', key: 'Example%20Projects%2FMain%20Board', ref: 'main', rows: [row], tip: tipSha, next: null, truncated: false, thumbs: hitMap, started: false, first: true });
   assert.match(htmlHit, /<img alt="" width="200" height="125" src="data:image\/png;base64,iVBORw0KGgo=">/);
-  assert.match(htmlHit, /<code>Student Design Teams\/Horizon<\/code>/, 'lead line shows decoded canonical dir rather than URL-encoded key');
+  assert.match(htmlHit, /<code>Example Projects\/Main Board<\/code>/, 'lead line shows decoded canonical dir rather than URL-encoded key');
 
   const emptyMap = new Map();
   const htmlMiss = designsPage({ user: 'u', owner: 'o', repo: 'r', key: 'A', ref: 'main', rows: [row], tip: tipSha, next: null, truncated: false, thumbs: emptyMap, started: false, first: true });

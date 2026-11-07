@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
-import {mkdir,writeFile} from 'node:fs/promises';
+import {mkdtemp,writeFile} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
 import {spawn} from 'node:child_process';
 import {createServer} from 'node:net';
 import {dirname,join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 const site=dirname(fileURLToPath(import.meta.url));
-const scratch='/Users/cameron/Code/kicad-review-study/tmp/10-mcp-server/workerd-smoke';
-await mkdir(scratch,{recursive:true});
+const scratch=await mkdtemp(join(tmpdir(),'mcp-smoke-'));
 const entry=join(scratch,'entry.js'),config=join(scratch,'wrangler.json');
 await writeFile(entry,`
 import {mcpResponse,TOOLS} from ${JSON.stringify(join(site,'mcp.js'))};
