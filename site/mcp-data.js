@@ -1,3 +1,4 @@
+import { reviewName } from './report-kind.js';
 import { parseThreads, ghPages, loadReviewThreads, validComments } from './threads.js';
 import { latestDecisions } from './readiness.js';
 
@@ -66,7 +67,6 @@ export function bounded(value) {
 }
 
 const SHA40 = /^[0-9a-f]{40}$/;
-const REPORT = /^kicad-review-(?:[0-9a-f]{7}|none)-[0-9a-f]{7}-(?:pass|fail)\.html$/;
 
 // A git ref, full SHA, or pr:<n> (the PR source head, never its synthetic merge commit) resolved to one full commit.
 // The whole ref is one encoded path segment, slashes included.
@@ -93,7 +93,7 @@ export async function selectContext(access, sha, deps, accept = async () => true
     const response = await gh(`${access.root}/actions/artifacts?per_page=100&page=${number}`, access.token);
     if (!response.ok) throw new McpError('ARTIFACTS_UNAVAILABLE', 'Review artifacts unavailable');
     const body = await json(response), rows = Array.isArray(body?.artifacts) ? body.artifacts : [];
-    const candidates = rows.filter((a) => !a.expired && REPORT.test(a.name || '') && /^\d{1,20}$/.test(String(a.id)))
+    const candidates = rows.filter((a) => !a.expired && reviewName.test(a.name || '') && /^\d{1,20}$/.test(String(a.id)))
       .filter((a) => !sha || a.name.split('-').at(-2) === sha.slice(0, 7))
       .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)) || Number(b.id) - Number(a.id));
     for (const artifact of candidates) {
@@ -359,7 +359,7 @@ export function bomLines(parts) {
   }
   return [...groups.values()].map(g => ({ ...g, quantity: g.refs.length, refs: g.refs.sort((a, b) => a.localeCompare(b, 'en', { numeric: true })) }));
 }
-// Verbatim quoting per Task 7 plan; spreadsheet formula prefix neutralization is intentionally omitted for vendor compatibility.
+// Quote every cell verbatim; spreadsheet formula prefix neutralization is intentionally omitted for vendor compatibility.
 const csvCell = value => '"' + String(value ?? '').replaceAll('"', '""') + '"';
 export function bomProjection(name, args, loaded, origin) {
   const { revision: r, doc } = loaded, limit = args.limit ?? 15;

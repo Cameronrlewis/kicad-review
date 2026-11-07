@@ -1,4 +1,4 @@
-// Single public store facade; project stores share the validated Stage 7 model.
+// Single public store facade; project stores share one validated model.
 (() => {
   "use strict";
   const stores = new Map(), listeners = new Set();

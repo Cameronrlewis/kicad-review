@@ -59,7 +59,7 @@ def fab_produced_checks():
         p = {"name": "Four", "dir": "", "status": "modified"}
         output = root / "report" / "head"
         with patch.object(k, "board_path", return_value=str(source)), patch.object(k, "fab_drc", side_effect=fake_drc):
-            k.render_fab(p, "head", str(output), settings)
+            k.render_fab(p, "head", str(output))
         with patch.object(
             k, "board_path", side_effect=lambda p, side: str(source) if side == "head" else str(source.with_name("no-base.kicad_pcb"))
         ):

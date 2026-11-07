@@ -482,7 +482,7 @@ window.Review3D = (() => {
     }
   }
 
-  // Task 8A retains this desktop state integration API, independent of phone routing.
+  // Keep this desktop state integration API independent of phone routing.
   function setRevision(side) {
     const s = active; if (!s || !s.allowedSides.includes(side)) return;
     const changed = s.revision !== side; s.revision = side; s.state.revision = side;

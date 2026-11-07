@@ -2,7 +2,8 @@ import { createShare, serveShare, revokeShares, shareEnabled, downloadUrl } from
 import { reportCsp, frameCsp } from './csp.js';
 import { currentReport, readStoredData, readReportText, MAX_REPORT_BYTES, IMAGE_ASSET_LIMITS, ASSET_3D_LIMITS } from './report-shell.js';
 import { reportCache } from './report-cache.js';
-import { verifyReportFamily } from './report-kind.js';
+import { encode, decode } from './b64.js';
+import { verifyReportFamily, reviewListName, reviewName } from './report-kind.js';
 export { readStoredData } from './report-shell.js';
 import { deploymentPage, escapeHtml, sharedPage, sharedNotFoundPage, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, historyPage, stages, stageForStep, designMissingPage, projectsPage, designsPage } from './pages.js';
 
@@ -24,25 +25,14 @@ const securityHeaders = {
 };
 const workflowFile = 'kicad-review.yml';
 
-function base64url(bytes) {
-  let binary = '';
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
-}
-
 function unbase64(value) {
   const binary = atob(value), bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return bytes;
 }
 
-function unbase64url(value) {
-  const base64 = value.replaceAll('-', '+').replaceAll('_', '/') + '='.repeat((4 - value.length % 4) % 4);
-  return unbase64(base64);
-}
-
 async function key(env) {
-  const raw = unbase64url(env.SESSION_KEY);
+  const raw = decode(env.SESSION_KEY);
   if (raw.length !== 32) throw new Error('SESSION_KEY must be 32 bytes');
   return crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']);
 }
@@ -54,7 +44,7 @@ export async function seal(value, env) {
     await key(env),
     text.encode(JSON.stringify(value)),
   );
-  return `${base64url(iv)}.${base64url(new Uint8Array(ciphertext))}`;
+  return `${encode(iv)}.${encode(new Uint8Array(ciphertext))}`;
 }
 
 export async function open(value, env) {
@@ -62,9 +52,9 @@ export async function open(value, env) {
     const [ivText, ciphertextText, extra] = value.split('.');
     if (!ivText || !ciphertextText || extra) return null;
     const plaintext = await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv: unbase64url(ivText) },
+      { name: 'AES-GCM', iv: decode(ivText) },
       await key(env),
-      unbase64url(ciphertextText),
+      decode(ciphertextText),
     );
     return JSON.parse(untext.decode(plaintext));
   } catch {
@@ -136,7 +126,7 @@ async function coordinatedRefresh(env, r) {
   if (!env.REFRESH) return tokenRequest(env, { grant_type: 'refresh_token', refresh_token: r });
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const name = base64url(new Uint8Array(await crypto.subtle.digest('SHA-256', text.encode(r))));
+      const name = encode(new Uint8Array(await crypto.subtle.digest('SHA-256', text.encode(r))));
       const result = await env.REFRESH.get(env.REFRESH.idFromName(name)).fetch('https://refresh/', { method: 'POST', body: JSON.stringify({ r }) });
       if (result.ok) return await result.json();
     } catch {}
@@ -233,6 +223,10 @@ function errorPage(status, title, message, links = [], active, init = {}, detail
   return sessionResponse(messagePage({ title, message, code: status, details: pageDetails, links: allLinks, user: active?.login }), { ...init, status, headers }, active);
 }
 
+function notFound(active) {
+  return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
+}
+
 export function gh(path, token, init = {}) {
   return fetch(`https://api.github.com${path}`, {
     ...init,
@@ -258,20 +252,20 @@ export async function access(request, env, owner, repo) {
   }
   if (!repositoryName.test(owner) || !repositoryName.test(repo)
     || !allowedOwners(env).includes(owner.toLowerCase())) {
-    return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
+    return notFound(active);
   }
   try {
     const repoResponse = await gh(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, active.token);
     const data = repoResponse.status === 200 ? await repoResponse.json() : null;
-    if (!data?.permissions?.pull || !allowedOwners(env).includes(data.owner.login.toLowerCase())) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
+    if (!data?.permissions?.pull || !allowedOwners(env).includes(data.owner.login.toLowerCase())) return notFound(active);
     return { s: active, repo: data };
   } catch {
-    return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
+    return notFound(active);
   }
 }
 
-function pdfError(active, status = 404) {
-  return sessionResponse(JSON.stringify({ error: 'PDF unavailable' }), { status, headers: { 'Content-Type': 'application/json; charset=utf-8' } }, active);
+function jsonError(active, message) {
+  return sessionResponse(JSON.stringify({ error: message }), { status: 404, headers: { 'Content-Type': 'application/json; charset=utf-8' } }, active);
 }
 
 function matchingPdf(artifacts, metadata) {
@@ -286,7 +280,7 @@ async function pdfArtifact(owner, repo, id, token) {
     const result = await gh(`${root}/artifacts/${id}`, token);
     if (!result.ok) return null;
     const metadata = await result.json();
-    if (metadata.expired || !/^kicad-review-(?:[0-9a-f]{7}|none)-[0-9a-f]{7}-(?:pass|fail)\.html$/.test(metadata.name)) return null;
+    if (metadata.expired || !verifyReportFamily('comparison', metadata.name)) return null;
     const runId = metadata.workflow_run?.id;
     if (!/^\d{1,20}$/.test(String(runId))) return null;
     const paged = await ghPages(gh, `${root}/runs/${runId}/artifacts`, token, d => d?.artifacts);
@@ -299,82 +293,78 @@ async function pdfArtifact(owner, repo, id, token) {
 async function pdfDownload(owner, repo, id, active) {
   try {
     const artifact = await pdfArtifact(owner, repo, id, active.token);
-    if (!artifact) return pdfError(active);
+    if (!artifact) return jsonError(active, 'PDF unavailable');
     const download = await gh(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/artifacts/${artifact.id}/zip`, active.token, { redirect: 'manual' });
-    if (download.status !== 302) return pdfError(active);
+    if (download.status !== 302) return jsonError(active, 'PDF unavailable');
     const location = new URL(download.headers.get('Location'));
-    if (location.protocol !== 'https:' || location.username || location.password) return pdfError(active);
+    if (location.protocol !== 'https:' || location.username || location.password) return jsonError(active, 'PDF unavailable');
     const blob = await fetch(location.href, { redirect: 'manual' });
-    if (!blob.ok || !blob.body) return pdfError(active);
+    if (!blob.ok || !blob.body) return jsonError(active, 'PDF unavailable');
     return sessionResponse(blob.body, { headers: { 'Content-Type': 'application/pdf', 'Content-Disposition': `attachment; filename="${artifact.name}"` } }, active);
-  } catch { return pdfError(active); }
+  } catch { return jsonError(active, 'PDF unavailable'); }
 }
 
 const downloadKinds = { fab: ['application/zip', /\.zip$/], pdf: ['application/pdf', /\.pdf$/], step: ['model/step', /\.step$/], glb: ['model/gltf-binary', /\.glb$/] };
 const MAX_ENVELOPE_BYTES = 64 * 1024;
-
-function downloadError(active) {
-  return sessionResponse(JSON.stringify({ error: 'Download unavailable' }), { status: 404, headers: { 'Content-Type': 'application/json; charset=utf-8' } }, active);
-}
 
 // The run's downloads artifact is one archived zip; read the one entry asked for by byte range, never the whole file.
 async function downloadFile(owner, repo, id, index, kind, active) {
   try {
     const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions`;
     const meta = await gh(`${root}/artifacts/${id}`, active.token);
-    if (!meta.ok) return downloadError(active);
+    if (!meta.ok) return jsonError(active, 'Download unavailable');
     const report = await meta.json(), runId = report.workflow_run?.id, name = String(report.name || '');
     // The report name carries the reviewed head's first 7 characters. The run's head_sha is the reviewed head except
     // for a manual (workflow_dispatch) run, which reviews the head given by hand, not its dispatch ref's tip.
     const runHead = String(report.workflow_run?.head_sha || '');
     const head7 = verifyReportFamily('comparison', name) ? /-([0-9a-f]{7})-(?:pass|fail)\.html$/.exec(name)[1] : /^kicad-design-([0-9a-f]{7})\.html$/.exec(name)?.[1];
     const family = !head7 || !/^[0-9a-f]{40}$/.test(runHead) ? null : verifyReportFamily('comparison', name) ? 'review' : 'design';
-    if (report.expired || !family || !/^\d{1,20}$/.test(String(runId))) return downloadError(active);
+    if (report.expired || !family || !/^\d{1,20}$/.test(String(runId))) return jsonError(active, 'Download unavailable');
     const bundleName = `kicad-${family}-downloads-${head7}`;
     // Every page of the run's artifacts is read: 02 adds digest assets, so the bundle can sit past the first 100.
     const paged = await ghPages(gh, `${root}/runs/${runId}/artifacts`, active.token, d => d?.artifacts);
-    if (!paged.ok) return downloadError(active);
+    if (!paged.ok) return jsonError(active, 'Download unavailable');
     const found = paged.items.filter((a) => !a?.expired && a?.name === bundleName && a.workflow_run?.id === runId && /^\d{1,20}$/.test(String(a.id)));
-    if (found.length !== 1) return downloadError(active);  // zero, several or unpaged matches are refused
+    if (found.length !== 1) return jsonError(active, 'Download unavailable');  // zero, several or unpaged matches are refused
     const bundle = found[0];
     const zip = await gh(`${root}/artifacts/${bundle.id}/zip`, active.token, { redirect: 'manual' });
-    if (zip.status !== 302) return downloadError(active);
+    if (zip.status !== 302) return jsonError(active, 'Download unavailable');
     const location = new URL(zip.headers.get('Location'));
-    if (location.protocol !== 'https:' || location.username || location.password) return downloadError(active);
+    if (location.protocol !== 'https:' || location.username || location.password) return jsonError(active, 'Download unavailable');
     // The signed blob URL gets no GitHub token; 'manual' (workerd rejects 'error') plus the 206 checks refuse further redirects.
     const range = (start, end) => fetch(location.href, { redirect: 'manual', headers: { Range: `bytes=${start}-${end}` } });
     const probe = await range(0, 0);
     const total = Number(/^bytes 0-0\/(\d+)$/.exec(probe.headers.get('Content-Range') || '')?.[1]);
-    if (probe.status !== 206 || !Number.isSafeInteger(total) || total < 22) { await probe.body?.cancel(); return downloadError(active); }
-    if ((await probe.arrayBuffer()).byteLength !== 1) return downloadError(active);
+    if (probe.status !== 206 || !Number.isSafeInteger(total) || total < 22) { await probe.body?.cancel(); return jsonError(active, 'Download unavailable'); }
+    if ((await probe.arrayBuffer()).byteLength !== 1) return jsonError(active, 'Download unavailable');
     const [type, suffix] = downloadKinds[kind];
     const entries = await zipEntries(range, total);  // exactRange inside checks every 206 and Content-Range
     // Full-head provenance: the staged envelope carries the run's reviewed full head (collect_downloads writes it).
     const envelope = entries.find((e) => e.name === `${index}/downloads.json` && e.size <= MAX_ENVELOPE_BYTES && e.bytes <= MAX_ENVELOPE_BYTES);
-    if (!envelope) return downloadError(active);
+    if (!envelope) return jsonError(active, 'Download unavailable');
     const manifest = await new Response(await zipEntryStream(range, envelope)).json();
     const head = manifest?.head;
     if (!/^[0-9a-f]{40}$/.test(head) || !head.startsWith(head7) || bundle.workflow_run?.head_sha !== runHead
-      || (family === 'design' && !verifyReportFamily('design', name, head))) return downloadError(active);
+      || (family === 'design' && !verifyReportFamily('design', name, head))) return jsonError(active, 'Download unavailable');
     if (head !== runHead) {  // only a manual run may review a head other than its run's head_sha
       const run = await gh(`${root}/runs/${runId}`, active.token);
-      if (!run.ok || (await run.json()).event !== 'workflow_dispatch') return downloadError(active);
+      if (!run.ok || (await run.json()).event !== 'workflow_dispatch') return jsonError(active, 'Download unavailable');
     }
     const files = Array.isArray(manifest?.files) ? manifest.files : [];
     const records = files.filter((f) => f && f.kind === kind && !f.error);
-    if (records.length !== 1) return downloadError(active);
+    if (records.length !== 1) return jsonError(active, 'Download unavailable');
     const record = records[0];
     const prefix = `${index}/`;
     const recordPath = String(record.path || '');
-    if (!recordPath.startsWith(prefix)) return downloadError(active);
+    if (!recordPath.startsWith(prefix)) return jsonError(active, 'Download unavailable');
     const filename = recordPath.slice(prefix.length);
-    if (!/^[A-Za-z0-9_.-]{1,200}$/.test(filename) || !suffix.test(filename)) return downloadError(active);
-    if (!Number.isSafeInteger(record.bytes) || record.bytes <= 0) return downloadError(active);
+    if (!/^[A-Za-z0-9_.-]{1,200}$/.test(filename) || !suffix.test(filename)) return jsonError(active, 'Download unavailable');
+    if (!Number.isSafeInteger(record.bytes) || record.bytes <= 0) return jsonError(active, 'Download unavailable');
     const entry = entries.find((e) => e.name === recordPath);
-    if (!entry || entry.bytes !== record.bytes) return downloadError(active);
+    if (!entry || entry.bytes !== record.bytes) return jsonError(active, 'Download unavailable');
     // Errors after this point (truncation, CRC, length) error the stream; they cannot become a 404.
     return sessionResponse(await zipEntryStream(range, entry), { headers: { 'Content-Type': type, 'Content-Disposition': `attachment; filename="${filename}"` } }, active);
-  } catch { return downloadError(active); }
+  } catch { return jsonError(active, 'Download unavailable'); }
 }
 
 export function assetFromReport(html, id, kind) {
@@ -415,7 +405,7 @@ async function reportArtifact(owner, repo, id, active, repository, { ghFn = gh, 
   if (result.status !== 200) return onFailure(result);
   const metadata = await result.json();
   const name = String(metadata.name || '');
-  const head7 = artifactName.exec(name)?.[2] ?? /^kicad-design-([0-9a-f]{7})\.html$/.exec(name)?.[1];
+  const head7 = reviewListName.exec(name)?.[2] ?? /^kicad-design-([0-9a-f]{7})\.html$/.exec(name)?.[1];
   if (!head7 && name !== 'kicad-review.html') return null;
   if (metadata.size_in_bytes != null && (!Number.isSafeInteger(metadata.size_in_bytes) || metadata.size_in_bytes < 0 || metadata.size_in_bytes > MAX_REPORT_BYTES)) return null;
   const runId = metadata.workflow_run?.id;
@@ -549,7 +539,7 @@ export async function readExactly(response, size, maxBytes = ASSET_3D_LIMITS['bo
   const declared = response.headers.get('Content-Length');
   if (!response.body || !Number.isSafeInteger(size) || size <= 0 || size > maxBytes) return null;
   // A real Content-Encoding (not identity) reply's length counts encoded bytes; the read bound below still caps it.
-  // ponytail: Task 12's deployed gate decides whether Workers decoding of such a reply needs handling; until then it fails closed on the gzip check.
+  // ponytail: encoded replies fail closed on the gzip check until deployed Workers decoding is explicitly supported.
   if (declared != null && (response.headers.get('Content-Encoding') || 'identity').trim().toLowerCase() === 'identity' && Number(declared) !== size) { await response.body.cancel(); return null; }
   // Chunks, not a size-length buffer: the descriptor's claimed size is never allocated up front.
   const chunks = [], reader = response.body.getReader();
@@ -611,7 +601,7 @@ async function artifactReport(request, env, owner, repo, id, active, raw, canSha
     if (!artifact) return errorPage(404, "Can't open this page", "This artifact may have been replaced by a re-run. Open the review from the pull request comment, or check that your GitHub account can see it.", [], active);
     const { metadata } = artifact;
     if (artifact.expired) {
-      const match = String(metadata.name || '').match(/^kicad-review-([0-9a-f]{7})-([0-9a-f]{7})-(?:pass|fail)\.html$/);
+      const match = String(metadata.name || '').match(reviewName);
       return sessionResponse(runPage({
         user: active.login, owner, repo, state: 'expired', base: match?.[1], head: match?.[2],
       }), { status: 404, headers: { 'Content-Type': 'text/html; charset=utf-8' } }, active);
@@ -641,15 +631,14 @@ async function artifactReport(request, env, owner, repo, id, active, raw, canSha
       },
     }, active);
   } catch {
-    return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
+    return notFound(active);
   }
 }
 
-const artifactName = /^kicad-review(?:-([0-9a-f]{7}|none)-([0-9a-f]{7})-(pass|fail))?\.html$/;
 function reviews(artifacts) {
-  return (artifacts || []).filter((artifact) => !artifact.expired && artifactName.test(artifact.name || ''))
+  return (artifacts || []).filter((artifact) => !artifact.expired && reviewListName.test(artifact.name || ''))
     .map((artifact) => {
-      const match = artifact.name.match(artifactName);
+      const match = artifact.name.match(reviewListName);
       return {
         ...artifact,
         base: match[1] || '?',
@@ -808,7 +797,7 @@ async function reviewList(request, env, owner, repo, url) {
       items: filtered, counts, filter, view, groups,
     }), { headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
   } catch {
-    return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
+    return notFound(allowed.s);
   }
 }
 
@@ -868,7 +857,7 @@ async function commits(request, env, owner, repo, url) {
     if (!data) return errorPage(404, 'Not found', 'The requested branch is unavailable.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
     return sessionResponse(commitsPage({ user: allowed.s.login, owner, repo, ...data }), { headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
   } catch {
-    return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
+    return notFound(allowed.s);
   }
 }
 
@@ -940,10 +929,10 @@ async function run(request, env, owner, repo, id, url) {
   let runData;
   try {
     const runResponse = await gh(`${root}/actions/runs/${id}`, allowed.s.token);
-    if (runResponse.status !== 200) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
+    if (runResponse.status !== 200) return notFound(allowed.s);
     runData = await runResponse.json();
   } catch {
-    return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
+    return notFound(allowed.s);
   }
   const githubUrl = githubRunUrl(runData);
   if (runData.status !== 'completed') {
@@ -961,16 +950,16 @@ async function run(request, env, owner, repo, id, url) {
   }
   try {
     const paged = await ghPages(gh, `${root}/actions/runs/${id}/artifacts`, allowed.s.token, d => d?.artifacts);
-    if (!paged.ok) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
+    if (!paged.ok) return notFound(allowed.s);
     const artifacts = paged.items;
     const matched = reviews(artifacts);
-    if (new Set(matched.map(a => a.name)).size > 1) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
+    if (new Set(matched.map(a => a.name)).size > 1) return notFound(allowed.s);
     const artifact = matched[0];
     if (artifact) return sessionRedirect(`${repoPath(owner, repo)}/a/${encodeURIComponent(artifact.id)}${matchingPdf(artifacts, artifact) ? '?pdf=1' : ''}`, 302, allowed.s);
     const snapshot = artifacts.find((a) => !a.expired && designName.test(a.name || '') && /^\d{1,20}$/.test(String(a.id)));
     if (snapshot) return sessionRedirect(`${repoPath(owner, repo)}/a/${encodeURIComponent(snapshot.id)}`, 302, allowed.s);
   } catch {
-    return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
+    return notFound(allowed.s);
   }
   if (runData.conclusion === 'success') {
     return sessionResponse(runPage({ user: allowed.s.login, owner, repo, state: 'nothing', base, head }), { headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
@@ -996,7 +985,7 @@ function nextPath(value) {
 
 function stateCookie(next) {
   const random = crypto.getRandomValues(new Uint8Array(24));
-  return base64url(text.encode(JSON.stringify({ s: base64url(random), n: next })));
+  return encode(text.encode(JSON.stringify({ s: encode(random), n: next })));
 }
 
 async function callback(request, env) {
@@ -1009,7 +998,7 @@ async function callback(request, env) {
   }
   let stateData;
   try {
-    stateData = JSON.parse(untext.decode(unbase64url(savedState)));
+    stateData = JSON.parse(untext.decode(decode(savedState)));
   } catch {
     return errorPage(400, "Sign-in didn't complete", 'The sign-in link expired or was opened in a different browser.', [{ href: '/login', label: 'Try again' }, { href: '/', label: 'Back to the start' }], null, { headers: { 'Set-Cookie': clear('st', secure) } }, [], false);
   }
@@ -1083,8 +1072,8 @@ const routes = {
       if (request.method === 'GET' && artifactRoute) {
         const [, owner, repo, id, raw] = artifactRoute;
         if (!/^\d{1,20}$/.test(id)) {
-          if (raw === '/pdf') return pdfError(await session(request, env));
-          return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.");
+          if (raw === '/pdf') return jsonError(await session(request, env), 'PDF unavailable');
+          return notFound();
         }
         const allowed = await access(request, env, owner, repo);
         if (raw === '/pdf') {
@@ -1104,11 +1093,11 @@ const routes = {
       const runRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/run\/([^/]+)$/);
       if (request.method === 'GET' && runRoute) {
         const [, owner, repo, id] = runRoute;
-        if (!/^\d{1,20}$/.test(id)) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.");
+        if (!/^\d{1,20}$/.test(id)) return notFound();
         return run(request, env, owner, repo, id, url);
       }
       const historyMatch = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/pull\/(\d{1,10})\/history$/);
-      if (request.method === 'GET' && historyMatch) return await historyRoute(request, env, { owner: historyMatch[1], repo: historyMatch[2], number: Number(historyMatch[3]) }, { access, gh, historyPage, sessionResponse, errorPage, artifactName });
+      if (request.method === 'GET' && historyMatch) return await historyRoute(request, env, { owner: historyMatch[1], repo: historyMatch[2], number: Number(historyMatch[3]) }, { access, gh, historyPage, sessionResponse, errorPage, artifactName: reviewListName });
 
       const readyRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/pull\/(\d{1,10})\/readiness$/);
       if (request.method === 'GET' && readyRoute) {
@@ -1157,7 +1146,7 @@ const routes = {
       if (request.method === 'GET' && reviewRoute) {
         return reviewList(request, env, reviewRoute[1], reviewRoute[2], url);
       }
-      return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], await session(request, env));
+      return notFound(await session(request, env));
     } catch {
       return errorPage(500, 'Internal server error', 'Try again later.');
     }

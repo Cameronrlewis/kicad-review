@@ -3296,7 +3296,7 @@ return true;
     setDock('panel', true);
     document.querySelector('[data-tab=parts]').click(); document.querySelector('[data-parts-view=bom]').click();
     document.querySelector('[data-panel-table]').click();
-    // Behavior only at Task 6: Task 8 owns column visibility, widths and page containment.
+    // This check covers sorting; column visibility, widths, and page containment are checked separately.
     const seed = original[0];
     parts.lines = [
       {...seed, refs:['R10'], refsCompressed:'R10', value:'Alpha', mpn:'Z9', lcsc:'C3', datasheet:'https://z.example'},
@@ -4801,7 +4801,7 @@ return true;
     if(electricalPins(r,'base','/a/',null).length) return 'missing old manifest failed';
     const p=proj(), sheets=p.sheets, row={...r,id:'c906',detail:{kind:'members'}};
     const id='__br03_manifest';
-    // svgText's cache stores decoded-asset promises ({text}); provide the same revision-wide envelope as spec 01.
+    // svgText's cache stores decoded-asset promises ({text}); provide the same revision-wide manifest envelope.
     // A complete envelope: electricalManifest() now accepts only what validateImageManifest() accepts.
     const sheetView=sheet=>({sheet,file:'a.svg',viewBox:[0,0,297,210],labels:[],noConnects:[],wires:[],
       elements:manifest.elements.map(e=>({...e,bbox:[0,0,20,30]}))});
@@ -6575,7 +6575,7 @@ return true;
     if(JSON.stringify(actual)!==JSON.stringify(expected))throw Error('reload lost per-viewer opacity/colour'+(()=>{try{const s=localStorage.getItem('kr.appearance.v1');return ' storage '+(s?s.length:'none')+' viewers '+(s?Object.keys(JSON.parse(s).viewers||{}).join('|').slice(0,300):'')+' total '+Object.keys(localStorage).reduce((n,k)=>n+(localStorage.getItem(k)||'').length,0)+' path '+location.pathname}catch(e){return ' storage error '+e.message}})());
     console.log('BOARD_PROOF '+JSON.stringify({task:'vf-opacity',reload:true,opacity:actual.layerOpacity['In2.Cu'],color:actual.layers['In2.Cu'].color}));return true;
   `}],
-  // Ask about this design (09). Every name starts with "Ask" so the CI filter "Ask" selects them.
+  // Ask about this design. Every name starts with "Ask" so the CI filter "Ask" selects them.
   ["Ask tab is absent offline and disabled until connected", "", `
     ASK.on = true; ASK.ready = false; S.t = 'changes'; renderPanel();
     const tab = document.querySelector('#panel-tabs [data-tab="ask"]');
@@ -7266,7 +7266,7 @@ CHECKS.push(
     if(!proj().board.model3d?.head)return 'skip';
     const tools=document.querySelector('#zoombar .tools3d');
     if(!tools)return 'missing .tools3d';
-    // Page-level overflow at 412 px belongs to 05's shell (bench-menu popover); the 3D tools must be reachable by scrolling the toolbar.
+    // The shell may overflow at 412 px because of the bench-menu popover; the 3D tools must remain reachable by scrolling the toolbar.
     tools.scrollIntoView({inline:'center',block:'nearest'});
     { const r=tools.getBoundingClientRect(); if(r.left<0||r.right>innerWidth)return 'tools unreachable '+JSON.stringify(r); }
     for(const el of tools.querySelectorAll('button,summary,select,input')){
@@ -7345,6 +7345,7 @@ CHECKS.push(['BR02 processed lighting failure rolls back controls and recovers',
     return (await Review3D.testSeam.sampleFrame()).opaquePixels>0||'recovered frame empty';
   }finally{T.PMREMGenerator.prototype.fromEquirectangular=original;Review3D.onStateChange=onStateChange;}
 `]);
+
 
 CHECKS.push(
 ["BR02 processed semantic partitions", "v=3d&m=semantic", `
@@ -7830,8 +7831,8 @@ CHECKS.push(['images inspection complete-screen','',`
 `]);
 
 // Presentation and trusted-pointer regression, not hosted transport acceptance.
-// site/test.mjs exercises production lazy consumers/client/parent together; Task 11.1
-// must cover the real sandbox frame, wrapper and authenticated raw delivery in Chrome.
+// site/test.mjs exercises production lazy consumers, client, and parent together;
+// browser coverage must include the real sandbox frame, wrapper, and authenticated raw delivery.
 CHECKS.push(['images asset timeout unavailable and retry complete-screen','',`
   if(D.repo!=='fixture/images')return 'skip';
   await applyState({...S,p:0,v:'sheet:/left/',m:'side'});
@@ -8012,14 +8013,14 @@ CHECKS.push(['images asset timeout unavailable and retry complete-screen','',`
   } finally {proj().objects=saved.objects;proj().identity=saved.identity;Object.assign(S,savedState);await draw();}
 `]);
 
-// BR02 Task 9B: offline reports decode embedded models only; hosted lazy shells ask the parent broker.
+// Offline reports decode embedded models only; hosted lazy shells ask the parent broker.
 CHECKS.push(["BR02 processed offline has no model fetch", "v=3d&m=side", `
  if(!proj().board.parts3d)return 'skip';
  if(!Review3D.state.firstFrame)return 'no genuine model frame';
  const requests=performance.getEntriesByType('resource').filter(r=>/\\/3d\\//.test(r.name));
  return requests.length===0||'offline requested hosted models';
 `]);
-// Session fault matrix (Task 5A) for broker replies: the head model blob is stripped as in the
+// Session fault matrix for broker replies: the head model blob is stripped as in the
 // hosted lazy shell and a same-origin iframe stands in for the authenticated parent WindowProxy.
 CHECKS.push(...['parent-corrupt-reply','parent-delayed-reply'].map(fault=>["BR02 processed session fault "+fault,"v=3d&m=side",`
  if(!proj().board.parts3d)return 'skip';
@@ -8475,4 +8476,3 @@ CHECKS.push(['Download dialog lists GitHub zips, exported files and safe command
     document.querySelector('#downloads').close();
   }
 `]);
-

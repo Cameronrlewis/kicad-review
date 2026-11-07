@@ -6,6 +6,7 @@ import { readinessClient } from './readiness-client.js';
 import { threadsClient } from './threads-client.js';
 import { askClient } from './ask-client.js';
 import { threeClient } from './three-client.js';
+import { reviewName } from './report-kind.js';
 import { designName, projectKey, canonicalFolder, MAX_SCAN } from './design.js';
 
 export function escapeHtml(value) {
@@ -141,7 +142,7 @@ export function projectsPage({ user, owner, repo, projects }) {
     body: `<main class="page design-site"><div class="page-head"><div><h1>Projects</h1><p class="lead">The KiCad project folders on the default branch. Each has its own design page.</p></div></div>${projects.length ? siteTable(['Folder', 'Open'], rows, 'Projects') : '<section class="card empty"><h2>No KiCad project</h2><p>This repository has no folder with a .kicad_pro file on its default branch.</p></section>'}</main>` });
 }
 
-// The KiCad-change history of one project folder. thumbs is a Map of sha to a base64 PNG (Task 8A); a missing thumbnail is a
+// The KiCad-change history of one project folder. thumbs is a Map of sha to a base64 PNG; a missing thumbnail is a
 // plain placeholder. Older resumes after the last row shown (cursor); Newest returns to the first page; a truncated scan says so.
 export function designsPage({ user, owner, repo, key, ref, rows, tip, next, truncated, thumbs, first, started }) {
   const canonical = canonicalFolder(key);
@@ -218,7 +219,7 @@ export function commitsPage({ user, owner, repo, branch, branches, tag = '', tag
 
 export function reviewPage({ user, owner, repo, id, name, workflowRunId, pdf = false, pull = null, runStatus = null, runConclusion = null, share = false, ask = false, mcpOrigin = null, designRef = '', tip = '', projectIndex = '', folderKey = '', rawPath = '' }) {
   const path = repoPath(owner, repo);
-  const match = /^kicad-review-([0-9a-f]{7}|none)-([0-9a-f]{7})-(pass|fail)\.html$/.exec(name || '');
+  const match = reviewName.exec(name || '');
   const design = designName.exec(name || '');
   const canonicalFolderKey = folderKey ? canonicalFolder(folderKey) : null;
   const safeFolderKey = canonicalFolderKey === null ? '' : projectKey(canonicalFolderKey);
@@ -461,7 +462,7 @@ function reportFrameScript(raw) {
 
 export function sharedPage({ token, name }) {
   const raw = `/s/${encodeURIComponent(token)}/raw`;
-  const match = /^kicad-review-([0-9a-f]{7}|none)-([0-9a-f]{7})-(?:pass|fail)\.html$/.exec(name || '');
+  const match = reviewName.exec(name || '');
   const revision = match ? `${match[1]} → ${match[2]}` : 'Review';
   return frame({ title: 'Shared review', navigation: false, reviewStatus: 'READ ONLY', crumbs: [{ label: 'Shared review' }], body: `<main class="review-page"><nav class="review-bar shared-bar" aria-label="Shared review">${revisionChips(match)}<span>Read-only shared review</span>${mergeBadge('Unavailable', 'Live merge readiness is unavailable for shared reviews.')}${reviewOverflow('<button disabled title="Unavailable in read-only shared reviews">History</button><button disabled title="Use Copy link to share this existing link">Share…</button><button disabled title="Unavailable in read-only shared reviews">Open run</button>')}</nav><div class="review-stage"><div id="review-loading" class="review-loading"><span class="spinner" aria-hidden="true"></span><span>Loading the review…</span></div><iframe id="review-report" src="${e(raw)}" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads" allow="clipboard-write" referrerpolicy="no-referrer" title="KiCad review report"></iframe></div></main>${reportFrameScript(raw)}` });
 }

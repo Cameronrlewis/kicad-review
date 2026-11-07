@@ -296,7 +296,7 @@ export class CursorNotFoundError extends Error {
   }
 }
 
-// The KiCad-change history of one project folder (owner decision 2026-10-26, decision 4): default-branch commits whose files
+// The KiCad-change history of one project folder: default-branch commits whose files
 // include a KiCad input of the folder, renames and deletions included. 25 rows a page. A filtered page cannot be found by
 // page number, so each page resumes from the last commit examined (the cursor). At most MAX_SCAN commit-detail requests are
 // examined per view, and at most MAX_LIST_PAGES list pages are fetched.
@@ -394,7 +394,7 @@ export async function designsRoute(request, env, { owner, repo, key }, deps) {
     if (!first.ok) return errorPage(502, 'Could not load the history', 'GitHub did not answer. Try again.', back, allowed.s);
     const tip = (await first.json())[0]?.sha || '';   // every Compare button compares with this commit
     const { rows, next, truncated } = await scanHistory(gh, allowed.s.token, root, ref, dir, cursor);
-    const thumbs = await thumbnailsFor(gh, allowed.s.token, root, dir, rows.map((r) => r.sha)); // Task 8A: never fails the page
+    const thumbs = await thumbnailsFor(gh, allowed.s.token, root, dir, rows.map((r) => r.sha)); // thumbnail failures never fail the page
     return sessionResponse(designsPage({ user: allowed.s.login, owner, repo, key, ref, rows, tip, next, truncated, thumbs,
       first: !cursor, started: url.searchParams.get('started') === '1' }), { headers: html }, allowed.s);
   } catch (err) {

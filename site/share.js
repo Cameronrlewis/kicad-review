@@ -1,8 +1,8 @@
 import { currentBody, MAX_REPORT_BYTES } from './report-shell.js';
+import { reviewListName } from './report-kind.js';
+import { encode as b64url, decode as unb64url } from './b64.js';
 // Read-only, artifact-bound capabilities. No GitHub credential enters a URL or page.
 const enc = new TextEncoder();
-const b64url = bytes => btoa(String.fromCharCode(...new Uint8Array(bytes))).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
-const unb64url = s => Uint8Array.from(atob(s.replaceAll('-', '+').replaceAll('_', '/') + '='.repeat((4 - s.length % 4) % 4)), c => c.charCodeAt(0));
 const name = /^[A-Za-z0-9_.-]{1,100}$/;
 const maxLife = 30 * 86400_000;
 async function hmacKey(env) {
@@ -75,9 +75,8 @@ export async function shareGeneration(gh, token, owner, repo) {
   if (typeof value !== 'string' || !/^(0|[1-9]\d{0,15})$/.test(value) || !Number.isSafeInteger(Number(value))) throw new Error('Invalid share state');
   return Number(value);
 }
-const reportName = /^kicad-review(?:-([0-9a-f]{7}|none)-([0-9a-f]{7})-(pass|fail))?\.html$/;
 function validArtifact(artifact, now = Date.now()) {
-  return artifact && artifact.expired === false && typeof artifact.name === 'string' && reportName.test(artifact.name)
+  return artifact && artifact.expired === false && typeof artifact.name === 'string' && reviewListName.test(artifact.name)
     && (artifact.size_in_bytes == null || (Number.isSafeInteger(artifact.size_in_bytes) && artifact.size_in_bytes >= 0 && artifact.size_in_bytes <= MAX_REPORT_BYTES))
     && typeof artifact.expires_at === 'string' && Number.isFinite(Date.parse(artifact.expires_at)) && Date.parse(artifact.expires_at) > now;
 }

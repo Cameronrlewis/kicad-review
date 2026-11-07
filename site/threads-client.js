@@ -1,8 +1,4 @@
 // Live discussions run in the trusted wrapper, never in the sandboxed report.
-export function acceptFromReport(event, iframe) {
-  return event.source === iframe.contentWindow && !!event.data && typeof event.data === 'object';
-}
-
 export function threadsClient(config) {
   const iframe = document.getElementById('review-report');
   const composer = document.getElementById('thread-composer'), view = document.getElementById('thread-view');

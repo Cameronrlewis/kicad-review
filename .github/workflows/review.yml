@@ -492,7 +492,6 @@ jobs:
             printf '<!-- kicad-review -->\n### KiCad review failed — see [run](%s)\n\nNo review for `%s`. Results from earlier commits were removed so they are not mistaken for this one.\n' "$RUN_URL" "${SHA:0:7}" > review/comment.md
             if [ -f review/previous-log.md ]; then printf '\n' >> review/comment.md; cat review/previous-log.md >> review/comment.md; fi
           fi
-          [ -n "$PR" ] || exit 0
           # One comment per pull request, edited in place on every run.
           id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
             -q '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- kicad-review -->"))) | .id' | head -1)
