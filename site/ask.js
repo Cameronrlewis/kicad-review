@@ -1,4 +1,5 @@
 // Ask about this design: the Worker side. Pure helpers first, then the route.
+import { reviewName } from './report-kind.js';
 import { json, accessFailure, sessionResponse, ghPages } from './threads.js';
 import { readBounded, McpError } from './mcp-data.js';
 import { downloadUrl } from './share.js';
@@ -167,7 +168,6 @@ export async function* answerEvents(body, remaining) {
 }
 
 const MAX_CONTEXT = 400_000;   // bytes; the workflow aims for 200,000
-const reportName = /^kicad-review-(?:[0-9a-f]{7}|none)-[0-9a-f]{7}-(?:pass|fail)\.html$/;
 // 06's design snapshot artifact: its context sits beside it as kicad-design-<sha7>.context.json in the same run.
 const snapshotName = /^kicad-design-[0-9a-f]{7}\.html$/;
 const anthropicUrl = 'https://api.anthropic.com/v1/messages';
@@ -188,7 +188,7 @@ export async function loadContext(owner, repo, id, token, gh, verify) {
     if (!verified || meta) return { status: 404, error: 'Artifact unavailable' };
     const report = verified.metadata;
     const snapshot = snapshotName.test(report.name || '');
-    if (!snapshot && !reportName.test(report.name || '')) return { status: 404, error: 'This artifact is not a reviewed design.' };
+    if (!snapshot && !reviewName.test(report.name || '')) return { status: 404, error: 'This artifact is not a reviewed design.' };
     if (verified.expired || report.expired || !/^\d{1,20}$/.test(String(report.workflow_run?.id))) return { status: 404, error: 'Artifact unavailable' };
     const runId = String(report.workflow_run.id);
     const paged = await ghPages(gh, `${root}/runs/${runId}/artifacts`, token, (d) => d?.artifacts);

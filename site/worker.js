@@ -3,7 +3,7 @@ import { reportCsp, frameCsp } from './csp.js';
 import { currentReport, readStoredData, readReportText, MAX_REPORT_BYTES, IMAGE_ASSET_LIMITS, ASSET_3D_LIMITS } from './report-shell.js';
 import { reportCache } from './report-cache.js';
 import { encode, decode } from './b64.js';
-import { verifyReportFamily, reviewListName } from './report-kind.js';
+import { verifyReportFamily, reviewListName, reviewName } from './report-kind.js';
 export { readStoredData } from './report-shell.js';
 import { deploymentPage, escapeHtml, sharedPage, sharedNotFoundPage, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, historyPage, stages, stageForStep, designMissingPage, projectsPage, designsPage } from './pages.js';
 
@@ -601,7 +601,7 @@ async function artifactReport(request, env, owner, repo, id, active, raw, canSha
     if (!artifact) return errorPage(404, "Can't open this page", "This artifact may have been replaced by a re-run. Open the review from the pull request comment, or check that your GitHub account can see it.", [], active);
     const { metadata } = artifact;
     if (artifact.expired) {
-      const match = String(metadata.name || '').match(/^kicad-review-([0-9a-f]{7})-([0-9a-f]{7})-(?:pass|fail)\.html$/);
+      const match = String(metadata.name || '').match(reviewName);
       return sessionResponse(runPage({
         user: active.login, owner, repo, state: 'expired', base: match?.[1], head: match?.[2],
       }), { status: 404, headers: { 'Content-Type': 'text/html; charset=utf-8' } }, active);
