@@ -698,6 +698,14 @@ for asset in ('board-gl.js', 'appearance-state.js', 'appearance.js', 'board-mark
 assert 'globalThis.ImageView' in inline_page('window.REVIEW_DATA={};')
 assert 'window.BoardMarks' in html and 'window.BoardDiff' in html
 assert html.index('window.BoardMarks') < html.index('window.BoardDiff') < html.index('const D = window.REVIEW_DATA')
+# A report with a board still but no 3D model inlines the poster code only, and loads no script at run time.
+poster_page = inline_page('window.REVIEW_DATA = {"projects":[{"board":{"poster3d":{"head":"poster"}}}],"blobs":{"poster":"x"}};')
+assert poster_page.count('window.Review3D = (() =>') == 1, 'poster-only report inlines review3d.js once'
+assert 'id="three-bundle"' not in poster_page and 'id="three-decode-worker"' not in poster_page, 'no 3D bundle without a model'
+assert 'src="review3d.js"' not in poster_page and not re.search(r"""\.src\s*=\s*['"][^'"]*\.js['"]""", poster_page), \
+    'self-contained report must not load scripts at run time'
+assert poster_page.index('window.Review3D = (() =>') < poster_page.index('const D = window.REVIEW_DATA')
+print("ok poster-only report")
 assert not re.search(r'<script[^>]+src=', html)
 assert html.count('window.ThreeStudio=') == 1 and 'function normalizeLighting(value)' in html
 assert html.index('window.ThreeStudio=') < html.index('const D = window.REVIEW_DATA')
@@ -2007,7 +2015,41 @@ with tempfile.TemporaryDirectory() as output:
 assert "google-chrome" in test_wf and "CHROME" in test_wf, "TS-S1 CI browser setup"
 build_fixtures_src = pathlib.Path("ui/build-fixtures.py").read_text(encoding="utf-8")
 assert "inline_page" in build_fixtures_src, "TS-S1 fixture generation uses inline_page"
-for command in ('node ui/check.mjs --no-skip "Download dialog"', 'node ui/check.mjs --no-skip "Multi-board BOM" --page "$PAGES/multiboard.html"', 'node ui/check.mjs --no-skip "Fab limits"', 'node ui/check.mjs --no-skip "Fab limits" --dark', 'node ui/check.mjs --no-skip "Fabrication producer contract" --page "$PAGES/fab.html"', 'node ui/check.mjs --no-skip "Fabrication producer contract" --dark --page "$PAGES/fab.html"', 'node ui/check.mjs --no-skip "Waivers"', 'node ui/check.mjs', 'node ui/check.mjs --dark', 'node ui/check.mjs --no-skip "selection-only address"', 'node ui/check.mjs --no-skip "pasted selection address preserves an explicit position"', 'node ui/check.mjs --no-skip "passing checks with baseline findings"', 'node ui/check.mjs --no-skip 3D --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip "unchanged sheet" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "unchanged project" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "Parts fixture" --page "$PAGES/parts.html"', 'node ui/check.mjs --no-skip "Parts fixture" --dark --page "$PAGES/parts.html"', 'node ui/check.mjs --no-skip "Ask"', 'node ui/check.mjs --no-skip "Ask" --dark', 'python3 ui/ask-fixture.py "$PAGES/ask-four.html"', 'node ui/check.mjs --no-skip "BR09 fixture" --page "$PAGES/ask-four.html"', 'node ui/check.mjs --no-skip "BR09 fixture" --dark --page "$PAGES/ask-four.html"', 'node ui/check.mjs --no-skip "MCP unchanged identity links"'):
+for command in (
+    'node ui/check.mjs --no-skip "Download dialog"',
+    'node ui/check.mjs --no-skip "Multi-board BOM" --page "$PAGES/multiboard.html"',
+    'node ui/check.mjs --no-skip "Fab limits"',
+    'node ui/check.mjs --no-skip "Fab limits" --dark',
+    'node ui/check.mjs --no-skip "Fabrication producer contract" --page "$PAGES/fab.html"',
+    'node ui/check.mjs --no-skip "Fabrication producer contract" --dark --page "$PAGES/fab.html"',
+    'node ui/check.mjs --no-skip "Waivers"',
+    'node ui/check.mjs',
+    'node ui/check.mjs --dark',
+    'node ui/check.mjs --no-skip "selection-only address"',
+    'node ui/check.mjs --no-skip "pasted selection address preserves an explicit position"',
+    'node ui/check.mjs --no-skip "passing checks with baseline findings"',
+    'node ui/check.mjs --no-skip 3D --page "$PAGES/3d.html"',
+    'node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"',
+    'node ui/check.mjs --no-skip "unchanged sheet" --page "$PAGES/two.html"',
+    'node ui/check.mjs --no-skip "unchanged project" --page "$PAGES/two.html"',
+    'node ui/check.mjs --no-skip "Parts fixture" --page "$PAGES/parts.html"',
+    'node ui/check.mjs --no-skip "Parts fixture" --dark --page "$PAGES/parts.html"',
+    'node ui/check.mjs --no-skip "design page"',
+    'node ui/check.mjs --no-skip "design page" --dark',
+    'node ui/check.mjs --no-skip "design 3D" --page "$PAGES/3d.html"',
+    'node ui/check.mjs --no-skip "design empty project" --page "$PAGES/two.html"',
+    'node ui/check.mjs --no-skip "design PcbDraw card"',
+    'node ui/check.mjs --no-skip "design revisions thumbnails" --page "$PAGES/design-history.html"',
+    'node ui/check.mjs --no-skip "design readiness"',
+    'node ui/check.mjs --no-skip "design Parts" --page "$PAGES/parts.html"',
+    'node ui/check.mjs --no-skip "design Parts" --dark --page "$PAGES/parts.html"',
+    'node ui/check.mjs --no-skip "Ask"',
+    'node ui/check.mjs --no-skip "Ask" --dark',
+    'python3 ui/ask-fixture.py "$PAGES/ask-four.html"',
+    'node ui/check.mjs --no-skip "BR09 fixture" --page "$PAGES/ask-four.html"',
+    'node ui/check.mjs --no-skip "BR09 fixture" --dark --page "$PAGES/ask-four.html"',
+    'node ui/check.mjs --no-skip "MCP unchanged identity links"',
+):
     assert "      - run: " + command in test_wf.splitlines(), "TS-S1 CI missing " + command
 assert test_wf.count("    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n") == test_wf.count("timeout-minutes:") == test_wf.count("runs-on:") == 2, "TS-S1 each CI job (test, dark) has one timeout"
 assert "apt-get" not in test_wf and test_wf.count("npm install") == 1, "TS-S1 only pinned 3D integration dependencies"
@@ -2044,6 +2086,7 @@ for command in (
     'node ui/check.mjs --persist-check --no-skip "Themes reload seed" --page "$PAGES/images.html"',
     'node ui/check.mjs --no-skip "images screen and legacy appearance" --width 1440 --height 900 --dpr 2 --page "$PAGES/images.html"',
     'node ui/check.mjs --no-skip "images screen and legacy appearance" --dark --width 1440 --height 900 --dpr 2 --page "$PAGES/images.html"',
+    'node ui/check.mjs --no-skip "design revisions thumbnails" --page "$PAGES/design-history.html"',
 ):
     assert "      - run: " + command in test_wf.splitlines(), "TS-S1 CI missing " + command
 assert '("images", "review-data-images.js")' in build_fixtures_src, "TS-S1 image fixture missing"
@@ -2721,7 +2764,7 @@ fab_step = wf[wf.index("- name: Fabrication outputs"):wf.index("- name: Attach t
 attach_step = wf[wf.index("- name: Attach to"):wf.index("- name: Write release notes")]
 assert "always()" in fab_step and "!cancelled()" in fab_step and "id: fabrication" in fab_step
 assert "always()" in attach_step and "steps.fabrication.outcome == 'success'" in attach_step
-notes_step = wf[wf.index("- name: Write release notes"):]
+notes_step = wf[wf.index("- name: Write release notes"):wf.index("  design-thumbnails:")]
 assert "continue-on-error: true" in notes_step and "steps.report.outcome == 'success'" in notes_step
 assert '--existing review/release-body.md --artifact-id "$ARTIFACT_ID"' in notes_step
 print("ok tag workflow wiring")
@@ -4505,7 +4548,7 @@ with tempfile.TemporaryDirectory() as t:
             with patch("kicad_review.inline_page", side_effect=lambda payload: payload), patch("sys.stdout", new_callable=io.StringIO):
                 cmd_report(SimpleNamespace())
             legacy = {"version": 1, "repo": "", "links": review_links(os.environ, det), "base": det["base"], "head": det["head"], "reason": "test",
-                      "settings": {k: ({name: value for name, value in v.items() if name not in ("interfaces", "release", "fab_limits")} if k == "checks" else {name: value for name, value in v.items() if name != "check_limits"} if k == "fabrication" else {"required_fields": v["required_fields"]} if k == "bom" else v) for k, v in DEFAULT_SETTINGS.items() if k not in ("3d", "parts", "digikey", "pdf", "threads", "issues", "waivers", "inventory", "libraries", "ask", "github", "interfaces", "release", "downloads")}, "run_id": "", "projects": []}
+                      "settings": {k: ({name: value for name, value in v.items() if name not in ("interfaces", "release", "fab_limits")} if k == "checks" else {name: value for name, value in v.items() if name != "check_limits"} if k == "fabrication" else {"required_fields": v["required_fields"]} if k == "bom" else v) for k, v in DEFAULT_SETTINGS.items() if k not in ("3d", "parts", "digikey", "pdf", "threads", "issues", "waivers", "inventory", "libraries", "design", "ask", "github", "interfaces", "release", "downloads")}, "run_id": "", "projects": []}
             legacy["assets"] = {}  # additive image capability does not enable issues
             assert open("review/data.json").read() == _json.dumps(legacy)
             assert open("review/kicad-review.html").read() == "window.REVIEW_DATA = " + _json.dumps({**{k: v for k, v in legacy.items() if k != "assets"}, "blobs": {}, "assets": {}}, separators=(",", ":")) + ";"
@@ -5309,9 +5352,15 @@ def br02_render_cache_contract():
             settings['3d']['enabled'] = True
             calls = []
             def cli(args, **kw):
-                calls.append(args)
-                pathlib.Path(args[args.index('-o')+1]).write_bytes(b'glTF' if 'glb' in args else br02_png())
-                return subprocess.CompletedProcess(args, 0, 'GLB log' if 'glb' in args else 'poster log', '')
+                if '-o' in args:
+                    calls.append(args)
+                    pathlib.Path(args[args.index('-o')+1]).write_bytes(b'glTF' if 'glb' in args else br02_png())
+                    return subprocess.CompletedProcess(args, 0, 'GLB log' if 'glb' in args else 'poster log', '')
+                m = re.search(r'"([^"]+\.svg)"\]; run', args[2]) if len(args) > 2 else None
+                if m:
+                    pathlib.Path(m.group(1)).parent.mkdir(parents=True, exist_ok=True)
+                    pathlib.Path(m.group(1)).write_bytes(b'<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"></svg>')
+                return subprocess.CompletedProcess(args, 0, '', '')
             with patch.object(kr, 'load_settings', return_value=settings), patch.object(kr, 'render_side'), \
                  patch.object(kr, 'IMAGE_RENDERER', 'verified-10.0.6'), \
                  patch.object(kr, 'render_tool_identity', return_value='KiCad 10.0.0'), patch.object(kr.subprocess, 'run', cli):
@@ -7731,6 +7780,987 @@ def ask_report_settings(toml_text):
 assert ask_report_settings("[ask]\nenabled = true\n")["ask"] == {"enabled": True}, "enabled Ask must reach REVIEW_DATA.settings"
 assert "ask" not in ask_report_settings(""), "opted-out reports must drop the ask table"
 print("ok ask setting")
+
+# ---- Design page (spec 06). Shared helpers for every DP-S block below. ----
+import json as _dpjson, re as _dpre, base64 as _dpb64, gzip as _dpgz
+from tempfile import TemporaryDirectory as _DpTmp
+_dp_erc = lambda uuid, kind: _dpjson.dumps({"sheets": [{"uuid_path": "/", "violations": [{"type": kind, "severity": "error", "description": kind,
+    "items": [{"uuid": uuid, "description": "Symbol U1 pin 1", "pos": {"x": 0.5, "y": 0.5}}]}]}]})
+_dp_pcb = lambda extra: ('(kicad_pcb (version 20260206) (layers (0 "F.Cu" signal) (2 "B.Cu" signal)) (gr_line (start 0 0) (end 10 0) (layer "Edge.Cuts") (uuid "e1"))' + extra + ')')
+
+# DP-S1: the setting is off by default, validated, and kept out of opted-out reports.
+assert kr.DEFAULT_SETTINGS["design"] == {"enabled": False}
+for bad in ('"yes"', "1", "[]"):
+    with _DpTmp() as t:
+        write(t, {"kicad-review.toml": "[design]\nenabled = " + bad + "\n"})
+        old = os.getcwd(); os.chdir(t)
+        try:
+            kr.load_settings(("",))
+            raise AssertionError("design.enabled = " + bad + " accepted")
+        except SystemExit as e:
+            assert "design.enabled must be true or false" in str(e)
+        finally:
+            os.chdir(old)
+assert "design" not in kr.filtered_settings(kr.load_settings(("nowhere",))), "an opted-out report carries no design key"
+_on = json.loads(json.dumps(kr.DEFAULT_SETTINGS)); _on["design"]["enabled"] = True
+assert kr.filtered_settings(_on)["design"] == {"enabled": True}
+assert kr.filtered_settings(_on)["checks"] == kr.filtered_settings({**_on, "design": {"enabled": False}})["checks"]
+_both = json.loads(json.dumps(kr.DEFAULT_SETTINGS)); _both["design"]["enabled"] = _both["ask"]["enabled"] = True
+assert kr.filtered_settings(_both)["design"] == {"enabled": True} and kr.filtered_settings(_both)["ask"] == {"enabled": True}
+print("ok DP-S1 design setting, validation and opt-out")
+
+# DP-S2: a design report reads only the head side, even when the base checkout and renders are on disk.
+with _DpTmp() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        for side, line, uuid, kind, extra in (("base", "M0 0H5", "u-base", "pin_not_connected", ""),
+                                              ("head", "M0 0H9", "u-head", "label_dangling", '(segment (start 1 1) (end 5 1) (width 0.2) (layer "F.Cu") (net "") (uuid "s1"))')):
+            symbol = '(symbol (lib_id "Device:R") (at 10 10 0) (uuid "s1") (property "Reference" "R1") (property "Value" "10k") (property "Footprint" "R_0603") (instances (project "H" (path "/" (reference "R1") (unit 1)))))' if side == "head" else ""
+            write(t, {f"{side}/H/H.kicad_sch": '(kicad_sch (sheet_instances (path "/" (page "1")))' + symbol + ')', f"{side}/H/H.kicad_pcb": _dp_pcb(extra),
+                      f"review/H/{side}/sch/H.svg": f'<svg viewBox="0 0 100 50"><path d="{line}"/></svg>',
+                      f"review/H/{side}/pcb/H-F_Cu.svg": f'<svg viewBox="0 0 10 10"><path d="{line}"/></svg>',
+                      f"review/H/{side}/erc.json": _dp_erc(uuid, kind), f"review/H/{side}/drc.json": "{}",
+                      f"review/H/{side}/board.glb": f"{side} glb", f"review/H/{side}/glb.log": "Could not add 3D model for U9.\n" if side == "base" else ""})
+        for side in ("base", "head"):  # BR02 stills: attach3d must not read the base side either
+            pathlib.Path(f"review/H/{side}/poster.png").write_bytes(b"\x89PNG\r\n\x1a\n" + side.encode() + b" poster")
+        settings = {**json.loads(json.dumps(kr.DEFAULT_SETTINGS)), "3d": {"enabled": True}, "parts": {"enabled": True}, "inventory": {"enabled": True}}
+        project = {"dir": "H", "name": "H", "status": "modified"}
+        compared = kr.build_project(project, {}, settings)
+        erc = next(c for c in compared["checks"] if c["name"] == "erc")
+        assert compared["sheets"][0]["status"] == "modified" and erc["new_errors"] == 1 and erc["fixed"] == 1, erc  # the comparison path is unchanged
+        assert [c["action"] for c in compared["parts"]["changes"]] == ["added"] and compared["parts"]["lines"][0]["new_problems"]
+        blobs = {}
+        one = kr.build_project(project, blobs, settings, single=True)
+        assert all(not any(k in item for k in ("added", "action", "pos_before")) for item in one.get("objects", [])), one.get("objects")
+        one_sheet = one["sheets"][0]  # never rebind the module-level sheet() fixture helper
+        assert one_sheet["svg"]["base"] is None and one_sheet["svg"]["head"] and one_sheet["status"] == "unchanged", one_sheet
+        assert one["changes"] == [] and one["board"]["layers"][0]["svg"]["base"] is None, one["board"]
+        assert one["board"]["geometry"]["base"] is None and one["board"]["geometry"]["head"], one["board"].get("geometry")
+        assert one["board"]["model3d"]["base"] is None and one["board"]["model3d"]["head"], one["board"]["model3d"]
+        assert one["board"]["poster3d"]["base"] is None and one["board"]["poster3d"]["head"], one["board"]["poster3d"]
+        assert all(r["side"] != "base" for r in one["board"]["no_model"]), one["board"]["no_model"]
+        assert one["board"]["model3d"]["changed"] is False and one["board"]["changed"] is False and one["board"]["status"] == "unchanged"
+        erc = next(c for c in one["checks"] if c["name"] == "erc")
+        assert [v["uuids"] for v in erc["violations"]] == [["u-head"]] and erc["errors"] == 1, erc
+        assert erc["new_errors"] == 0 and erc["new_warnings"] == 0 and erc["fixed"] == 0 and not any(v["new"] for v in erc["violations"]), erc
+        assert all(c["fixed"] == 0 and c["new_errors"] == 0 for c in one["checks"]) and "libraries" not in one
+        assert one.get("objects"), "inventory-enabled single report must contain fixture objects"
+        assert any(item.get("ref") == "R1" for item in one["objects"]), one["objects"]
+        assert [l["refs"] for l in one["parts"]["lines"]] == [["R1"]] and one["parts"]["changes"] == [] and one["parts"]["lines"][0]["new_problems"] == []
+        assert one["parts"]["coverage"]["base"] is None
+        texts = [_dpgz.decompress(_dpb64.b64decode(b)) for b in blobs.values()]
+        assert texts and not any(b"M0 0H5" in x or b"base glb" in x or b"base poster" in x for x in texts), "no base byte may reach a design report"
+    finally:
+        os.chdir(old_cwd)
+print("ok DP-S2 single-revision project ignores the base side")
+
+# DP-S2B: a design report skips the base side of the libraries, release and interface checks, even when base inputs are on disk.
+with _DpTmp() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        for side, pin_type, rx_or_txd in (("base", "input", "TXD"), ("head", "passive", "RX")):
+            write(t, {f"{side}/H/H.kicad_sch": '(kicad_sch (sheet_instances (path "/" (page "1"))))', f"{side}/H/H.kicad_pcb": _dp_pcb(""),
+                      f"{side}/H/Parts.kicad_sym": '(kicad_symbol_lib (version 20231120) (symbol "LDO" (property "Reference" "U") (symbol "LDO_1_1" '
+                                                   f'(pin {pin_type} line (at 0 0 0) (length 2.54) (name "IN" (effects)) (number "1" (effects))))))',
+                      f"review/H/{side}/sch/H.svg": '<svg viewBox="0 0 100 50"><path d="M0 0H5"/></svg>',
+                      f"review/H/{side}/erc.json": _dp_erc("u-" + side, "pin_not_connected"), f"review/H/{side}/drc.json": "{}",
+                      f"review/H/{side}/netlist.net": '(export (version "E") (components ) (nets (net (code "1") (name "TX") '
+                                                      '(node (ref "U1") (pin "1") (pinfunction "TX") (pintype "output")) '
+                                                      f'(node (ref "U2") (pin "1") (pinfunction "{rx_or_txd}") (pintype "output")))))'})
+        settings = {**json.loads(json.dumps(kr.DEFAULT_SETTINGS)), "libraries": {"enabled": True}}
+        settings["checks"] = {**settings["checks"], "release": "required", "interfaces": "required"}
+        project = {"dir": "H", "name": "H", "status": "modified"}
+        seen = {}
+        real_run_check = kr.run_check
+        def spy(name, settings, head, base, waivers=None):
+            seen.setdefault(name, []).append((head is not None, base is not None))
+            return real_run_check(name, settings, head, base, waivers)
+        with patch("kicad_review.run_check", side_effect=spy):
+            compared = kr.build_project(project, {}, settings)
+            assert all(seen[n] == [(True, True)] for n in ("release", "interfaces")), seen  # the comparison path reads base
+            assert compared["libraries"][0]["status"] == "modified", compared.get("libraries")
+            ic = next(c for c in compared["checks"] if c["name"] == "interfaces")
+            assert ic["errors"] == 0 and ic["fixed"] == 1, ic  # the base-only TXD finding counts as fixed
+            seen.clear()
+            one = kr.build_project(project, {}, settings, single=True)
+        assert all(seen[n] == [(True, False)] for n in ("release", "interfaces")), seen  # head is read, base never is
+        assert "libraries" not in one, "a design report must not carry library changes"
+        ic = next(c for c in one["checks"] if c["name"] == "interfaces")
+        assert ic["errors"] == 0 and ic["violations"] == [] and ic["new_errors"] == 0 and ic["fixed"] == 0, ic
+        rc = next(c for c in one["checks"] if c["name"] == "release")
+        assert [v["type"] for v in rc["violations"]] == ["missing_package"] and rc["fixed"] == 0, rc
+        assert all(not v["new"] for c in one["checks"] for v in c["violations"]), one["checks"]
+    finally:
+        os.chdir(old_cwd)
+print("ok DP-S2B single-revision project skips base libraries, release and interface checks")
+
+# DP-S5: 02's still can exist without a model; all base artifacts are unreadable in single mode.
+import builtins, contextlib, struct as _dpstruct, zlib as _dpzlib
+
+def _dpchunk(kind, data):
+    return _dpstruct.pack('>I', len(data)) + kind + data + _dpstruct.pack('>I', _dpzlib.crc32(kind + data))
+
+_dp_png = (b'\x89PNG\r\n\x1a\n' + _dpchunk(b'IHDR', _dpstruct.pack('>IIBBBBB', 1600, 1000, 8, 6, 0, 0, 0))
+           + _dpchunk(b'IDAT', _dpzlib.compress((b'\0' + b'\0' * 6400) * 1000)) + _dpchunk(b'IEND', b''))
+with _DpTmp() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        head_parts = json.dumps([{'ref': 'R1', 'uuid': 'u1', 'hasModel': True}]).encode()
+        head_stats = json.dumps({'footprints': 1, 'withModel': 1, 'placeholders': 0, 'triangles': 10, 'primitives': 5, 'warnings': []}).encode()
+        head_manifest = json.dumps({
+            'hashes': {
+                'board.glb': hashlib.sha256(b'head glb').hexdigest(),
+                'parts.json': hashlib.sha256(head_parts).hexdigest(),
+                'stats.json': hashlib.sha256(head_stats).hexdigest(),
+            }
+        })
+        write(t, {
+            'head/H/H.kicad_pcb': _dp_pcb(''),
+            'review/H/head/drc.json': '{}',
+            'review/H/head/board.glb': 'head glb',
+            'review/H/head/board-processed.json': head_manifest,
+            'review/H/head/board-parts.json': head_parts.decode(),
+            'review/H/head/board-stats.json': head_stats.decode(),
+            'review/H/base/poster.png': 'poison base poster',
+            'review/H/base/board.glb': 'poison model',
+            'review/H/base/board-processed.json': '{"hashes": {}}',
+            'review/H/base/board-parts.json': '[{"ref":"U_POISON","uuid":"poison","hasModel":false}]',
+            'review/H/base/board-stats.json': '{"footprints":1,"withModel":0,"placeholders":1,"triangles":0,"primitives":0,"warnings":[]}',
+            'review/H/base/glb.log': 'poison glb log',
+            'review/H/base/poster.log': 'poison poster log',
+        })
+        pathlib.Path('review/H/head/poster.png').write_bytes(_dp_png)
+        settings = json.loads(json.dumps(kr.DEFAULT_SETTINGS))
+        settings['design']['enabled'] = True
+        settings['3d']['enabled'] = False
+
+        real_read_bytes = pathlib.Path.read_bytes
+        real_read_text = pathlib.Path.read_text
+        real_path_open = pathlib.Path.open
+        real_open = builtins.open
+        real_exists = pathlib.Path.exists
+        real_is_file = pathlib.Path.is_file
+        real_is_dir = pathlib.Path.is_dir
+        real_isfile = os.path.isfile
+        real_isdir = os.path.isdir
+        real_osexists = os.path.exists
+        real_listdir = os.listdir
+        real_scandir = os.scandir
+
+        def no_base(path):
+            if isinstance(path, (str, bytes, os.PathLike)):
+                p = os.fsdecode(path).replace('\\', '/')
+                assert '/base/' not in p and not p.startswith('base/') and not p.endswith('/base'), 'base filesystem probe: ' + str(path)
+
+        def guarded_read_bytes(self, *args, **kw):
+            no_base(self); return real_read_bytes(self, *args, **kw)
+        def guarded_read_text(self, *args, **kw):
+            no_base(self); return real_read_text(self, *args, **kw)
+        def guarded_path_open(self, *args, **kw):
+            no_base(self); return real_path_open(self, *args, **kw)
+        def guarded_open(file, *args, **kw):
+            no_base(file); return real_open(file, *args, **kw)
+        def guarded_exists(self, *args, **kw):
+            no_base(self); return real_exists(self, *args, **kw)
+        def guarded_is_file(self, *args, **kw):
+            no_base(self); return real_is_file(self, *args, **kw)
+        def guarded_is_dir(self, *args, **kw):
+            no_base(self); return real_is_dir(self, *args, **kw)
+        def guarded_isfile(path):
+            no_base(path); return real_isfile(path)
+        def guarded_isdir(path):
+            no_base(path); return real_isdir(path)
+        def guarded_osexists(path):
+            no_base(path); return real_osexists(path)
+        def guarded_listdir(path='.'):
+            no_base(path); return real_listdir(path)
+        def guarded_scandir(path='.'):
+            no_base(path); return real_scandir(path)
+
+        @contextlib.contextmanager
+        def poisoned_base_guard():
+            with patch.object(pathlib.Path, 'read_bytes', guarded_read_bytes), \
+                 patch.object(pathlib.Path, 'read_text', guarded_read_text), \
+                 patch.object(pathlib.Path, 'open', guarded_path_open), \
+                 patch.object(builtins, 'open', guarded_open), \
+                 patch.object(pathlib.Path, 'exists', guarded_exists), \
+                 patch.object(pathlib.Path, 'is_file', guarded_is_file), \
+                 patch.object(pathlib.Path, 'is_dir', guarded_is_dir), \
+                 patch.object(os.path, 'isfile', guarded_isfile), \
+                 patch.object(os.path, 'isdir', guarded_isdir), \
+                 patch.object(os.path, 'exists', guarded_osexists), \
+                 patch.object(os, 'listdir', guarded_listdir), \
+                 patch.object(os, 'scandir', guarded_scandir):
+                yield
+
+        with poisoned_base_guard():
+            blobs = {}
+            one = kr.build_project({'dir':'H','name':'H','status':'unchanged'}, blobs, settings, single=True)
+            board = one['board']
+            assert board['poster3d']['base'] is None
+            assert _dpgz.decompress(_dpb64.b64decode(blobs[board['poster3d']['head']])) == _dp_png
+            assert 'poster' not in board and not board.get('model3d', {}).get('head')
+            assert not any(b'poison' in _dpgz.decompress(_dpb64.b64decode(b)) for b in blobs.values())
+
+            # Verify attachment, index and coverage reads directly under the poisoned-base guard
+            direct_board = {}
+            kr.attach3d(direct_board, 'review/H', {}, allowed_sides=('head',))
+            assert direct_board['poster3d']['head'] and direct_board['poster3d']['base'] is None
+            assert direct_board['parts3d']['head'] and direct_board['parts3d']['base'] is None
+            assert direct_board['coverage3dBySide']['head'] and direct_board['coverage3dBySide']['base'] is None
+            assert direct_board['coverage3d'] == json.loads(head_stats)
+
+            # Confirm that the guard positively catches base reads if base side were probed
+            try:
+                kr.attach3d({}, 'review/H', {}, allowed_sides=('base', 'head'))
+                raise AssertionError('poisoned base guard should have triggered on base attach3d')
+            except AssertionError as e:
+                assert 'base filesystem probe' in str(e), str(e)
+
+            # With 3d.enabled = True: still and GLB attach, but base remains completely unprobed
+            settings['3d']['enabled'] = True
+            blobs3d = {}
+            one3d = kr.build_project({'dir':'H','name':'H','status':'unchanged'}, blobs3d, settings, single=True)
+            board3d = one3d['board']
+            assert board3d['poster3d']['base'] is None
+            assert _dpgz.decompress(_dpb64.b64decode(blobs3d[board3d['poster3d']['head']])) == _dp_png
+            assert board3d['model3d']['base'] is None
+            assert _dpgz.decompress(_dpb64.b64decode(blobs3d[board3d['model3d']['head']])) == b'head glb'
+            assert board3d['parts3d']['base'] is None and board3d['parts3d']['head']
+            assert board3d['coverage3dBySide']['base'] is None and board3d['coverage3dBySide']['head']
+            assert not any(b'poison' in _dpgz.decompress(_dpb64.b64decode(b)) for b in blobs3d.values())
+    finally:
+        os.chdir(old_cwd)
+
+# Cache regression: restore a revision first rendered as base as a later head;
+# delete only its poster and require a cache miss plus one still export, not repeated SVG/GLB exports.
+# Assert exactly one still render per eligible revision with 3d.enabled false then true.
+with _DpTmp() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        pr = {'dir': 'P', 'name': 'P', 'status': 'modified'}
+        det = {'base': 'a'*40, 'head': 'b'*40, 'projects': [pr]}
+        pathlib.Path('review').mkdir()
+        pathlib.Path('review/detect.json').write_text(json.dumps(det))
+        for side in ('base', 'head'):
+            pathlib.Path(side, 'P').mkdir(parents=True)
+            pathlib.Path(side, 'P/P.kicad_pcb').write_text(f'(kicad_pcb {side})')
+        settings = copy.deepcopy(kr.DEFAULT_SETTINGS)
+        settings['design']['enabled'] = True
+        settings['3d']['enabled'] = False
+        calls = []
+        def cli(args, **kw):
+            calls.append(args)
+            if '-o' in args:
+                dest = pathlib.Path(args[args.index('-o')+1])
+                dest.write_bytes(b'glTF' if 'glb' in args else _dp_png)
+            elif len(args) > 2 and 'pcbdraw' in args[2]:
+                m = re.search(r'"([^"]+\.svg)"\]; run', args[2])
+                if m:
+                    pathlib.Path(m.group(1)).parent.mkdir(parents=True, exist_ok=True)
+                    pathlib.Path(m.group(1)).write_bytes(b'<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"></svg>')
+            return subprocess.CompletedProcess(args, 0, '', '')
+        def fake_render_side(src, name, out, **kw):
+            pathlib.Path(out).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(out, 'drc.json').write_text('{}')
+        with patch.object(kr, 'load_settings', return_value=settings), patch.object(kr, 'render_side', side_effect=fake_render_side) as rs, \
+             patch.object(kr, 'IMAGE_RENDERER', 'verified-10.0.6'), \
+             patch.object(kr, 'render_tool_identity', return_value='KiCad 10.0.0'), patch.object(kr.subprocess, 'run', cli):
+            kr.cmd_render(None)
+            base_cache = kr.render_cache(pr, 'base', det, settings)
+            assert kr.render_cache_complete(base_cache, pr, 'base', settings)
+
+            # Revision 'a'*40 becomes head in a later run
+            det2 = {'base': 'c'*40, 'head': 'a'*40, 'projects': [pr]}
+            pathlib.Path('review/detect.json').write_text(json.dumps(det2))
+            pathlib.Path('base/P/P.kicad_pcb').write_text('(kicad_pcb new_base)')
+            pathlib.Path('head/P/P.kicad_pcb').write_text('(kicad_pcb base)')
+
+            # Delete only its poster
+            (base_cache / 'poster.png').unlink()
+            assert not kr.render_cache_complete(base_cache, pr, 'head', settings), 'cache miss on deleted poster'
+            calls.clear()
+            rs.reset_mock()
+
+            kr.cmd_render(None)
+            head_calls = [c for c in calls if c[-1].startswith('head/')]
+            assert len(head_calls) == 1 and head_calls[0][1:3] == ['pcb', 'render'], f'head_calls: {head_calls}'
+            assert not any('glb' in c for c in head_calls), 'zero GLB exports when 3d is off'
+            head_render_side = [call for call in rs.call_args_list if call[0][0].startswith('head/')]
+            assert len(head_render_side) == 0, 'no repeated SVG exports for cached head'
+            assert (base_cache / 'poster.png').is_file(), 'poster restored in cache'
+
+            # Warm cache: no repeated exports
+            calls.clear()
+            rs.reset_mock()
+            kr.cmd_render(None)
+            head_calls_warm = [c for c in calls if c[-1].startswith('head/')]
+            assert len(head_calls_warm) == 0, f'no repeated still or model exports when warm (3d off): {head_calls_warm}'
+
+            blobs = {}
+            one = kr.build_project(pr, blobs, settings, single=True)
+            assert one['board']['poster3d']['head'] and one['board']['poster3d']['base'] is None
+
+            # --- 3d.enabled = True case: assert exactly one still plus one model export, no repeated export ---
+            settings_3d = copy.deepcopy(kr.DEFAULT_SETTINGS)
+            settings_3d['design']['enabled'] = True
+            settings_3d['3d']['enabled'] = True
+
+            det_3d = {'base': 'd'*40, 'head': 'e'*40, 'projects': [pr]}
+            pathlib.Path('review/detect.json').write_text(json.dumps(det_3d))
+            pathlib.Path('base/P/P.kicad_pcb').write_text('(kicad_pcb d_base)')
+            pathlib.Path('head/P/P.kicad_pcb').write_text('(kicad_pcb e_head)')
+            calls.clear()
+            rs.reset_mock()
+            with patch.object(kr, 'load_settings', return_value=settings_3d):
+                kr.cmd_render(None)
+                base_cache_3d = kr.render_cache(pr, 'base', det_3d, settings_3d)
+                assert kr.render_cache_complete(base_cache_3d, pr, 'base', settings_3d)
+
+                # Revision 'd'*40 becomes head in a later run
+                det_3d_head = {'base': 'f'*40, 'head': 'd'*40, 'projects': [pr]}
+                pathlib.Path('review/detect.json').write_text(json.dumps(det_3d_head))
+                pathlib.Path('base/P/P.kicad_pcb').write_text('(kicad_pcb f_base)')
+                pathlib.Path('head/P/P.kicad_pcb').write_text('(kicad_pcb d_base)')
+
+                # Delete only its poster
+                (base_cache_3d / 'poster.png').unlink()
+                assert not kr.render_cache_complete(base_cache_3d, pr, 'head', settings_3d), 'cache miss on deleted poster with 3d on'
+                calls.clear()
+                rs.reset_mock()
+
+                kr.cmd_render(None)
+                head_calls_3d = [c for c in calls if c[-1].startswith('head/')]
+                head_still_renders = [c for c in head_calls_3d if c[1:3] == ['pcb', 'render']]
+                head_glb_exports = [c for c in head_calls_3d if 'glb' in c]
+                assert len(head_still_renders) == 1, f'exactly one still render per revision: {head_still_renders}'
+                assert len(head_glb_exports) == 1, f'exactly one model export when 3d is on: {head_glb_exports}'
+                head_render_side_3d = [call for call in rs.call_args_list if call[0][0].startswith('head/')]
+                assert len(head_render_side_3d) == 0, 'no repeated SVG exports for cached head with 3d on'
+                assert (base_cache_3d / 'poster.png').is_file(), 'poster restored in cache'
+
+                # Verify warm cache does not repeat export
+                calls.clear()
+                rs.reset_mock()
+                kr.cmd_render(None)
+                head_calls_warm_3d = [c for c in calls if c[-1].startswith('head/')]
+                assert len(head_calls_warm_3d) == 0, f'no repeated still or model exports when warm (3d on): {head_calls_warm_3d}'
+
+                blobs_3d = {}
+                one_3d = kr.build_project(pr, blobs_3d, settings_3d, single=True)
+                assert one_3d['board']['poster3d']['head'] and one_3d['board']['poster3d']['base'] is None
+                assert one_3d['board']['model3d']['head'] and one_3d['board']['model3d']['base'] is None
+    finally:
+        os.chdir(old_cwd)
+
+print('ok DP-S5 canonical still, no GLB prerequisite, no base probes')
+
+# DP-P1: PcbDraw uses the evidenced command, keeps front and back SVGs, and records a note for a board without a closed outline.
+_dp_svg = b'<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"></svg>'
+_dp_refusal = 'Error: Board has no closed outline on Edge.Cuts'
+assert kr.pcbdraw_argv('front', 'P/P.kicad_pcb', 'out/f.svg') == ['python3', '-c', 'from pcbdraw.ui import run; import sys; sys.argv=["pcbdraw","plot","--side","front","--placeholders","P/P.kicad_pcb","out/f.svg"]; run()']
+assert kr.pcbdraw_argv('back', 'P/P.kicad_pcb', 'out/b.svg')[2].count('"back"') == 1
+with _DpTmp() as t:
+    calls = []
+    def writes(argv):
+        calls.append(argv)
+        out = re.search(r'"([^"]+\.svg)"\]; run', argv[2]).group(1)
+        pathlib.Path(out).parent.mkdir(parents=True, exist_ok=True)
+        pathlib.Path(out).write_bytes(_dp_svg)
+        return 0, ''
+    products, note = kr.pcbdraw_plot('P/P.kicad_pcb', os.path.join(t, 'head'), writes)
+    assert note == '' and all(products[face] and pathlib.Path(products[face]).read_bytes() == _dp_svg for face in ('front', 'back')), products
+    assert len(calls) == 2
+    calls.clear()
+    products, note = kr.pcbdraw_plot('Thermal_Camera/T.kicad_pcb', os.path.join(t, 'thermal'), lambda argv: (1, _dp_refusal))
+    assert products == {'front': None, 'back': None} and 'no closed Edge.Cuts outline' in note, (products, note)
+    assert kr.pcbdraw_svg_valid(os.path.join(t, 'thermal', 'pcbdraw-front.svg')) is False
+    calls.clear()
+    stderr_buf = io.StringIO()
+    partial_dir = os.path.join(t, 'partial')
+    front_svg = os.path.join(partial_dir, 'pcbdraw-front.svg')
+    def partial_run(argv):
+        calls.append(argv)
+        m = re.search(r'([^\s\'"]*pcbdraw-[^\s\'"]+\.svg)', ' '.join(argv))
+        target = m.group(1) if m else front_svg
+        if 'front' in os.path.basename(target):
+            pathlib.Path(target).parent.mkdir(parents=True, exist_ok=True)
+            pathlib.Path(target).write_bytes(_dp_svg)
+            return 0, ''
+        return 1, 'Error: back layer failed\n' + ('long_error_detail_' * 25) + '\n'
+    with patch('sys.stderr', stderr_buf):
+        products, note = kr.pcbdraw_plot('P/P.kicad_pcb', partial_dir, partial_run)
+    assert products['front'] is not None and products['back'] is None
+    assert note == 'PcbDraw failed for back face: see the job log.', note
+    stderr_out = stderr_buf.getvalue()
+    assert 'Error: back layer failed' in stderr_out
+    assert 'long_error_detail_' in stderr_out
+    assert ('long_error_detail_' * 25) not in stderr_out
+print('ok DP-P1 PcbDraw command, front and back plots, skip note')
+
+# DP-P2: a comparison attaches front and back plots for both revisions; a design report attaches the head side only, with no base probes.
+assert not hasattr(kr, 'put_blob'), 'put_blob alias should be removed'
+assert kr.workflow_command_escape("foo:bar,baz\nqux") == "foo:bar,baz%0Aqux"
+with _DpTmp() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        write(t, {'head/H/H.kicad_pcb': _dp_pcb(''), 'review/H/head/drc.json': '{}', 'review/H/base/drc.json': '{}'})
+        for side, body in (('head', _dp_svg), ('base', _dp_svg)):
+            for face in ('front', 'back'):
+                pathlib.Path(f'review/H/{side}/pcbdraw-{face}.svg').write_bytes(body)
+            pathlib.Path(f'review/H/{side}/pcbdraw.json').write_text('{"note": ""}', encoding='utf-8')
+        settings = json.loads(json.dumps(kr.DEFAULT_SETTINGS))
+        settings['design']['enabled'] = True
+        settings['3d']['enabled'] = False
+        blobs = {}
+        both = kr.build_project({'dir': 'H', 'name': 'H', 'status': 'unchanged'}, blobs, settings)
+        assert both['board']['pcbdraw']['base']['front'] and both['board']['pcbdraw']['head']['back']
+        real_read, real_isfile = pathlib.Path.read_bytes, os.path.isfile
+        def no_base(path):
+            assert '/base/' not in str(path), 'base filesystem probe: ' + str(path)
+        with patch.object(pathlib.Path, 'read_bytes', lambda self: (no_base(self), real_read(self))[1]), patch.object(os.path, 'isfile', lambda path: (no_base(path), real_isfile(path))[1]):
+            single_blobs = {}
+            one = kr.build_project({'dir': 'H', 'name': 'H', 'status': 'unchanged'}, single_blobs, settings, single=True)
+        assert one['board']['pcbdraw']['base'] is None
+        assert _dpgz.decompress(_dpb64.b64decode(single_blobs[one['board']['pcbdraw']['head']['front']])) == _dp_svg
+        assert not any(b'poison' in _dpgz.decompress(_dpb64.b64decode(b)) for b in single_blobs.values())
+        off = json.loads(json.dumps(kr.DEFAULT_SETTINGS))
+        assert 'pcbdraw' not in kr.build_project({'dir': 'H', 'name': 'H', 'status': 'unchanged'}, {}, off)['board']
+        # Corrupt pcbdraw.json is handled gracefully and treated as absent
+        pathlib.Path('review/H/head/pcbdraw.json').write_text('{invalid-json', encoding='utf-8')
+        corrupt_blobs = {}
+        corrupt_proj = kr.build_project({'dir': 'H', 'name': 'H', 'status': 'unchanged'}, corrupt_blobs, settings, single=True)
+        assert corrupt_proj['board']['pcbdraw']['head'] is None
+    finally:
+        os.chdir(old_cwd)
+print('ok DP-P2 PcbDraw attaches head only in design reports')
+
+# DP-P3: PcbDraw is installed only for design runs, pinned to the evidenced version, and reaches the KiCad image's render step.
+_wf_p = pathlib.Path(".github/workflows/review.yml").read_text(encoding="utf-8")
+assert "pip install -q --target /w/.pydeps pcbdraw==1.3.0" in _wf_p
+assert "if: steps.detect.outputs.changed == 'true' && steps.detect.outputs.design == 'true'" in _wf_p
+assert "-e PYTHONPATH=/w/.pydeps" in _wf_p.split("- name: Render both revisions and run ERC/DRC")[1].split("- name:")[0]
+assert "PYTHON_IMAGE: python:3.13-slim@sha256:" in _wf_p
+assert 'docker run -q --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/w" -w /w "$PYTHON_IMAGE"' in _wf_p
+print("ok DP-P3 PcbDraw install and render wiring")
+
+# Broken kicad-review.toml warns and defaults design output to false
+with tempfile.TemporaryDirectory() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        output_f = pathlib.Path("outputs")
+        pathlib.Path("kicad-review.toml").write_text("[design\ninvalid", encoding="utf-8")
+        detect_stderr = io.StringIO()
+        with patch.dict(os.environ, {"GITHUB_OUTPUT": str(output_f)}, clear=True), patch("sys.stderr", detect_stderr), patch("kicad_review.resolve_revisions", return_value=("a" * 40, "b" * 40, "test")), patch("kicad_review.detect", return_value=[]):
+            kr.cmd_detect(None)
+        assert "design=false" in output_f.read_text()
+        assert "kicad-review.toml syntax error:" in detect_stderr.getvalue()
+    finally:
+        os.chdir(old_cwd)
+print("ok cmd_detect warns on broken settings and defaults design to false")
+
+# DP-S3: snapshot writes one head-only report, a stable release copy and its outputs; off means nothing is written.
+def _dp_report_data(path):
+    text = open(path, encoding="utf-8").read()
+    return json.loads(_dpre.search(r"window\.REVIEW_DATA = (.*?);</script>", text, _dpre.S).group(1))
+with _DpTmp() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        head = "c" * 40
+        for side, line in (("base", "M0 0H5"), ("head", "M0 0H9")):
+            write(t, {f"{side}/H/H.kicad_sch": '(kicad_sch (sheet_instances (path "/" (page "1"))))', f"{side}/H/H.kicad_pcb": _dp_pcb(""),
+                      f"{side}/H/H.kicad_pro": "{}", f"review/H/{side}/sch/H.svg": f'<svg viewBox="0 0 100 50"><path d="{line}"/></svg>',
+                      f"review/H/{side}/pcb/H-F_Cu.svg": f'<svg viewBox="0 0 10 10"><path d="{line}"/></svg>',
+                      f"review/H/{side}/erc.json": _dp_erc("u-" + side, "pin_not_connected"), f"review/H/{side}/drc.json": "{}"})
+        with open("review/H/head/poster.png", "wb") as fh:
+            fh.write(_dp_png)
+        det = {"base": "b" * 40, "head": head, "reason": "push: new commit vs previous branch tip",
+               "snapshot": {"ref": "main", "sha": head, "committedAt": "2026-10-24T10:00:00+00:00", "message": "Move R16 </script>"},
+               "projects": [{"dir": "H", "name": "H", "status": "modified"}, {"dir": "Gone", "name": "Gone", "status": "removed"}]}
+        det["snapshot_settings"] = json.loads(json.dumps(kr.DEFAULT_SETTINGS))
+        det["snapshot_settings"]["design"]["enabled"] = True
+        write(t, {"review/detect.json": json.dumps(det), "head/kicad-review.toml": "[design]\nenabled = true\n"})
+        out = f"{t}/gh-output"
+        with patch.dict(os.environ, {"GITHUB_OUTPUT": out, "GITHUB_REPOSITORY": "o/r", "GITHUB_RUN_ID": "7", "GITHUB_SERVER_URL": "https://github.com"}, clear=True), patch("sys.stdout", new_callable=io.StringIO):
+            kr.cmd_snapshot(None)
+        assert open(out).read() == "built=true\nname=kicad-design-ccccccc.html\nthumbnails=true\nask=false\ndownloads=false\ndownloads_name=kicad-design-downloads-ccccccc\n"
+        assert json.load(open("review/design/thumbnail-plan.json")) == {"sha": head, "committedAt": "2026-10-24T10:00:00+00:00", "projects": [{"dir": "H", "poster": "review/design/thumb-src/H.png"}]}
+        assert open("review/design/thumb-src/H.png", "rb").read() == _dp_png
+        data = _dp_report_data("review/design/kicad-design-ccccccc.html")
+        assert data["mode"] == "single" and data["base"] is None and data["head"] == head and data["snapshot"]["ref"] == "main", data["snapshot"]
+        assert [p["name"] for p in data["projects"]] == ["H"] and data["projects"][0]["changes"] == [], data["projects"][0]["changes"]
+        assert data["links"]["review"] == "" and data["links"]["base"] == "" and data["links"]["head"].endswith("/commit/" + head)
+        assert data["snapshot"]["message"] == "Move R16 </script>" and "</script>Move" not in open("review/design/kicad-design-ccccccc.html", encoding="utf-8").read()
+        texts = [_dpgz.decompress(_dpb64.b64decode(b)) for b in data["blobs"].values()]
+        assert texts and not any(b"M0 0H5" in x for x in texts), "base drawings must not be embedded"
+        assert _dpgz.decompress(_dpb64.b64decode(data["blobs"][data["projects"][0]["board"]["poster3d"]["head"]])) == _dp_png
+        assert open("review/design/design-snapshot.html", "rb").read() == open("review/design/kicad-design-ccccccc.html", "rb").read()
+        shutil.rmtree("review/design"); os.remove("review/H/head/poster.png")
+        with patch.dict(os.environ, {"GITHUB_OUTPUT": out + "np", "GITHUB_REPOSITORY": "o/r", "GITHUB_RUN_ID": "7", "GITHUB_SERVER_URL": "https://github.com"}, clear=True), patch("sys.stdout", new_callable=io.StringIO):
+            kr.cmd_snapshot(None)
+        assert open(out + "np").read() == "built=true\nname=kicad-design-ccccccc.html\nthumbnails=false\nask=false\ndownloads=false\ndownloads_name=kicad-design-downloads-ccccccc\n"
+        assert not os.path.exists("review/design/thumbnail-plan.json") and not os.path.exists("review/design/thumb-src")
+        shutil.rmtree("review/design"); os.remove("head/kicad-review.toml")
+        det["snapshot_settings"]["design"]["enabled"] = False
+        write(t, {"review/detect.json":json.dumps(det)})
+        with patch.dict(os.environ, {"GITHUB_OUTPUT": out + "2"}, clear=True), patch("sys.stdout", new_callable=io.StringIO):
+            kr.cmd_snapshot(None)
+        assert open(out + "2").read() == "built=false\n" and not os.path.exists("review/design")
+    finally:
+        os.chdir(old_cwd)
+print("ok DP-S3 snapshot report, release copy and opt-out")
+
+# DP-S4: which events leave a design snapshot, and when it is the only thing a run makes.
+from kicad_review import snapshot_plan
+assert snapshot_plan({"EVENT": "pull_request"}) == (False, False)
+assert snapshot_plan({"EVENT": "push", "REF_NAME": "feature/x", "DEFAULT_BRANCH": "main"}) == (False, False)
+assert snapshot_plan({"EVENT": "push", "REF_NAME": "main", "DEFAULT_BRANCH": "main"}) == (True, False)
+assert snapshot_plan({"EVENT": "push", "REF_NAME": "", "DEFAULT_BRANCH": ""}) == (False, False)
+assert snapshot_plan({"EVENT": "push", "TAG": "v1"}) == (True, False)
+assert snapshot_plan({"EVENT": "workflow_dispatch", "SNAPSHOT_ONLY": "true"}) == (True, True)
+assert snapshot_plan({"EVENT": "workflow_dispatch", "SNAPSHOT_ONLY": "false"}) == (False, False)
+with _DpTmp() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.makedirs(f"{t}/repo")
+        os.chdir(f"{t}/repo")
+        g = lambda *a: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], check=True, capture_output=True, text=True).stdout.strip()
+        g("init", "-q", "-b", "main")
+        write(f"{t}/repo", {"P/P.kicad_pro": "{}", "P/P.kicad_sch": "(kicad_sch)", "P/P.kicad_pcb": _dp_pcb(""), "kicad-review.toml": "[3d]\nenabled = true\n"})
+        g("add", "."); g("commit", "-qm", "first")
+        first = g("rev-parse", "HEAD")
+        write(f"{t}/repo", {"P/P.kicad_sch": "(kicad_sch (uuid \"x\"))", "kicad-review.toml":"[design]\nenabled = true\n[3d]\nenabled = true\n"})
+        g("commit", "-qam", "Move R16"); g("tag", "v1")
+        head = g("rev-parse", "HEAD")
+        assert kr.resolve_revisions({"EVENT": "workflow_dispatch", "SNAPSHOT_ONLY": "true", "IN_HEAD": "main", "IN_BASE": ""}) == (None, head, "design snapshot (no comparison)")
+        try:
+            kr.resolve_revisions({"EVENT": "workflow_dispatch", "SNAPSHOT_ONLY": "true", "IN_HEAD": "nope"})
+            raise AssertionError("an unknown head must stop the run")
+        except SystemExit as e:
+            assert "head='nope'" in str(e)
+
+        def detect_run(env):
+            out = f"{t}/out"
+            open(out, "w").close()
+            with patch.dict(os.environ, {**env, "GITHUB_OUTPUT": out}, clear=True), patch("sys.stdout", new_callable=io.StringIO):
+                kr.cmd_detect(None)
+            return dict(line.split("=", 1) for line in open(out).read().splitlines()), (json.load(open(f"{t}/review/detect.json")) if os.path.exists(f"{t}/review/detect.json") else None)
+        push = {"EVENT": "push", "BEFORE": first, "AFTER": head, "REF_NAME": "main", "DEFAULT_BRANCH": "main"}
+        def snapshot_cycle(detected):
+            # Build real checkout trees from the trusted local test repository, not settings mocks.
+            for side in ("base", "head"):
+                root=pathlib.Path(t,side); shutil.rmtree(root,ignore_errors=True)
+                if detected.get(side):
+                    for file in g("ls-tree","-r","--name-only",detected[side]).splitlines():
+                        write(t,{f"{side}/{file}":g("show",f"{detected[side]}:{file}")})
+            write(t,{"review/detect.json":json.dumps(detected)})
+            def render(src,name,out,**kw):
+                write(t,{f"{out}/sch/P.svg":'<svg viewBox="0 0 20 10"><path d="M0 0H10"/></svg>', f"{out}/pcb/P-F_Cu.svg":'<svg viewBox="0 0 20 10"><path d="M0 0H10"/></svg>', f"{out}/erc.json":"{}", f"{out}/drc.json":"{}"})
+            # 02's export_glb is the only still producer: it writes the raw and served model and the poster.
+            glb = lambda p,side,out,**kw: write(t,{f"{out}/board.raw.glb":"model", f"{out}/board.glb":"model"}) or pathlib.Path(out,"poster.png").write_bytes(_dp_png)
+            os.chdir(t)
+            try:
+                assert not kr.load_settings()["design"]["enabled"], "comparison still uses disabled historical base/head config"
+                with patch.object(kr,"render_side",side_effect=render), patch.object(kr,"export_glb",side_effect=glb), patch.object(kr,"pcbdraw_run",return_value=(1, kr.PCBDRAW_NO_OUTLINE)), patch.object(kr,"project_checks",return_value=[]), patch.object(kr,"inline_page",side_effect=lambda data:'<script>'+data+'</script>'), patch("sys.stdout", new_callable=io.StringIO):
+                    kr.cmd_render(None); kr.cmd_snapshot(None)
+                data=_dp_report_data(f"review/design/kicad-design-{detected['head'][:7]}.html")
+                assert data["mode"]=="single" and data["head"]==detected["head"]
+                assert data["settings"]["design"]["enabled"] and data["projects"][0]["board"]["poster3d"]["head"]
+                assert data["projects"][0]["board"]["model3d"]["head"], "trusted snapshot configuration controls 3D even for historical head"
+            finally:
+                os.chdir(f"{t}/repo")
+        out, det = detect_run(push)
+        snapshot_cycle(det)  # first enabling push: base config is off
+        assert (out["changed"], out["review"], out["snapshot"]) == ("true", "true", "true") and det["base"] == first, out
+        assert det["snapshot"] == {"ref": "main", "sha": head, "committedAt": det["snapshot"]["committedAt"], "message": "Move R16"} and det["snapshot"]["committedAt"].startswith("20"), det
+        out, det = detect_run({**push, "REF_NAME": "feature/x"})
+        assert (out["review"], out["snapshot"]) == ("true", "false") and "snapshot" not in det, out
+        shutil.rmtree(f"{t}/review")
+        out, det = detect_run({"EVENT": "workflow_dispatch", "SNAPSHOT_ONLY": "true", "IN_HEAD": first, "IN_BASE": "", "DEFAULT_BRANCH": "main"})
+        assert (out["changed"], out["review"], out["snapshot"], out["base"]) == ("true", "false", "true", ""), out
+        assert det["base"] is None and det["head"] == first and det["projects"][0]["status"] == "added" and det["snapshot"]["ref"] == first, det
+        snapshot_cycle(det)  # snapshot_only renders a revision from before [design] existed
+        out, det = detect_run({"EVENT": "push", "TAG": "v1", "AFTER": head, "DEFAULT_BRANCH": "main"})
+        assert (out["review"], out["snapshot"], out["base"]) == ("false", "true", "") and det["base"] is None and det["snapshot"]["ref"] == "v1", out
+        write(f"{t}/repo", {"kicad-review.toml": "[design]\nenabled = true\n[release]\nreview = true\n"})
+        out, det = detect_run({"EVENT": "push", "TAG": "v1", "AFTER": head, "DEFAULT_BRANCH": "main"})
+        assert (out["review"], out["snapshot"]) == ("true", "true") and det["snapshot"]["sha"] == head, out
+        write(f"{t}/repo", {"kicad-review.toml": "[release]\nreview = false\n"})
+        for env in ({"EVENT": "workflow_dispatch", "SNAPSHOT_ONLY": "true", "IN_HEAD": first}, {"EVENT": "push", "TAG": "v1", "AFTER": head}):
+            out, _ = detect_run(env)
+            assert out == {"base": "", "head": "", "changed": "false"}, out  # design off: nothing to do, the old early exit
+        out, det = detect_run(push)
+        assert out["snapshot"] == "false" and "snapshot" not in det
+    finally:
+        os.chdir(old_cwd)
+print("ok DP-S4 snapshot events and snapshot-only runs")
+
+# DP-S4C: a revision cached as base restores trusted fabrication when it becomes head.
+with _DpTmp() as t:
+    old_cwd = os.getcwd()
+    saved = kr.load_settings, kr.release_project, kr.release_findings, kr.package_summary
+    try:
+        os.chdir(t)
+        project = {"dir":"P", "name":"P", "status":"added"}
+        historical = json.loads(json.dumps(kr.DEFAULT_SETTINGS))
+        historical["checks"]["release"] = "warn"
+        historical["fabrication"]["preset"] = "jlcpcb"
+        trusted = json.loads(json.dumps(historical)); trusted["fabrication"]["preset"] = "pcbway"
+        trusted["checks"] = {key:"off" for key in trusted["checks"]}; trusted["checks"]["release"] = "warn"
+        kr.load_settings = lambda: json.loads(json.dumps(historical))  # the comparison (base-wins) policy
+        # 07: with comparison release checks on, head carries downloads, so its revision cache is never base's.
+        compared = kr.render_settings({"snapshot_settings":trusted})
+        det = {"base":"a"*40, "head":"a"*40}
+        assert kr.render_cache(project, "head", det, compared) != kr.render_cache(project, "base", det, compared)
+        # Only the trusted snapshot asks for a package here, so base and head share one revision cache.
+        historical["checks"]["release"] = "off"
+        policy = kr.render_settings({"snapshot_settings":trusted})
+        write(t, {"base/P/P.kicad_pro":"{}"})
+        made = []
+        def produce(pro, tag, settings, directory, label):
+            preset = settings["fabrication"]["preset"]
+            made.append((directory, preset))
+            write(t, {f"{directory}/policy.json":json.dumps({"preset":preset})})
+            return []
+        kr.release_project = produce
+        kr.render_fabrication(project, "base", "review/P/base", policy)
+        det = {"base":"a"*40, "head":"a"*40}
+        cache = kr.render_cache(project, "base", det, policy)
+        pathlib.Path(cache).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree("review/P/base", cache, dirs_exist_ok=True)
+        head_cache = kr.render_cache(project, "head", det, policy)
+        assert head_cache == cache
+        shutil.copytree(head_cache, "review/P/head", dirs_exist_ok=True)  # normal revision-cache hit
+        assert made == [("review/P/base/fab-snapshot", "pcbway")], made
+        pkg = json.loads(pathlib.Path("review/P/head/fab-snapshot/policy.json").read_text())
+        assert pkg["preset"] == "pcbway" and made.count(("review/P/base", "jlcpcb")) == 0, pkg
+        assert pathlib.Path("review/P/head/fab-snapshot").is_dir(), "snapshot package must survive base-to-head cache restore"
+        write(t, {"head/P/P.kicad_pcb":_dp_pcb(""), "review/P/head/drc.json":"{}"})  # DRC output of the head render
+        kr.release_findings = lambda directory, name, preset, pcb, objects: (assert_policy(directory, preset) or [])
+        kr.package_summary = lambda directory: json.loads(pathlib.Path(directory, "policy.json").read_text())
+        def assert_policy(directory, preset):
+            assert json.loads(pathlib.Path(directory, "policy.json").read_text())["preset"] == preset
+            return None
+        release = next(c for c in kr.project_checks(project, trusted, {"base":{}, "head":{}}, single=True) if c["name"] == "release")
+        assert release["package"]["preset"] == "pcbway" and release["status"] != "missing_package", release
+    finally:
+        kr.load_settings, kr.release_project, kr.release_findings, kr.package_summary = saved
+        os.chdir(old_cwd)
+print("ok DP-S4C base-cache-to-head snapshot policy survives")
+
+# DP-S4F: historical JLCPCB and trusted PCBWay exports/checks must not cross policies.
+with _DpTmp() as t:
+    old_cwd = os.getcwd()
+    saved = kr.load_settings, kr.release_project, kr.release_findings, kr.package_summary
+    try:
+        os.chdir(t)
+        project = {"dir":"P", "name":"P", "status":"added"}
+        historical = json.loads(json.dumps(kr.DEFAULT_SETTINGS))
+        historical["checks"] = {key:"off" for key in historical["checks"]}
+        historical["checks"]["release"] = "warn"
+        historical["fabrication"]["preset"] = "jlcpcb"
+        trusted = json.loads(json.dumps(historical)); trusted["design"]["enabled"] = True
+        trusted["fabrication"]["preset"] = "pcbway"
+        write(t, {"head/P/P.kicad_pro":"{}", "head/P/P.kicad_pcb":_dp_pcb(""), "review/P/head/drc.json":"{}"})
+        kr.load_settings = lambda: json.loads(json.dumps(historical))
+        made = []
+        def produce(pro, tag, settings, directory, label):
+            preset = settings["fabrication"]["preset"]; made.append((directory, preset))
+            write(t, {f"{directory}/policy.json":json.dumps({"preset":preset})})
+            return []
+        def findings(directory, name, preset, pcb, objects):
+            assert json.loads(pathlib.Path(directory, "policy.json").read_text())["preset"] == preset
+            return []
+        kr.release_project = produce; kr.release_findings = findings
+        kr.package_summary = lambda directory: json.loads(pathlib.Path(directory, "policy.json").read_text())
+        policy = kr.render_settings({"snapshot_settings":trusted})
+        kr.render_fabrication(project, "head", "review/P/head", policy)
+        assert made == [("review/P/head/fab", "jlcpcb"), ("review/P/head/fab-snapshot", "pcbway")], made
+        objs = {"base":{}, "head":{}}
+        for single, settings, preset in ((False,historical,"jlcpcb"),(True,trusted,"pcbway")):
+            checks = kr.project_checks(project, settings, objs, single=single)
+            release = next(c for c in checks if c["name"] == "release")
+            assert release["package"]["preset"] == preset, release
+        trusted["fabrication"] = historical["fabrication"].copy(); made.clear()
+        kr.render_fabrication(project, "head", "review/P/head", kr.render_settings({"snapshot_settings":trusted}))
+        assert made == [("review/P/head/fab", "jlcpcb")], "identical policy copies, not re-exports"
+    finally:
+        kr.load_settings, kr.release_project, kr.release_findings, kr.package_summary = saved
+        os.chdir(old_cwd)
+print("ok DP-S4F fabrication packages match each report policy")
+
+# DP-S4L: historical heads without DigiKey still use trusted snapshot lookup policy.
+from unittest.mock import patch as _dp_patch
+with _DpTmp() as t:
+    old_cwd = os.getcwd()
+    saved = kr.load_settings, kr.project_objects, kr.parts_lines, kr.digikey_lookup
+    try:
+        os.chdir(t)
+        historical = json.loads(json.dumps(kr.DEFAULT_SETTINGS)); historical["digikey"]["enabled"] = False
+        trusted = json.loads(json.dumps(historical)); trusted["design"]["enabled"] = True
+        trusted["parts"]["enabled"] = True
+        trusted["digikey"].update(enabled=True, currency="CAD", site="CA")
+        det = {"projects":[{"dir":"P", "name":"P", "status":"added"}], "snapshot_settings":trusted}
+        write(t, {"review/detect.json":json.dumps(det)})
+        kr.load_settings = lambda: json.loads(json.dumps(historical))
+        kr.project_objects = lambda *args: {}
+        kr.parts_lines = lambda objects: [{"mpn":"SN74LVC1G17DBVR", "refs":["U1"]}]
+        calls = []
+        def lookup(wanted, creds, settings):
+            cfg = settings["digikey"]; calls.append((cfg["currency"],cfg["site"]))
+            return {"supplier":kr.supplier_info(cfg["currency"]), "results":{"SN74LVC1G17DBVR":{"status":"ok", "quantity":23}}}
+        kr.digikey_lookup = lookup
+        with _dp_patch.dict(os.environ, DIGIKEY_CLIENT_ID="test", DIGIKEY_CLIENT_SECRET="test"):
+            kr.cmd_lookup(None)
+            snapshot = json.loads(pathlib.Path("review/supplier-snapshot.json").read_text())
+            assert snapshot["supplier"]["currency"] == "CAD" and snapshot["results"]["SN74LVC1G17DBVR"]["quantity"] == 23
+            assert not pathlib.Path("review/supplier.json").exists()
+            projects = [{"parts":{"lines":[{"mpn":"SN74LVC1G17DBVR"}]}}]
+            kr.load_supplier(trusted, projects, "review/supplier-snapshot.json")
+            assert projects[0]["parts"]["lines"][0]["supplier"]["quantity"] == 23
+            historical["digikey"].update(enabled=True, currency="USD", site="US")
+            calls.clear(); kr.cmd_lookup(None)
+            assert calls == [("USD","US"),("CAD","CA")], calls
+            assert json.loads(pathlib.Path("review/supplier.json").read_text())["supplier"]["currency"] == "USD"
+            historical["digikey"] = trusted["digikey"].copy(); calls.clear(); kr.cmd_lookup(None)
+            assert calls == [("CAD","CA")], "identical lookup policies share one request set"
+    finally:
+        kr.load_settings, kr.project_objects, kr.parts_lines, kr.digikey_lookup = saved
+        os.chdir(old_cwd)
+print("ok DP-S4L trusted supplier results reach historical snapshots")
+
+# DP-S4M: a snapshot-only run checks downloads-snapshot/ under the trusted policy, even with release checks off.
+# 07's download_directory/download_policy_key and [downloads] section are not on this branch yet; stand-ins follow 07's interface.
+with _DpTmp() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        base_settings = json.loads(json.dumps(kr.DEFAULT_SETTINGS)); base_settings.setdefault("downloads", {"enabled": False})
+        snap = json.loads(json.dumps(base_settings))
+        snap["design"]["enabled"] = True
+        snap["downloads"]["enabled"] = True   # snap["checks"]["release"] stays "off"
+        det = {"base": None, "head": "c" * 40, "snapshot": {"ref": "main", "sha": "c" * 40, "committedAt": "", "message": ""}, "snapshot_settings": snap}
+        directory = lambda out, purpose: f"{out}/downloads" if purpose == "comparison" else f"{out}/downloads-snapshot"
+        policy_key = lambda policy: json.dumps(policy["fabrication"], sort_keys=True)
+        with patch.object(kr, "load_settings", return_value=base_settings), patch.object(kr, "download_directory", directory, create=True), patch.object(kr, "download_policy_key", policy_key, create=True):
+            settings = kr.render_settings(det)
+            purposes = kr.run_purposes(det)
+            p, cache = {"dir": "P", "name": "P", "status": "added"}, pathlib.Path("review/P/head")
+            assert purposes == ("snapshot",) and settings["_snapshot_fabrication"] == snap["fabrication"]
+            assert kr.run_purposes({"base": "a" * 40, "head": "c" * 40}) == ("comparison",)
+            assert kr.run_purposes({"base": "a" * 40, "head": "c" * 40, "snapshot": {"ref": "main"}}) == ("comparison", "snapshot")
+            assert kr.missing_products(cache, p, "head", settings, purposes) == ["fab-snapshot", "downloads-snapshot"]
+            unpolicied = {key: value for key, value in settings.items() if key != "_snapshot_fabrication"}
+            assert "downloads-snapshot" in kr.missing_products(cache, p, "head", unpolicied, purposes)
+            pathlib.Path(cache, "downloads").mkdir(parents=True)
+            pathlib.Path(cache, "downloads", "downloads.json").write_text(json.dumps({"files": [], "purpose": "comparison", "policy": kr.download_policy_key(settings)}))
+            assert "downloads-snapshot" in kr.missing_products(cache, p, "head", settings, purposes)
+            trusted = {**settings, "fabrication": settings["_snapshot_fabrication"]}
+            pathlib.Path(cache, "downloads-snapshot").mkdir(parents=True)
+            pathlib.Path(cache, "downloads-snapshot", "downloads.json").write_text(json.dumps({"files": [], "purpose": "snapshot", "policy": kr.download_policy_key(trusted)}))
+            pathlib.Path(cache, "fab-snapshot").mkdir(parents=True)
+            pathlib.Path(cache, "fab-snapshot", "P.zip").write_bytes(b"zip")
+            assert kr.missing_products(cache, p, "head", settings, purposes) == []
+            assert kr.missing_products(cache, p, "head", settings, ("comparison",)) == []
+        # 02's still and model: a 1600x1000 poster and non-empty raw+processed GLB, or the .failed marker of an attempted export.
+        write(t, {"head/P/P.kicad_pcb": _dp_pcb("")})
+        on3d = json.loads(json.dumps(kr.DEFAULT_SETTINGS)); on3d["3d"]["enabled"] = True
+        assert kr.missing_products(cache, p, "head", on3d, ("comparison",)) == ["poster", "glb"]
+        pathlib.Path(cache, "poster.png.failed").write_text("x"); pathlib.Path(cache, "board.raw.glb").write_bytes(b"glTF")
+        assert kr.missing_products(cache, p, "head", on3d, ("comparison",)) == ["glb"], "raw GLB without processed board.glb is a miss"
+        pathlib.Path(cache, "board.glb").write_bytes(b"glTF")
+        assert kr.missing_products(cache, p, "head", on3d, ("comparison",)) == []
+    finally:
+        os.chdir(old_cwd)
+print("ok DP-S4M snapshot downloads use the trusted downloads-snapshot folder")
+
+# A project file without a board or schematic intentionally produces empty fabrication directories; both policies cache that result.
+with _DpTmp() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        p = {"dir": "P", "name": "P", "status": "added"}
+        write(t, {"head/P/P.kicad_pro": "{}"})
+        cache = pathlib.Path("review/P/head")
+        (cache / "fab").mkdir(parents=True)
+        (cache / "fab-snapshot").mkdir()
+        settings = json.loads(json.dumps(kr.DEFAULT_SETTINGS))
+        settings["checks"]["release"] = "informational"
+        settings["_snapshot_fabrication"] = settings["fabrication"].copy()
+        assert kr.missing_products(cache, p, "head", settings, ("comparison",)) == []
+    finally:
+        os.chdir(old_cwd)
+print("ok pro-only projects cache intentionally empty fabrication outputs")
+
+# DP-S4P: a partial revision-cache hit exports only the missing products, never the cached images again.
+with _DpTmp() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        pr = {"dir": "P", "name": "P", "status": "modified"}
+        det = {"base": "a" * 40, "head": "b" * 40, "projects": [pr]}
+        write(t, {"review/detect.json": json.dumps(det), "base/P/P.kicad_pro": "{}", "head/P/P.kicad_pro": "{}"})
+        settings = json.loads(json.dumps(kr.DEFAULT_SETTINGS)); settings["checks"]["release"] = "informational"
+        made = []
+        def produce(pro, tag, s, directory, label):
+            made.append(directory); write(t, {f"{directory}/P-review-{s['fabrication']['preset']}-gerbers.zip": "z"}); return []
+        def fake_render_side(src, name, out, **kw):
+            write(t, {f"{out}/drc.json": "{}"})
+        with patch.object(kr, "load_settings", return_value=settings), patch.object(kr, "render_side", side_effect=fake_render_side) as rs, \
+             patch.object(kr, "release_project", side_effect=produce), patch.object(kr, "IMAGE_RENDERER", "verified-10.0.6"), \
+             patch.object(kr, "render_tool_identity", return_value="KiCad 10.0.0"), patch("sys.stdout", new_callable=io.StringIO):
+            kr.cmd_render(None); kr.cache_renders()
+            assert rs.call_count == 2 and made == ["review/P/base/fab", "review/P/head/fab"], made
+            cache = kr.render_cache(pr, "head", det, settings)
+            assert kr.render_cache_complete(cache, pr, "head", settings)
+            shutil.rmtree(cache / "fab"); shutil.rmtree("review")
+            write(t, {"review/detect.json": json.dumps(det)})
+            assert kr.missing_products(cache, pr, "head", settings, ("comparison",)) == ["fab"]
+            assert not kr.render_cache_complete(cache, pr, "head", settings), "a cache without its fabrication package is not complete"
+            made.clear(); rs.reset_mock()
+            kr.cmd_render(None)
+            assert rs.call_count == 0 and made == ["review/P/head/fab"], (rs.call_count, made)
+            # Stale preset files never survive a re-export.
+            write(t, {"review/P/head/fab/P-review-pcbway-gerbers.zip": "old", "review/P/head/fab-snapshot/P-review-pcbway-gerbers.zip": "old"})
+            kr.render_fabrication(pr, "head", "review/P/head", {**settings, "_snapshot_fabrication": settings["fabrication"]})
+            assert sorted(os.listdir("review/P/head/fab")) == sorted(os.listdir("review/P/head/fab-snapshot")) == ["P-review-jlcpcb-gerbers.zip"]
+    finally:
+        os.chdir(old_cwd)
+print("ok DP-S4P partial cache hits export only missing products")
+
+# DP-S4D: invalid trusted settings warn and set design=false instead of stopping detection.
+with tempfile.TemporaryDirectory() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        pathlib.Path("kicad-review.toml").write_text('fail_on = "sometimes"\n', encoding="utf-8")
+        err = io.StringIO()
+        with patch.dict(os.environ, {"GITHUB_OUTPUT": "outputs"}, clear=True), patch("sys.stderr", err), patch("sys.stdout", new_callable=io.StringIO), \
+             patch("kicad_review.resolve_revisions", return_value=("a" * 40, "b" * 40, "test")), patch("kicad_review.detect", return_value=[]):
+            kr.cmd_detect(None)
+        assert "design=false" in pathlib.Path("outputs").read_text() and "::warning::" in err.getvalue(), err.getvalue()
+    finally:
+        os.chdir(old_cwd)
+print("ok DP-S4D invalid settings default design to false")
+
+# DP-T1: the stdlib thumbnailer decodes every PNG filter type, box-averages the poster, and writes a PNG that decodes back.
+import argparse, struct, zlib
+def _dp_filter(rows, bpp, kinds):
+    out, prev = [], bytearray(len(rows[0]))
+    for row, kind in zip(rows, kinds):
+        enc = bytearray(len(row))
+        for i in range(len(row)):
+            a = row[i - bpp] if i >= bpp else 0
+            b = prev[i]
+            c = prev[i - bpp] if i >= bpp else 0
+            pred = {0: 0, 1: a, 2: b, 3: (a + b) // 2}.get(kind)
+            if kind == 4:
+                pa, pb, pc = abs(b - c), abs(a - c), abs(a + b - 2 * c)
+                pred = a if pa <= pb and pa <= pc else (b if pb <= pc else c)
+            enc[i] = (row[i] - pred) & 255
+        out.append(bytes([kind]) + bytes(enc))
+        prev = row
+    return b"".join(out)
+
+_dp_w, _dp_h = 4, 5
+_dp_rows = [bytes((x * 37 + y * 11 + k) & 255 for x in range(_dp_w) for k in range(3)) for y in range(_dp_h)]
+_dp_idat = zlib.compress(_dp_filter(_dp_rows, 3, [0, 1, 2, 3, 4]))
+_dp_png = (b"\x89PNG\r\n\x1a\n" + kr._png_chunk(b"IHDR", struct.pack(">IIBBBBB", _dp_w, _dp_h, 8, 2, 0, 0, 0))
+           + kr._png_chunk(b"IDAT", _dp_idat) + kr._png_chunk(b"IEND", b""))
+assert kr._png_decode(_dp_png)[3] == _dp_rows, "every filter type must unfilter to the original rows"
+thumb = kr.poster_thumbnail(_dp_png, width=2)
+tw, th, tbpp, trows = kr._png_decode(thumb)
+assert (tw, th) == (2, 2), (tw, th)
+block = [_dp_rows[y][0:3] for y in (0, 1)] + [_dp_rows[y][3:6] for y in (0, 1)]
+expected = bytes(sum(p[k] for p in block[:2] + [block[2]]) // 4 for k in range(3))
+assert trows[0][0:3] == bytes(((_dp_rows[0][0] + _dp_rows[1][0] + _dp_rows[0][3] + _dp_rows[1][3]) // 4,
+                               (_dp_rows[0][1] + _dp_rows[1][1] + _dp_rows[0][4] + _dp_rows[1][4]) // 4,
+                               (_dp_rows[0][2] + _dp_rows[1][2] + _dp_rows[0][5] + _dp_rows[1][5]) // 4)), "2 by 2 box average"
+_rgba_rows = [
+    bytes([255, 255, 255, 0, 100, 150, 200, 255]),
+    bytes([50, 60, 70, 255, 0, 0, 0, 0]),
+]
+_rgba_idat = zlib.compress(b"\0" + _rgba_rows[0] + b"\0" + _rgba_rows[1])
+_rgba_png = (b"\x89PNG\r\n\x1a\n" + kr._png_chunk(b"IHDR", struct.pack(">IIBBBBB", 2, 2, 8, 6, 0, 0, 0))
+             + kr._png_chunk(b"IDAT", _rgba_idat) + kr._png_chunk(b"IEND", b""))
+_rgba_thumb = kr.poster_thumbnail(_rgba_png, width=2)
+_rw, _rh, _rbpp, _rrows = kr._png_decode(_rgba_thumb)
+assert (_rw, _rh, _rbpp) == (2, 2, 3)
+assert _rrows[0][:3] == bytes((19, 22, 27)), "alpha 0 composites to #13161b"
+assert _rrows[0][3:6] == bytes((100, 150, 200)), "alpha 255 preserves RGB"
+for _bad_png in (
+    b"\x89PNG\r\n\x1a\nnot really",
+    b"\x89PNG\r\n\x1a\n" + kr._png_chunk(b"IHDR", struct.pack(">IIBBBBB", 4, 0, 8, 2, 0, 0, 0)) + kr._png_chunk(b"IDAT", zlib.compress(b"")) + kr._png_chunk(b"IEND", b""),
+):
+    try:
+        kr.poster_thumbnail(_bad_png)
+        raise AssertionError("a broken or 0-dimension PNG must raise ValueError or zlib/struct errors")
+    except (ValueError, zlib.error, struct.error):
+        pass
+print("ok DP-T1 stdlib PNG filters, box average, refusal")
+
+# DP-T2: the index keeps the newest 50 snapshots per folder, replaces a re-run sha, and skips a poster it cannot decode.
+with _DpTmp() as t:
+    pathlib.Path(t, "root.png").write_bytes(_dp_png)
+    pathlib.Path(t, "A.png").write_bytes(_dp_png)
+    pathlib.Path(t, "bad.png").write_bytes(b"not a png")
+    index = {}
+    for n in range(60):
+        plan = {"sha": f"{n:040x}", "committedAt": "2026-10-24T10:00:00Z", "projects": [{"dir": "", "poster": "root.png"}, {"dir": "A", "poster": "A.png"}]}
+        index = kr.thumbnail_index(index, plan, t)
+    assert len(index["projects"]["."]) == 50 and index["projects"]["."][0]["sha"] == f"{59:040x}" and index["projects"]["."][0]["date"] == "2026-10-24T10:00:00Z"
+    assert len(index["projects"]["A"]) == 50
+    again = kr.thumbnail_index(index, {"sha": f"{59:040x}", "committedAt": "x", "projects": [{"dir": "", "poster": "root.png"}]}, t)
+    assert len(again["projects"]["."]) == 50 and sum(1 for e in again["projects"]["."] if e["sha"] == f"{59:040x}") == 1
+    with patch("sys.stderr", new_callable=io.StringIO) as _err:
+        skipped = kr.thumbnail_index({}, {"sha": "a" * 40, "committedAt": "x", "projects": [{"dir": "B", "poster": "bad.png"}]}, t)
+    assert "B" not in skipped["projects"] and "::notice::No thumbnail for B:" in _err.getvalue()
+    _idx_path = pathlib.Path(t, "thumbs.json")
+    _plan_path = pathlib.Path(t, "thumbnail-plan.json")
+    _idx_path.write_text("{}")
+    _plan_path.write_text(json.dumps({"sha": "f" * 40, "committedAt": "2026-10-25T00:00:00Z", "projects": [{"dir": "A", "poster": "A.png"}]}))
+    kr.cmd_thumbs(argparse.Namespace(index=str(_idx_path), plan=str(_plan_path)))
+    _merged = json.loads(_idx_path.read_text())
+    assert _merged["v"] == 1 and _merged["projects"]["A"][0]["sha"] == "f" * 40
+    _idx_path.write_text("not json")
+    try:
+        kr.cmd_thumbs(argparse.Namespace(index=str(_idx_path), plan=str(_plan_path)))
+        raise AssertionError("unparseable index must raise")
+    except ValueError:
+        pass
+    assert kr._thumb_src_stem("") == "root" and kr._thumb_src_stem("a/b") != kr._thumb_src_stem("a_b")
+print("ok DP-T2 thumbnail index: cap, replace, skip")
+
+# DP-T3: the thumbnail jobs are separate from the review; only the fold into the one release asset is serialized per repository.
+_wf_t = pathlib.Path(".github/workflows/review.yml").read_text(encoding="utf-8")
+assert "concurrency:\n      group: kicad-design-thumbs-${{ github.repository }}" in _wf_t
+_stage_t = _wf_t.split("\n  design-thumbnails:\n")[1].split("\n  design-thumbnail-index:\n")[0]
+_thumbs_job = _wf_t.split("\n  design-thumbnail-index:\n")[1]
+assert "cancel-in-progress: false" in _thumbs_job.split("steps:")[0]
+for job in (_stage_t, _thumbs_job):
+    assert "timeout-minutes: 10" in job.split("steps:")[0]
+    assert "permissions:\n      contents: write" in job.split("steps:")[0]
+assert "path: review/design" in _stage_t
+assert "assets=$(gh release view design-thumbs -R \"$GITHUB_REPOSITORY\" --json assets -q '.assets[].name')" in _thumbs_job
+assert "if echo \"$assets\" | grep -qx thumbs.json; then" in _thumbs_job
+assert "python3 tools/kicad_review.py thumbs --index review/thumbs/thumbs.json --pending review/thumbs/staged" in _thumbs_job
+assert "gh release upload design-thumbs -R \"$GITHUB_REPOSITORY\" --clobber review/thumbs/thumbs.json" in _wf_t
+assert "overwrite: true" in _wf_t.split("Upload thumbnail input")[1].split("retention-days: 1")[1][:50]
+assert "--prerelease" in _wf_t and "design-thumbs" in _wf_t
+print("ok DP-T3 thumbnail job wiring")
+
+# DP-S8: the four-layer scene in ui/checks.mjs is what board_geometry() makes of the fixture, so the browser check tests the real shape.
+_checks = pathlib.Path("ui/checks.mjs").read_text(encoding="utf-8")
+_literal = _dpre.search(r"const DESIGN_FOUR_LAYER_SCENE = '(.*)';", _checks).group(1)
+assert json.loads(_literal) == kr.board_geometry("ui/fixtures/vf-order-4.kicad_pcb"), "refresh DESIGN_FOUR_LAYER_SCENE from the fixture"
+print("ok DP-S8 four-layer scene matches the fixture")
 
 # FAB-01 integration: actual fixture + parsed settings, separately opt-in and no KiCad required.
 if os.environ.get("KICAD_REVIEW_FAB_INTEGRATION") == "1":
@@ -10653,6 +11683,9 @@ with tempfile.TemporaryDirectory() as d, patch.object(kr, "IMAGE_RENDERER", "ver
         dl_set["downloads"]["enabled"] = True
         rel_set = copy.deepcopy(DEFAULT_SETTINGS)
         rel_set["checks"]["release"] = "informational"
+        # 06's missing_products also validates the head's other products; give the fixture those, so only the raw GLB varies.
+        (c / "downloads").mkdir(); kr.write_download_manifest(str(c / "downloads"), [], policy=dl_set)
+        (c / "fab").mkdir(); (c / "fab" / "P-review-jlcpcb-gerbers.zip").write_bytes(b"zip")
         # downloads.enabled requires board.raw.glb on head
         assert not kr.render_cache_complete(c, prj, "head", dl_set), "head downloads requires board.raw.glb"
         (c / "board.raw.glb").write_bytes(b"")
@@ -10829,8 +11862,6 @@ with tempfile.TemporaryDirectory() as d:
                     kr.cmd_report(None)
                 after_html = pathlib.Path("review/kicad-review.html").read_bytes()
                 ui_overhead = len(after_html) - len(main_html)
-                # Ask (09) merged after fe2206c and ships its own always-on UI: subtract the report growth of 09's
-                # branch over its merge base (205159f over 10ffebe) so this still bounds the Download UI alone.
                 def report_bytes_at(commit):
                     with tempfile.TemporaryDirectory(prefix=f"report-{commit}-") as tree:
                         archive = subprocess.run(["git", "-C", str(repo_dir), "archive", commit, "kicad_review.py", "ui", "image-palettes.json"], check=True, capture_output=True).stdout
@@ -10841,12 +11872,20 @@ with tempfile.TemporaryDirectory() as d:
                         with patch.object(mod, "load_settings", return_value=copy.deepcopy(mod.DEFAULT_SETTINGS)):
                             mod.cmd_report(None)
                         return len(pathlib.Path("review/kicad-review.html").read_bytes())
+                # Design pages and Ask both add always-on UI after fe2206c; subtract each branch's growth so
+                # this assertion continues to bound only the Download UI introduced by this test section.
+                if all(subprocess.run(["git", "-C", str(repo_dir), "cat-file", "-e", f"{c}^{{commit}}"], capture_output=True).returncode == 0 for c in ("10ffebe", "b88d357")):
+                    ui_overhead -= report_bytes_at("b88d357") - report_bytes_at("10ffebe")
+                else:
+                    print("skip 06 design-page byte subtraction: 10ffebe or b88d357 not present in this checkout")
                 if all(subprocess.run(["git", "-C", str(repo_dir), "cat-file", "-e", f"{c}^{{commit}}"], capture_output=True).returncode == 0 for c in ("205159f", "10ffebe")):
                     ask_overhead = report_bytes_at("205159f") - report_bytes_at("10ffebe")
                     assert 0 < ask_overhead < ui_overhead, (ask_overhead, ui_overhead)
                     ui_overhead -= ask_overhead
-                    with patch("kicad_review.load_settings", return_value=copy.deepcopy(DEFAULT_SETTINGS)):
-                        kr.cmd_report(None)  # restore the current report for the checks below
+                else:
+                    print("skip 09 Ask byte subtraction: 205159f or 10ffebe not present in this checkout")
+                with patch("kicad_review.load_settings", return_value=copy.deepcopy(DEFAULT_SETTINGS)):
+                    kr.cmd_report(None)  # restore the current report for the checks below
                 assert 0 < ui_overhead < 12000, f"always-on Download UI must add less than 12 KB uncompressed (overhead: {ui_overhead})"
 
         if saved_main_path is not None and not os.environ.get("DOWNLOADS_MAIN_BASELINE"):
@@ -10984,6 +12023,349 @@ assert "[downloads]\nenabled = false" in example and "step = true" in example
 assert "docs/superpowers" not in readme, "plan paths stay out of shipped assets"
 assert "02's" not in readme, "plan numbers stay out of shipped assets"
 print("ok downloads documented")
+
+# DP-S3I: the snapshot integrates 01's assets and 07's downloads under its own report family; Ask stays an inert hook without 09.
+with _DpTmp() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        head = "c" * 40
+        for side, line in (("base", "M0 0H5"), ("head", "M0 0H9")):
+            write(t, {f"{side}/H/H.kicad_sch": '(kicad_sch (sheet_instances (path "/" (page "1"))))', f"{side}/H/H.kicad_pcb": _dp_pcb(""),
+                      f"{side}/H/H.kicad_pro": "{}", f"review/H/{side}/sch/H.svg": f'<svg viewBox="0 0 100 50"><path d="{line}"/></svg>',
+                      f"review/H/{side}/pcb/H-F_Cu.svg": f'<svg viewBox="0 0 10 10"><path d="{line}"/></svg>',
+                      f"review/H/{side}/erc.json": _dp_erc("u-" + side, "pin_not_connected"), f"review/H/{side}/drc.json": "{}"})
+        pathlib.Path("review/H/head/poster.png").write_bytes(_dp_png)
+        snap = json.loads(json.dumps(kr.DEFAULT_SETTINGS)); snap["design"]["enabled"] = True; snap["downloads"]["enabled"] = True
+        det = {"base": "b" * 40, "head": head, "reason": "push: new commit vs previous branch tip",
+               "snapshot": {"ref": "main", "sha": head, "committedAt": "2026-10-24T10:00:00+00:00", "message": "Move R16"},
+               "projects": [{"dir": "H", "name": "H", "status": "modified"}, {"dir": "Gone", "name": "Gone", "status": "removed"}]}
+        # 07's per-render manifests: the comparison's downloads/ and the trusted snapshot policy's downloads-snapshot/.
+        def _dp_stage(folder, content, purpose):
+            os.makedirs(folder, exist_ok=True)
+            pathlib.Path(folder, "fab-H-ccccccc.zip").write_bytes(content)
+            kr.write_download_manifest(folder, [{"kind": "fab", "label": "For fabrication", "file": "fab-H-ccccccc.zip", "error": None}], policy=snap, purpose=purpose)
+        _dp_stage("review/H/head/downloads", b"comparison zip", "comparison")
+        _dp_stage("review/H/head/downloads-snapshot", b"snapshot zip", "snapshot")
+        _dp_env = {"GITHUB_REPOSITORY": "o/r", "GITHUB_RUN_ID": "7", "GITHUB_SERVER_URL": "https://github.com"}
+        def _dp_snapshot(settings, output):
+            det["snapshot_settings"] = settings
+            write(t, {"review/detect.json": json.dumps(det)})
+            with patch.dict(os.environ, {**_dp_env, "GITHUB_OUTPUT": output}, clear=True), patch("sys.stdout", new_callable=io.StringIO), \
+                 patch.object(kr, "finalize_report", wraps=kr.finalize_report) as finalize:
+                kr.cmd_snapshot(None)
+            return finalize, dict(row.split("=", 1) for row in open(output).read().splitlines())
+        _dp_no_context = lambda: not list(pathlib.Path("review").rglob("*.context.json")) and not os.path.exists("review/design-context.json")
+        for n, ask in enumerate((None, {"enabled": False}, {"enabled": True})):  # 09 absent: the [ask] table never turns anything on
+            settings = json.loads(json.dumps(snap))
+            if ask is not None:
+                settings["ask"] = ask
+            shutil.rmtree("review/design", ignore_errors=True)
+            finalize, outputs = _dp_snapshot(settings, f"{t}/out-ask-{n}")
+            assert finalize.call_count == 1 and finalize.call_args.args[1] == "review/design/assets", finalize.call_args_list
+            assert outputs == {"built": "true", "name": "kicad-design-ccccccc.html", "thumbnails": "true", "ask": "false", "downloads": "true",
+                               "downloads_name": "kicad-design-downloads-ccccccc"}, outputs
+            assert _dp_no_context(), "06 writes no context file"
+            data = _dp_report_data("review/design/kicad-design-ccccccc.html")
+            assert "assets" in data and "ask" not in data["settings"], (sorted(data), sorted(data["settings"]))
+            assert data["report"] == {"kind": "design", "head": head, "projects": [{"index": 0, "dir": "H", "name": "H"}]}, data.get("report")
+            files = data["projects"][0]["downloads"]
+            assert [(f["artifact"], f["path"]) for f in files] == [("kicad-design-downloads-ccccccc", "0/fab-H-ccccccc.zip")], files
+            assert files[0]["sha256"] == hashlib.sha256(b"snapshot zip").hexdigest(), "the snapshot reads downloads-snapshot/, never the comparison's downloads/"
+            assert json.loads(pathlib.Path("review/design-downloads/0/downloads.json").read_text())["head"] == head
+            assert not os.path.exists("review/downloads"), "a snapshot never writes the comparison bundle"
+        # Snapshot-only run with downloads off: no bundle, no context, ask=false and no context_name.
+        shutil.rmtree("review/design"); shutil.rmtree("review/design-downloads")
+        det["base"], det["reason"] = None, kr.SNAPSHOT_REASON
+        off = json.loads(json.dumps(snap)); off["downloads"]["enabled"] = False; off["ask"] = {"enabled": True}
+        _, outputs = _dp_snapshot(off, f"{t}/out-off")
+        assert outputs["ask"] == "false" and outputs["downloads"] == "false" and "context_name" not in outputs, outputs
+        assert not os.path.exists("review/design-downloads") and _dp_no_context()
+        assert "downloads" not in _dp_report_data("review/design/kicad-design-ccccccc.html")["projects"][0]
+        # Comparison plus snapshot in one run: separate folders, artifact names and file hashes; neither overwrites the other.
+        det["base"], det["reason"] = "b" * 40, "push: new commit vs previous branch tip"
+        def _dp_report():
+            write(t, {"review/detect.json": json.dumps(det)})
+            with patch.dict(os.environ, {**_dp_env, "GITHUB_OUTPUT": f"{t}/out-report"}, clear=True), patch("sys.stdout", new_callable=io.StringIO), \
+                 patch.object(kr, "load_settings", return_value=json.loads(json.dumps(snap))):
+                kr.cmd_report(None)
+        _dp_report()
+        _dp_snapshot(snap, f"{t}/out-both")
+        _dp_report()  # a second comparison build must leave the design bundle alone
+        compared = json.loads(pathlib.Path("review/downloads/0/downloads.json").read_text())["files"]
+        designed = json.loads(pathlib.Path("review/design-downloads/0/downloads.json").read_text())["files"]
+        assert compared[0]["artifact"] == "kicad-review-downloads-ccccccc" != designed[0]["artifact"] == "kicad-design-downloads-ccccccc", (compared, designed)
+        assert compared[0]["sha256"] != designed[0]["sha256"]
+        assert pathlib.Path("review/downloads/0/fab-H-ccccccc.zip").read_bytes() == b"comparison zip"
+        assert pathlib.Path("review/design-downloads/0/fab-H-ccccccc.zip").read_bytes() == b"snapshot zip"
+        assert _dp_no_context()
+        # A failed design downloads upload: drop-downloads --design rewrites both snapshot names and nothing of the comparison's.
+        not_stored = kr.DOWNLOADS_NOT_STORED
+        design_pages = ("review/design/kicad-design-ccccccc.html", "review/design/design-snapshot.html")
+        before_design = {path: pathlib.Path(path).read_text(encoding="utf-8") for path in design_pages}
+        comparison = {path: pathlib.Path(path).read_bytes() for path in ("review/kicad-review.html", "review/data.json")}
+        assert all(_dp_report_data(path)["projects"][0]["downloads"][0].get("path") for path in design_pages)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            kr.cmd_drop_downloads(argparse.Namespace(design=True))
+        assert out.getvalue().startswith("::warning::Design download files were not stored"), out.getvalue()
+        for path in design_pages:
+            data = _dp_report_data(path)
+            assert data["projects"][0]["downloads"] == [{"kind": "fab", "label": "For fabrication", "error": not_stored}], data["projects"][0]["downloads"]
+            assert data["report"]["kind"] == "design" and data["snapshot"] == det["snapshot"], "only the download rows change"
+            marker = "<script>window.REVIEW_DATA = "
+            old, new = before_design[path], pathlib.Path(path).read_text(encoding="utf-8")
+            assert old[:old.index(marker)] == new[:new.index(marker)] and old[old.index("</script>", old.index(marker)):] == new[new.index("</script>", new.index(marker)):], path
+        assert {path: pathlib.Path(path).read_bytes() for path in comparison} == comparison, "the comparison report keeps its downloads"
+        # And the comparison's own drop leaves the design page alone.
+        dropped_design = {path: pathlib.Path(path).read_bytes() for path in design_pages}
+        with contextlib.redirect_stdout(io.StringIO()):
+            kr.cmd_drop_downloads(argparse.Namespace(design=False))
+        assert json.loads(pathlib.Path("review/data.json").read_text())["projects"][0]["downloads"] == [{"kind": "fab", "label": "For fabrication", "error": not_stored}]
+        assert {path: pathlib.Path(path).read_bytes() for path in design_pages} == dropped_design
+        # The render's trusted downloads-snapshot manifest carries the key cmd_snapshot verifies, even when the comparison's step differs.
+        historical = json.loads(json.dumps(kr.DEFAULT_SETTINGS)); historical["downloads"]["step"] = False
+        with patch.object(kr, "load_settings", return_value=historical):
+            rendered = kr.render_settings({"snapshot_settings": snap})
+        assert kr.download_policy_key(kr.snapshot_download_policy(rendered)) == kr.download_policy_key(snap)
+        assert kr.snapshot_download_policy({**rendered, "_snapshot_fabrication": None}) is None
+    finally:
+        os.chdir(old_cwd)
+print("ok DP-S3I snapshot integrates assets and downloads without Ask")
+
+# DP-S7: the reusable workflow wires the snapshot in without touching what comparison runs do.
+_wf = pathlib.Path(".github/workflows/review.yml").read_text(encoding="utf-8")
+for line in ("          SNAPSHOT_ONLY: ${{ github.event.inputs.snapshot_only }}", "          REF_NAME: ${{ github.ref_name }}",
+             "        if: steps.detect.outputs.snapshot == 'true'", "        run: python3 tools/kicad_review.py snapshot",
+             "        if: steps.snapshot.outputs.built == 'true'", "          path: review/design/${{ steps.snapshot.outputs.name }}",
+             "          retention-days: ${{ vars.KICAD_REVIEW_SNAPSHOT_DAYS || 90 }}",
+             "            gh release upload \"$GITHUB_REF_NAME\" -R \"$GITHUB_REPOSITORY\" --clobber review/design/design-snapshot.html"):
+    assert line in _wf, line
+for step in ("Build comparison report and checks", "Copy named report", "Upload report", "Screenshots of changed drawings", "Publish screenshots", "Job summary"):
+    body = _wf[_wf.index("- name: " + step):].split("\n      - name:")[0]
+    assert "if: steps.detect.outputs.review == 'true'" in body, step
+for step in ("Render both revisions and run ERC/DRC", "Cache final rendered outputs"):  # snapshot-only runs still render and cache
+    assert "if: steps.detect.outputs.changed == 'true'" in _wf[_wf.index("- name: " + step):].split("\n      - name:")[0], step
+assert _wf.index("- name: Upload report") < _wf.index("- name: Build design snapshot") < _wf.index("- name: Screenshots of changed drawings")
+assert "snapshot_only" not in _wf.split("workflow_call:")[1].split("jobs:")[0], "the reusable workflow takes no input of its own: the caller's event inputs are read"
+_caller = pathlib.Path("examples/kicad-review.yml").read_text(encoding="utf-8")
+assert "snapshot_only:" in _caller and "type: boolean" in _caller and "required: false" in _caller.split("base:")[1].split("head:")[0]
+# Optional Ask hook: 06 emits ask=false with no context_name, even if settings request Ask; no 09 producer is required.
+# Keep the guard/name/path contract for 09 to enable after 06 merges and the owner records build hosted Ask.
+# The ask=true branch below is a static reserved-contract check, not a requirement to build 09 or upload real context in 06.
+assert "          name: ${{ steps.snapshot.outputs.name }}" in _wf, "the HTML artifact must carry its design name, which 09's loadContext reads"
+_ctx = _wf[_wf.index("- name: Upload design snapshot context"):].split("\n      - name:")[0]
+assert "        if: steps.snapshot.outputs.ask == 'true'" in _ctx and "        continue-on-error: true" in _ctx, _ctx   # ask on: uploads; ask off: the guard skips the step
+assert "          archive: false" in _ctx and "          name: ${{ steps.snapshot.outputs.context_name }}" in _ctx, _ctx
+assert "          path: review/design/${{ steps.snapshot.outputs.context_name }}" in _ctx and "          retention-days: ${{ vars.KICAD_REVIEW_SNAPSHOT_DAYS || 90 }}" in _ctx, _ctx
+assert _wf.index("- name: Upload design snapshot") < _wf.index("- name: Upload design snapshot context") < _wf.index("- name: Screenshots of changed drawings")
+# ask on: the context step's only condition is the ask guard, so it uploads kicad-design-<sha7>.context.json (named by context_name, which 09's loadContext computes from the HTML name)
+assert [line.strip() for line in _ctx.splitlines() if line.strip().startswith("if:")] == ["if: steps.snapshot.outputs.ask == 'true'"], _ctx
+# ask off: Task 4A's DP-S3I snapshot-only run with ask off emits ask=false and no context_name, so this guard is false and no context artifact is uploaded
+# the HTML upload must not carry the context, and context_name appears only in the guarded context upload
+assert "context_name" not in _wf[_wf.index("- name: Upload design snapshot"):_wf.index("- name: Upload design snapshot context")], "the HTML upload must not carry the context"
+assert _wf.count("steps.snapshot.outputs.context_name") == 2, "context_name appears only in the guarded context upload"
+# 4A's design downloads bundle (kicad-design-downloads-<sha7>, what the site's download route looks up) is uploaded beside the snapshot,
+# and the snapshot is built before the digest-keyed 3D upload, so a hosted design page can lazily load its 3D assets from the same run.
+_dl = _wf[_wf.index("- name: Upload design downloads"):].split("\n      - name:")[0]
+for line in ("        if: steps.snapshot.outputs.downloads == 'true'", "          name: ${{ steps.snapshot.outputs.downloads_name }}",
+             "          path: review/design-downloads", "          compression-level: 0", "          retention-days: ${{ vars.KICAD_REVIEW_SNAPSHOT_DAYS || 90 }}"):
+    assert line in _dl, line
+assert _wf.index("- name: Build design snapshot") < _wf.index("- name: Upload design downloads") < _wf.index("- name: Upload digest-keyed 3D assets")
+# Like the comparison's downloads: uploaded before the snapshot it is listed in, and dropped from it when the upload fails.
+assert _wf.index("- name: Build design snapshot") < _wf.index("- name: Upload design downloads") < _wf.index("- name: Drop unstored design downloads from the snapshot") < _wf.index("- name: Upload design snapshot\n")
+assert "        id: design_downloads\n" in _dl and "        continue-on-error: true\n" in _dl, _dl
+_drop_design = _wf[_wf.index("- name: Drop unstored design downloads from the snapshot"):].split("\n      - name:")[0]
+assert "        if: steps.design_downloads.outcome == 'failure'\n" in _drop_design and "        run: python3 tools/kicad_review.py drop-downloads --design" in _drop_design, _drop_design
+assert "continue-on-error" not in _drop_design, "a failed rewrite must not leave a snapshot that links files that were never stored"
+print("ok DP-S7 workflow wiring")
+
+# A tag whose fabrication outputs fail still attaches its design snapshot; the fabrication attachment keeps its own gate.
+def _dp_gh_if(expression, context):
+    """Evaluate the subset of GitHub expression syntax these step conditions use."""
+    text = expression.strip()
+    if text.startswith("${{"):
+        text = text[3:].rsplit("}}", 1)[0]
+    text = _dpre.sub(r"\b(?:steps|github|vars)\.[A-Za-z0-9_.-]+", lambda m: f"_ctx({m.group(0)!r})", text)
+    text = _dpre.sub(r"!(?!=)", " not ", text).replace("&&", " and ").replace("||", " or ")
+    text = _dpre.sub(r"\bstartsWith\(", "_starts(", text)
+    return eval(text, {"__builtins__": {}}, {"always": lambda: True, "cancelled": lambda: False,
+                                             "_starts": lambda a, b: str(a).startswith(b), "_ctx": lambda key: context.get(key, "")})
+_step_if = lambda name: next(line.strip()[len("if: "):] for line in _wf[_wf.index("- name: " + name + "\n"):].split("\n      - name:")[0].splitlines()
+                             if line.strip().startswith("if: "))
+_attach, _attach_snapshot = _step_if("Attach to the GitHub release"), _step_if("Attach the design snapshot to the GitHub release")
+_tag = {"github.ref": "refs/tags/v1.0", "steps.fabrication.outcome": "failure", "steps.snapshot.outcome": "success", "steps.snapshot.outputs.built": "true"}
+assert not _dp_gh_if(_attach, _tag) and _dp_gh_if(_attach_snapshot, _tag), (_attach, _attach_snapshot)
+assert _dp_gh_if(_attach, {**_tag, "steps.fabrication.outcome": "success"}) and _dp_gh_if(_attach_snapshot, {**_tag, "steps.fabrication.outcome": "success"})
+for other in ({"github.ref": "refs/heads/main"}, {"steps.snapshot.outcome": "skipped", "steps.snapshot.outputs.built": ""}, {"steps.snapshot.outputs.built": "false"}):
+    assert not _dp_gh_if(_attach_snapshot, {**_tag, **other}), other
+_attach_body = _wf[_wf.index("- name: Attach to the GitHub release\n"):].split("\n      - name:")[0]
+assert "design-snapshot.html" not in _attach_body and "release/*" in _attach_body, "fabrication attachment behaviour is unchanged"
+assert _wf.index("- name: Attach to the GitHub release\n") < _wf.index("- name: Attach the design snapshot to the GitHub release")
+print("ok tagged design snapshot attachment is independent of fabrication")
+
+# DP-S6: the setting and its routes are documented where a user looks.
+_readme = pathlib.Path("README.md").read_text(encoding="utf-8")
+for wording in ("## Design page (optional)", "`design.enabled`", "kicad-design-<sha7>.html", "KICAD_REVIEW_SNAPSHOT_DAYS", "design-snapshot.html", "snapshot_only", "Render this revision", "Compare with newest", "/p/<folder>/design", "KiCad changes", "design-thumbs", "PcbDraw", "defaults to 90", "design-release/<tag>"):
+    assert wording in _readme, wording
+_example = pathlib.Path("examples/kicad-review.toml").read_text(encoding="utf-8")
+assert "[design]" in _example and "enabled = false" in _example.split("[design]")[1]
+_site_readme = pathlib.Path("site/README.md").read_text(encoding="utf-8")
+assert "## Design pages (optional)" in _site_readme
+for text in (_readme, _site_readme):
+    for wording in ("downloadable and usable offline", "gh release download TAG", "--pattern design-snapshot.html", "defaults to 90"):
+        assert wording in text, wording
+    assert "currently depends on a live Actions artifact" not in text, "release fallback is implemented (decision 5)"
+    assert "owner-gated" not in text and "owner-approved scope reduction" not in text, "approved decisions are recorded, not gated"
+print("ok DP-S6 design setting and routes are documented")
+
+# Session E 4: the thumbnail source is the render folder's head poster (review/<project id>/head), not review/<project name>.
+with _DpTmp() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        head = "d" * 40
+        posters = {"": b"\x89PNG\r\n\x1a\nroot poster", "hw/main": b"\x89PNG\r\n\x1a\nnested poster"}
+        for folder, body in posters.items():
+            out = pathlib.Path("review", kr.project_id(folder), "head"); out.mkdir(parents=True)
+            (out / "poster.png").write_bytes(body)
+        settings = json.loads(json.dumps(kr.DEFAULT_SETTINGS)); settings["design"]["enabled"] = True
+        det = {"base": None, "head": head, "reason": kr.SNAPSHOT_REASON, "snapshot_settings": settings,
+               "snapshot": {"ref": "main", "sha": head, "committedAt": "2026-11-01T10:00:00+00:00", "message": "m"},
+               "projects": [{"dir": "", "name": "board", "status": "added"}, {"dir": "hw/main", "name": "main", "status": "added"}]}
+        write(t, {"review/detect.json": json.dumps(det)})
+        stub = lambda p, blobs, settings, waivers=None, change_offset=0, bom_sink=None, **kw: {"name": p["name"], "dir": p["dir"], "status": p["status"], "sheets": [], "board": {}, "changes": [], "checks": []}
+        with patch.dict(os.environ, {"GITHUB_OUTPUT": f"{t}/out"}, clear=True), patch("sys.stdout", new_callable=io.StringIO), patch.object(kr, "build_project", side_effect=stub):
+            kr.cmd_snapshot(None)
+        assert "thumbnails=true" in open(f"{t}/out").read()
+        plan = json.load(open("review/design/thumbnail-plan.json"))
+        assert [p["dir"] for p in plan["projects"]] == ["", "hw/main"], plan
+        assert [pathlib.Path(p["poster"]).read_bytes() for p in plan["projects"]] == [posters[""], posters["hw/main"]]
+    finally:
+        os.chdir(old_cwd)
+print("ok Session E 4 thumbnails read the render folder's head poster")
+
+# Session E 15: thumbnail source file names are injective, so two folders never share one poster file.
+_stems = ["", "root", "_root", "a/b", "a_b", "a/_b", "a_/b", "a__b", "a/__b", "a___b", "R F/ü", "R_20F/ü", "x.y-z"]
+_named = [kr._thumb_src_stem(folder) for folder in _stems]
+assert len(set(_named)) == len(_stems), dict(zip(_stems, _named))
+assert all(_dpre.fullmatch(r"[A-Za-z0-9._-]+", stem) for stem in _named), _named
+assert kr._thumb_src_stem("") == "root" and kr._thumb_src_stem("H") == "H" and kr._thumb_src_stem("x.y-z") == "x.y-z"
+print("ok Session E 15 thumbnail source names never collide")
+
+# Session E 5: a thumbnail the review site would drop (over THUMB_PNG_B64_MAX base64 characters) is never written.
+import random as _dprandom
+assert kr.THUMB_PNG_B64_MAX == 40000
+assert "export const THUMB_PNG_B64_MAX = 40000;" in pathlib.Path("site/design.js").read_text(encoding="utf-8"), "site and producer share one limit"
+_dp_rng = _dprandom.Random(5)
+_dp_noise_rows = [bytes(_dp_rng.randrange(256) for _ in range(400 * 3)) for _ in range(250)]
+_dp_noise = kr._png_rgb(400, 250, _dp_noise_rows)
+with _DpTmp() as t:
+    pathlib.Path(t, "noise.png").write_bytes(_dp_noise)
+    plan = {"sha": "e" * 40, "committedAt": "2026-11-01T00:00:00Z", "projects": [{"dir": "N", "poster": "noise.png"}]}
+    with patch("sys.stderr", new_callable=io.StringIO):
+        entry = kr.thumbnail_index({}, plan, t)["projects"]["N"][0]
+    assert 0 < len(entry["png"]) <= kr.THUMB_PNG_B64_MAX, len(entry["png"])
+    w, h, bpp, rows = kr._png_decode(base64.b64decode(entry["png"]))
+    assert bpp == 3 and 0 < w < 200, w   # noise only fits once shrunk
+# Rows are filtered (Sub/Up/Average/Paeth chosen per row) and still decode to the same pixels.
+_dp_grad = [bytes((x + y) % 256 for x in range(300) for _ in range(3)) for y in range(120)]
+_dp_grad_png = kr._png_rgb(300, 120, _dp_grad)
+assert kr._png_decode(_dp_grad_png)[3] == _dp_grad
+_dp_idat = zlib.decompress(_dp_grad_png[_dp_grad_png.index(b"IDAT") + 4:_dp_grad_png.index(b"IEND") - 8])
+assert any(_dp_idat[y * (1 + 300 * 3)] != 0 for y in range(120)), "every row was left unfiltered"
+print("ok Session E 5 thumbnails stay within the review site's limit")
+
+# Session E 16: a PcbDraw failure is not cached for good; a missing outline (deterministic) is.
+with _DpTmp() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        pr = {"dir": "P", "name": "P", "status": "added"}
+        det = {"base": None, "head": "b" * 40, "reason": "t", "projects": [pr]}
+        write(t, {"review/detect.json": json.dumps(det), "head/P/P.kicad_pcb": _dp_pcb("")})
+        settings = json.loads(json.dumps(kr.DEFAULT_SETTINGS)); settings["design"]["enabled"] = True
+        cache = pathlib.Path("probe"); cache.mkdir()
+        (cache / "poster.png.failed").write_text("x")
+        assert kr.missing_products(cache, pr, "head", settings, ("comparison",)) == ["pcbdraw"], "no PcbDraw record yet"
+        for note, expected in (("", []), ("PcbDraw skipped: no closed Edge.Cuts outline.", []),
+                               ("PcbDraw failed for both faces: see the job log.", ["pcbdraw"]), ("PcbDraw failed for back face: see the job log.", ["pcbdraw"])):
+            (cache / "pcbdraw.json").write_text(json.dumps({"note": note}))
+            assert kr.missing_products(cache, pr, "head", settings, ("comparison",)) == expected, (note, expected)
+        plotted = []
+        def plot(outcome):
+            def run(argv):
+                out = _dpre.search(r'"([^"]+\.svg)"\]; run', argv[2]).group(1)
+                plotted.append(pathlib.Path(out).name)
+                if outcome == "ok":
+                    pathlib.Path(out).write_text('<svg xmlns="http://www.w3.org/2000/svg"/>')
+                    return 0, ""
+                return 1, "boom"
+            return run
+        glb = lambda p, side, out, **kw: (pathlib.Path(out).mkdir(parents=True, exist_ok=True), pathlib.Path(out, "poster.png.failed").write_text("x"))
+        render = lambda src, name, out, **kw: (pathlib.Path(out).mkdir(parents=True, exist_ok=True), pathlib.Path(out, "drc.json").write_text("{}"))
+        with patch.object(kr, "load_settings", return_value=settings), patch.object(kr, "render_side", side_effect=render) as rs, \
+             patch.object(kr, "export_glb", side_effect=glb), patch.object(kr, "IMAGE_RENDERER", "verified-10.0.6"), \
+             patch.object(kr, "render_tool_identity", return_value="KiCad 10.0.0"), patch("sys.stdout", new_callable=io.StringIO), patch("sys.stderr", new_callable=io.StringIO):
+            with patch.object(kr, "pcbdraw_run", side_effect=plot("fail")):
+                kr.cmd_render(None)
+            assert json.loads(pathlib.Path("review/P/head/pcbdraw.json").read_text())["note"].startswith("PcbDraw failed")
+            shutil.rmtree("review/P"); plotted.clear(); rs.reset_mock()
+            with patch.object(kr, "pcbdraw_run", side_effect=plot("ok")):
+                kr.cmd_render(None)   # the revision cache hit retries the plots instead of keeping the failure
+            assert rs.call_count == 0 and plotted == ["pcbdraw-front.svg", "pcbdraw-back.svg"], (rs.call_count, plotted)
+            assert json.loads(pathlib.Path("review/P/head/pcbdraw.json").read_text()) == {"note": ""}
+    finally:
+        os.chdir(old_cwd)
+print("ok Session E 16 PcbDraw failures are retried on a revision-cache hit")
+
+# Session E 9: PcbDraw is optional, so a failed install warns and never fails the review.
+_pcb_wf = pathlib.Path(".github/workflows/review.yml").read_text(encoding="utf-8")
+_pcb_step = _pcb_wf[_pcb_wf.index("- name: Install PcbDraw\n"):].split("\n      - name:")[0]
+assert "        continue-on-error: true" in _pcb_step, _pcb_step
+assert "'::warning::' + kr.workflow_command_escape('PcbDraw could not be installed" in _pcb_step and "rm -rf .pydeps" in _pcb_step.split("::warning::")[0].split("||")[-1], _pcb_step
+print("ok Session E 9 a failed PcbDraw install only warns")
+
+# Session E 11: a snapshot whose review job later fails (say on a required ERC check) still gets its thumbnail.
+_thumb_head = pathlib.Path(".github/workflows/review.yml").read_text(encoding="utf-8").split("\n  design-thumbnails:\n")[1].split("steps:")[0]
+assert "    if: ${{ !cancelled() && needs.review.outputs.thumbnails == 'true' }}\n" in _thumb_head, _thumb_head
+_thumb_wf = pathlib.Path(".github/workflows/review.yml").read_text(encoding="utf-8")
+# The input is uploaded before any later step that can fail the job, such as the digest-keyed 3D upload.
+assert _thumb_wf.index("- name: Upload design snapshot context") < _thumb_wf.index("- name: Upload thumbnail input") < _thumb_wf.index("- name: Upload digest-keyed 3D assets"), "thumbnail input must precede later failing steps"
+print("ok Session E 11 thumbnails follow a failed review job")
+
+# Session E 12: each run stages its own thumbnails under a unique name; one serialized fold merges every staged file,
+# so a fold job GitHub cancels while it waits (one pending job per concurrency group) loses nothing.
+with _DpTmp() as t:
+    pathlib.Path(t, "A.png").write_bytes(_dp_png)
+    stage = pathlib.Path(t, "staged")
+    for n, date in ((1, "2026-10-01T09:00:00+02:00"), (2, "2026-10-02T00:00:00Z"), (3, "2026-10-03T00:00:00+00:00")):
+        plan_path = pathlib.Path(t, f"plan{n}.json")
+        plan_path.write_text(json.dumps({"sha": f"{n:040x}", "committedAt": date, "projects": [{"dir": "A", "poster": "A.png"}]}))
+        with patch.dict(os.environ, {"GITHUB_RUN_ID": str(100 + n)}):
+            kr.cmd_thumbs(argparse.Namespace(index=None, plan=str(plan_path), stage=str(stage), pending=None))
+    assert sorted(os.listdir(stage)) == [f"thumb-{n:040x}-{100 + n}.json" for n in (1, 2, 3)], sorted(os.listdir(stage))
+    (stage / f"thumb-{'9' * 40}-1.json").write_text('{"v": 1, "sha": "not a sha"}')   # malformed: skipped with a notice
+    index_path = pathlib.Path(t, "thumbs.json"); index_path.write_text("{}")
+    fold = lambda: kr.cmd_thumbs(argparse.Namespace(index=str(index_path), plan=None, stage=None, pending=str(stage)))
+    with patch("sys.stderr", new_callable=io.StringIO) as _err:
+        fold()
+    assert "::notice::" in _err.getvalue()
+    folded = json.loads(index_path.read_text())
+    assert [e["sha"] for e in folded["projects"]["A"]] == [f"{n:040x}" for n in (3, 2, 1)], "newest commit first, whatever the fold order"
+    with patch("sys.stderr", new_callable=io.StringIO):
+        fold()   # a staged file whose delete failed is folded again: nothing changes
+    assert json.loads(index_path.read_text()) == folded
+_tw = pathlib.Path(".github/workflows/review.yml").read_text(encoding="utf-8")
+_stage_job = _tw.split("\n  design-thumbnails:\n")[1].split("\n  design-thumbnail-index:\n")[0]
+_fold_job = _tw.split("\n  design-thumbnail-index:\n")[1]
+assert "concurrency:" not in _stage_job, "making a commit's thumbnails is never serialized or dropped"
+assert 'python3 tools/kicad_review.py thumbs --plan review/design/thumbnail-plan.json --stage review/thumbs/staged' in _stage_job
+assert 'gh release upload design-thumbs -R "$GITHUB_REPOSITORY" --clobber review/thumbs/staged/*.json' in _stage_job
+assert "    needs: design-thumbnails\n" in _fold_job and "concurrency:\n      group: kicad-design-thumbs-${{ github.repository }}\n      cancel-in-progress: false" in _fold_job
+assert "python3 tools/kicad_review.py thumbs --index review/thumbs/thumbs.json --pending review/thumbs/staged" in _fold_job
+assert _fold_job.index("--clobber review/thumbs/thumbs.json") < _fold_job.index("gh release delete-asset design-thumbs"), "staged files are deleted only after the index is uploaded"
+print("ok Session E 12 staged thumbnails survive a cancelled pending fold")
 
 # F2: Multi-unit symbols split across sheets preserve net membership, proven pins, and project net diff.
 def test_f2_cross_sheet_multi_unit():
@@ -11328,6 +12710,10 @@ def test_f4_render_and_release_cache():
             srel["checks"]["release"] = "informational"
             crel = seed_cache("head")
             assert not kr.render_cache_complete(crel, prj, "head", srel), "missing fab/ package must invalidate release cache"
+            (crel / "fab").mkdir()
+            (crel / "fab" / "P-review-jlcpcb-bom.csv").write_text("partial\n", encoding="utf-8")
+            assert not kr.render_cache_complete(crel, prj, "head", srel), "partial fab/ package must invalidate release cache"
+            shutil.rmtree(crel / "fab")
             seed_fab_package(crel / "fab", "jlcpcb")
             assert kr.render_cache_complete(crel, prj, "head", srel), "valid fab/ package accepted in release cache"
 
@@ -11392,7 +12778,8 @@ def test_f4_render_and_release_cache():
                 # Direct unit test: cmd_render partial-hit path clears stale fab and skips render_side
                 shutil.rmtree(head_cache / "fab")
                 assert not kr.render_cache_complete(head_cache, prj, "head", srel), "missing fab invalidates full cache"
-                assert kr.render_cache_complete(head_cache, prj, "head", srel, check_release=False), "non-release cache is complete"
+                assert kr.image_cache_complete(head_cache, prj, "head"), "image cache is complete"
+                assert kr.missing_products(head_cache, prj, "head", srel, ("comparison",)) == ["fab"]
                 stale_partial_fab = pathlib.Path("review/p/head/fab/stale-partial.txt")
                 stale_partial_fab.parent.mkdir(parents=True, exist_ok=True)
                 stale_partial_fab.write_text("stale-partial", encoding="utf-8")
@@ -12003,3 +13390,27 @@ def test_f7_malformed_board_fab_and_release():
 
 test_f7_malformed_board_fab_and_release()
 print("ok F7 malformed board reports fab limits and release as not run")
+
+
+def test_f7_single_snapshot_malformed_release():
+    with tempfile.TemporaryDirectory() as td:
+        old = os.getcwd(); os.chdir(td)
+        try:
+            p = {"dir": "p", "name": "p", "status": "added"}
+            write("head", {"p/p.kicad_pcb": '(kicad_pcb (layers (0 "F.Cu" signal))'})
+            reason = "release package not built: malformed board file: malformed S-expression"
+            write("review/p/head/fab-snapshot", {"p-review-jlcpcb-gerbers.zip.error": reason})
+            write("review/p/head", {"drc.json": json.dumps({"violations": [], "unconnected_items": [], "schematic_parity": []})})
+            settings = json.loads(json.dumps(kr.DEFAULT_SETTINGS))
+            settings["checks"] = {name: "off" for name in settings["checks"]}
+            settings["checks"]["release"] = "informational"
+            release = next(c for c in kr.project_checks(p, settings, {"base": {}, "head": {}}, single=True) if c["name"] == "release")
+            assert release["status"] == "not_run" and release.get("incomplete") is True, release
+            assert release["reason"] == "head " + reason, release
+            assert release["errors"] == release["new_errors"] == 0 and release["violations"] == [], release
+        finally:
+            os.chdir(old)
+
+
+test_f7_single_snapshot_malformed_release()
+print("ok F7 single snapshots read malformed-package evidence from fab-snapshot")

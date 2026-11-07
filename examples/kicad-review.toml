@@ -85,3 +85,8 @@ enabled = false
 # Track findings and threads as anchored GitHub issues; show open issues on later reviews.
 # App: Issues read/write; opted-in workflow caller: issues: read. Independent of threads.
 enabled = false
+
+[design]
+# A single-revision report of the design at every push to the default branch and every v* tag (artifact kicad-design-<sha>.html,
+# attached to the release as design-snapshot.html), plus manual runs with snapshot_only. Reached from the review site's "Latest design".
+enabled = false

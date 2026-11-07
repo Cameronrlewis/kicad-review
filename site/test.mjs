@@ -3116,10 +3116,19 @@ test('report readiness announces the gate only with framed enabled threads', () 
   const declarations = source.slice(source.indexOf('let THREADS_ON'), source.indexOf('const validThread'));
   for (const framed of [false, true]) for (const enabled of [false, true]) for (const block_merge of [false, true]) {
     const window = {}, parent = framed ? {} : window;
-    const message = runInNewContext(`${declarations}\nreadyMessage()`, { window, parent, S: {}, D: { settings: { threads: { enabled, block_merge } } } });
+    const D = { settings: { threads: { enabled, block_merge } } };
+    const message = runInNewContext(`${declarations}\nreadyMessage()`, { window, parent, S: {}, D, single: () => D.mode === 'single' });
     assert.equal(message.kicadReviewReady, true);
     assert.equal(message.threads, framed && enabled);
     assert.equal(message.blockMerge, framed && enabled && block_merge);
+    assert.equal(message.designSnapshot, undefined);
+    // A design report never announces PR discussions or a merge gate; it sends its recorded snapshot instead.
+    const snapshot = { ref: 'main', sha: 'c'.repeat(40), committedAt: '2026-10-24T10:00:00Z', message: 'Move R16' };
+    const designD = { ...D, mode: 'single', snapshot };
+    const design = runInNewContext(`${declarations}\nreadyMessage()`, { window, parent, S: {}, D: designD, single: () => designD.mode === 'single' });
+    assert.equal(design.threads, false);
+    assert.equal(design.blockMerge, false);
+    assert.deepEqual({ ...design.designSnapshot }, snapshot);
   }
   const html = reviewPage({ owner: 'owner', repo: 'repo', id: '123', pull: 7 });
   assert.match(html, /"rerun":"\/r\/owner\/repo\/pull\/7\/rerun"/);
@@ -5536,6 +5545,925 @@ test('BR02 measurement wrapper fixture keeps one opaque report frame that receiv
   assert.match(html, /const raw = "\/r\/o\/r\/a\/12\/raw";[\s\S]*iframe\.src = raw \+ location\.hash/);
   assert.match(html, /"endpoint":"\/r\/o\/r\/a\/12\/3d\/"/);
   assert.doesNotMatch(html, /Review3D|review3d\.js/, 'viewer runs only inside the report frame');
+});
+
+// ---- Design page: the newest snapshot for a branch, tag or commit ----
+import { findDesign, readSnapshot, readReleaseSnapshot, refOk, designName, projectKey, dirFromKey, projectsFromTree, changesProject, affects, canonicalFolder, designQuery, scanHistory, CursorNotFoundError, thumbnailsFor } from './design.js';
+import { designMissingPage, projectsPage, designsPage } from './pages.js';
+// The snapshot payload readSnapshot parses: one report for the whole commit, with every project folder listed.
+const payload = (sha, dirs = ['A', 'B']) => ({ mode: 'single', head: sha, snapshot: { sha, committedAt: '2026-10-24T10:00:00Z', message: 'Move R16 <b>bold</b>' }, projects: dirs.map((dir) => ({ dir })) });
+const tipSha = 'c'.repeat(40);
+// A snapshot artifact as GitHub lists it, uploaded by this repository's own run (see pushRun).
+const snap = (id, sha7, extra = {}) => ({ id, name: `kicad-design-${sha7}.html`, expired: false, created_at: '2026-10-24T10:00:00Z',
+  workflow_run: { id: 4000 + id, repository_id: 1, head_repository_id: 1 }, ...extra });
+// The kicad-review.yml push run that uploaded a snapshot; its head is the commit the snapshot is named for.
+const pushRun = (head = tipSha) => json({ event: 'push', path: '.github/workflows/kicad-review.yml', head_sha: head, repository: { id: 1 }, head_repository: { id: 1 } });
+const API = 'https://api.github.com/repos/Cameronrlewis/repo';
+function designGh(routes) {
+  const seen = [];
+  const gh = async (path) => { seen.push(path); const hit = routes.find(([match]) => path.includes(match)); return hit ? hit[1](path) : new Response('{}', { status: 404 }); };
+  return { gh, seen };
+}
+const json = (value, status = 200) => new Response(JSON.stringify(value), { status });
+
+test('refOk accepts Git ref names and refuses what GitHub or a shell would misread', () => {
+  for (const ok of ['main', 'feature/x', 'v1.0', 'release-2026', 'abcdef0']) assert.equal(refOk(ok), true, ok);
+  for (const bad of ['', 'a..b', 'x y', 'a~1', 'a^', 'a:b', 'a?', 'a*', 'a[b', 'a\\b', 'a@{1}', 'x.lock', '/x', 'x/', 'a//b', 'a\nb', 'x'.repeat(256)]) assert.equal(refOk(bad), false, JSON.stringify(bad));
+  assert.equal(refOk(undefined), false);
+});
+
+// A first-parent chain for discovery tests: commits[0] is the tip. `files` are the commit's changed files.
+// A commit with `snapshot: id` has a live snapshot artifact named for its sha7; `expired` marks it expired.
+const shaOf = (n) => n.toString(16).padStart(7, '0') + '0'.repeat(33);
+const c = (n, files = [], extra = {}) => ({ sha: shaOf(n), files, ...extra });
+function chainGh(commits, { releases = {}, fail = '', status = 500 } = {}) {
+  const at = new Map(commits.map((x, i) => [x.sha, { ...x, parents: i + 1 < commits.length ? [{ sha: commits[i + 1].sha }] : [] }]));
+  return async (path) => {
+    if (fail && path.includes(fail)) return json({}, status);
+    if (path.includes('/commits?')) return json([{ sha: commits[0].sha }]);
+    if (path.includes('/actions/artifacts?')) {
+      const name = new URL('https://x' + path).searchParams.get('name');
+      return json({ artifacts: commits.filter((x) => x.snapshot && name === `kicad-design-${x.sha.slice(0, 7)}.html`)
+        .map((x) => snap(x.snapshot, x.sha.slice(0, 7), x.expired ? { expired: true } : {})) });
+    }
+    const runId = /\/actions\/runs\/(\d+)$/.exec(path);
+    if (runId) return pushRun(commits.find((x) => x.snapshot && 4000 + x.snapshot === Number(runId[1]))?.sha);
+    const tag = /\/releases\/tags\/(.+)$/.exec(path);
+    if (tag) return releases[decodeURIComponent(tag[1])] ? json(releases[decodeURIComponent(tag[1])]) : json({}, 404);
+    const m = /\/commits\/([0-9a-f]{40})/.exec(path);
+    if (m) { const x = at.get(m[1]); return x ? json({ sha: x.sha, parents: x.parents, files: x.files }) : json({}, 404); }
+    throw Error('unexpected ' + path);
+  };
+}
+// The snapshot body read for an artifact: its payload head is the sha the artifact was named for, unless the test says otherwise.
+const readAs = (commits, dirs = ['A', 'B']) => async (gh, token, root, artifact) => {
+  const hit = commits.find((x) => x.snapshot === artifact.id);
+  return hit ? payload(hit.sha, dirs) : null;
+};
+
+test('a project folder is the unit of design: its page finds only its own nearest KiCad change', async () => {
+  // T changes only B; Q changes A; R changes only the README. Both folders are snapshotted at Q and R.
+  const commits = [c(3, [{ filename: 'B/B.kicad_pcb' }]), c(2, [{ filename: 'A/A.kicad_sch' }], { snapshot: 21 }), c(1, [{ filename: 'README.md' }], { snapshot: 11 })];
+  const gh = chainGh(commits);
+  const a = await findDesign(gh, 't', 'o', 'r', 'main', 'A', readAs(commits));
+  assert.equal(a.state, 'found');
+  assert.equal(a.exact, false, 'A reuses the nearest A change (Q) because T does not change A');
+  assert.equal(a.index, 0, 'the report index of folder A');
+  assert.equal(a.artifact.id, 21);
+  const b = await findDesign(gh, 't', 'o', 'r', 'main', 'B', readAs(commits));
+  assert.equal(b.state, 'missing', 'B changed at the tip and has no render: never substitute older geometry');
+  assert.equal(b.tip, shaOf(3));
+});
+
+test('renames into or out of a folder count for both folders; a global settings file counts for every folder', async () => {
+  const moved = [c(3, [{ filename: 'B/x.kicad_sch', previous_filename: 'A/x.kicad_sch', status: 'renamed' }]), c(2, [{ filename: 'A/A.kicad_sch' }], { snapshot: 21 })];
+  assert.equal((await findDesign(chainGh(moved), 't', 'o', 'r', 'main', 'A', readAs(moved))).state, 'missing', 'the folder A file was renamed away');
+  assert.equal((await findDesign(chainGh(moved), 't', 'o', 'r', 'main', 'B', readAs(moved))).state, 'missing', 'the file arrived in folder B');
+  const global = [c(3, [{ filename: 'kicad-review.toml' }]), c(2, [{ filename: 'A/A.kicad_sch' }], { snapshot: 21 })];
+  assert.equal((await findDesign(chainGh(global), 't', 'o', 'r', 'main', 'A', readAs(global))).state, 'missing');
+  assert.equal(changesProject([{ filename: 'A/x.kicad_dru' }], 'A'), true);
+  assert.equal(changesProject([{ filename: 'A/x.kicad_wks' }], 'A'), true);
+  assert.equal(changesProject([{ filename: 'A/README.md' }], 'A'), false);
+  assert.equal(changesProject([{ filename: 'B/x.kicad_pcb' }], 'A'), false);
+});
+
+test('design discovery spends a bounded number of GitHub requests, then reports missing rather than an older design', async () => {
+  const { DESIGN_WALK_MAX } = await import('./design.js');
+  assert.ok(Number.isInteger(DESIGN_WALK_MAX) && DESIGN_WALK_MAX > 0 && DESIGN_WALK_MAX <= 40, 'stays under a Worker subrequest budget');
+  // The folder last changed 300 first-parent commits ago; every newer commit touches only the README.
+  const commits = Array.from({ length: 300 }, (_, i) => c(300 - i, i === 299 ? [{ filename: 'A/A.kicad_sch' }] : [{ filename: 'README.md' }], i === 299 ? { snapshot: 7 } : {}));
+  let calls = 0;
+  const gh = async (path) => { calls += 1; return chainGh(commits)(path); };
+  const found = await findDesign(gh, 't', 'o', 'r', 'main', 'A', readAs(commits));
+  assert.equal(found.state, 'missing', 'an unverified stretch of history never stands in for the tip');
+  assert.equal(found.tip, shaOf(300));
+  assert.ok(calls <= DESIGN_WALK_MAX + 4, `${calls} GitHub requests`);
+  // Within the budget the nearest change is still found.
+  const near = commits.slice(290);
+  assert.equal((await findDesign(chainGh(near), 't', 'o', 'r', 'main', 'A', readAs(near))).state, 'found');
+});
+
+test('a snapshot from a pull-request run (a fork\'s above all) is never shown, and decoys cost a bounded number of reads', async () => {
+  const sha = shaOf(1);
+  const genuine = { ...snap(21, sha.slice(0, 7)), created_at: '2026-10-01T00:00:00Z', workflow_run: { id: 501, repository_id: 1, head_repository_id: 1 } };
+  const fork = (n) => ({ ...snap(60 + n, sha.slice(0, 7)), created_at: `2026-10-2${n}T00:00:00Z`, workflow_run: { id: 600 + n, repository_id: 1, head_repository_id: 99 } });
+  const pull = (n) => ({ ...snap(70 + n, sha.slice(0, 7)), created_at: `2026-10-1${n}T00:00:00Z`, workflow_run: { id: 700 + n, repository_id: 1, head_repository_id: 1 } });
+  const events = { 501: 'push', 701: 'pull_request', 702: 'pull_request', 703: 'pull_request', 704: 'pull_request' };
+  const lookup = async (artifacts) => {
+    const runs = [], reads = [];
+    const gh = async (path) => {
+      if (path.includes('/commits?')) return json([{ sha }]);
+      if (path.includes('/actions/artifacts?')) return json({ artifacts });
+      const run = /\/actions\/runs\/(\d+)$/.exec(path);
+      if (run) { runs.push(+run[1]); return json({ event: events[run[1]], path: '.github/workflows/kicad-review.yml', head_sha: sha, repository: { id: 1 }, head_repository: { id: 1 } }); }
+      return json({}, 404);
+    };
+    const read = async (gh, token, root, artifact) => { reads.push(artifact.id); return payload(sha); };
+    return { found: await findDesign(gh, 't', 'o', 'r', sha, 'A', read), runs, reads };
+  };
+  const mixed = await lookup([fork(1), fork(2), pull(1), genuine]);
+  assert.equal(mixed.found.state, 'found');
+  assert.equal(mixed.found.artifact.id, 21, 'only the push run\'s snapshot is shown');
+  assert.deepEqual(mixed.reads, [21], 'a fork or pull-request snapshot is never downloaded');
+  assert.ok(!mixed.runs.some((id) => id >= 600 && id < 700), 'a fork run is refused from the listing alone');
+  const flood = await lookup([pull(1), pull(2), pull(3), pull(4), genuine]);
+  assert.equal(flood.found.state, 'missing', 'past the candidate cap nothing is read');
+  assert.ok(flood.runs.length <= 3 && flood.reads.length === 0, JSON.stringify(flood));
+  const noProvenance = await lookup([{ ...genuine, workflow_run: undefined }]);
+  assert.equal(noProvenance.found.state, 'missing', 'an artifact without its run is never trusted');
+});
+
+test('an unrelated snapshot under the same sha7 or a force push never substitutes', async () => {
+  const commits = [c(3, []), c(2, [{ filename: 'A/A.kicad_sch' }], { snapshot: 21 })];
+  const otherSha = async (gh, token, root, artifact) => ({ ...payload(shaOf(9)), projects: [{ dir: 'A' }] });
+  assert.equal((await findDesign(chainGh(commits), 't', 'o', 'r', 'main', 'A', otherSha)).state, 'missing', 'sha7 is not provenance');
+  const forced = [c(3, [{ filename: 'A/A.kicad_sch' }]), c(2, [], { snapshot: 21 })];
+  assert.equal((await findDesign(chainGh(forced), 't', 'o', 'r', 'main', 'A', readAs(forced))).state, 'missing');
+});
+
+test('an expired artifact falls back to the live release asset design-snapshot.html of the tag', async () => {
+  const tipAndTag = [c(1, [], { snapshot: 31, expired: true })];
+  const releases = { 'v1.0': { assets: [{ id: 901, name: 'design-snapshot.html' }] } };
+  const found = await findDesign(chainGh(tipAndTag, { releases }), 't', 'o', 'r', 'v1.0', 'A', readAs(tipAndTag), async (gh, token, root, asset) => {
+    assert.equal(asset.id, 901);
+    return payload(shaOf(1));
+  });
+  assert.equal(found.state, 'found');
+  assert.equal(found.source, 'release', 'the expired artifact is ignored; the release asset is the source');
+  assert.equal(found.exact, true);
+  assert.equal(found.asset.id, 901);
+  assert.equal(found.index, 0);
+  const wrong = await findDesign(chainGh(tipAndTag, { releases }), 't', 'o', 'r', 'v1.0', 'A', readAs(tipAndTag), async () => payload(shaOf(7)));
+  assert.equal(wrong.state, 'missing', 'a release whose snapshot names another commit is never shown');
+});
+
+test('a folder missing from the report it would open is reported as missing, not shown', async () => {
+  const commits = [c(1, [], { snapshot: 21 })];
+  const found = await findDesign(chainGh(commits), 't', 'o', 'r', 'main', 'C', readAs(commits, ['A', 'B']));
+  assert.equal(found.state, 'missing');
+  assert.equal(found.reason, 'project');
+});
+
+test('design discovery matrix: 403, 429 and 500 at each GitHub call are errors, and bad refs never reach GitHub', async () => {
+  const commits = [c(2, [{ filename: 'README.md' }]), c(1, [{ filename: 'A/A.kicad_sch' }], { snapshot: 21 })];
+  for (const status of [403, 429, 500]) for (const fail of ['/commits?', '/actions/artifacts?', '/actions/runs/', '/commits/'])
+    assert.equal((await findDesign(chainGh(commits, { fail, status }), 't', 'o', 'r', 'main', 'A', readAs(commits))).state, 'error', `${status} at ${fail}`);
+  const readerFailure = await findDesign(chainGh(commits), 't', 'o', 'r', 'main', 'A', async () => { throw Error('download 429'); });
+  assert.equal(readerFailure.state, 'error');
+
+  let commitDetailsCalled = false;
+  const single = [c(1, [{ filename: 'A/A.kicad_sch' }], { snapshot: 21 })];
+  const gh = async (path) => {
+    if (path.includes('/commits/')) commitDetailsCalled = true;
+    return chainGh(single)(path);
+  };
+  const exactFound = await findDesign(gh, 't', 'o', 'r', 'main', 'A', readAs(single));
+  assert.equal(exactFound.state, 'found');
+  assert.equal(commitDetailsCalled, false, 'exact tip lookup never calls /commits/<tip>');
+});
+
+test('design discovery propagates artifact download and body failures, rather than offering another render', async()=>{
+  for(const status of [403,429,500]) {
+    await assert.rejects(()=>readSnapshot(async()=>json({},status),'t','/repos/o/r',snap(1,'ccccccc')),/snapshot download unavailable/);
+    const restore=mockFetch(async()=>json({},status));
+    try {
+      await assert.rejects(()=>readSnapshot(async()=>new Response(null,{status:302,headers:{Location:'https://design.blob.core.windows.net/design'}}),'t','/repos/o/r',snap(1,'ccccccc')),/snapshot body unavailable/);
+    } finally {restore();}
+  }
+});
+
+async function designGet(path, routes, { push = true, headers = {} } = {}) {
+  const sealed = await signedIn();
+  const repo = () => json({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true, push }, default_branch: 'main' });
+  const restore = mockFetch(async (url, options = {}) => {
+    if (url === API) return repo();
+    const hit = routes.find(([match]) => url.includes(match));
+    if (hit) return hit[1](url, options);
+    if (/\/actions\/artifacts\/\d+\/zip$/.test(url)) return new Response(null,{status:302,headers:{Location:'https://design.blob.core.windows.net/design'}});
+    if (/\/actions\/runs\/\d+$/.test(url)) return pushRun();
+    if (url==='https://design.blob.core.windows.net/design') return new Response('<!doctype html><script>window.REVIEW_DATA = '+JSON.stringify(payload(tipSha))+';</script>');
+    if (url.includes('/commits/')) return json({parents:[],files:[]});
+    return new Response('{}', {status:404});
+  });
+  try { return await call(path, { headers: { Cookie: `s=${sealed}`, ...headers } }); } finally { restore(); }
+}
+
+const twoFolders = [['/git/trees/', () => json({ tree: [{ type: 'blob', path: 'A/A.kicad_pro' }, { type: 'blob', path: 'B/B.kicad_pro' }] })],
+  ['/commits?', () => json([{ sha: tipSha }])], ['/actions/artifacts?name=', () => json({ artifacts: [snap(55, 'ccccccc')] })]];
+
+test('a project page opens the commit snapshot at that folder\'s report index, keeping the ref and sha7', async () => {
+  const a = await designGet('/r/Cameronrlewis/repo/p/A/design', twoFolders);
+  assert.equal(a.status, 302);
+  assert.equal(a.headers.get('Location'), '/r/Cameronrlewis/repo/a/55?design=main&tip=ccccccc&p=0&folder=A');
+  const b = await designGet('/r/Cameronrlewis/repo/p/B/design', twoFolders);
+  assert.equal(b.headers.get('Location'), '/r/Cameronrlewis/repo/a/55?design=main&tip=ccccccc&p=1&folder=B', 'the second folder opens the same commit at its own index');
+});
+
+test('the repository-wide design link goes to the folder picker when there are several folders, and to the folder when there is one', async () => {
+  const many = await designGet('/r/Cameronrlewis/repo/design', twoFolders);
+  assert.equal(many.status, 302);
+  assert.equal(many.headers.get('Location'), '/r/Cameronrlewis/repo/projects');
+  const picker = await (await designGet('/r/Cameronrlewis/repo/projects', twoFolders)).text();
+  assert.match(picker, /href="\/r\/Cameronrlewis\/repo\/p\/A\/design">Latest design/);
+  assert.match(picker, /href="\/r\/Cameronrlewis\/repo\/p\/B\/designs">Revisions/);
+  assert.deepEqual(projectsFromTree([{ type: 'blob', path: 'A/A.kicad_pro' }, { type: 'blob', path: 'B/B.kicad_pro' }, { type: 'blob', path: 'README.md' }]), ['A', 'B']);
+  // '.' (and '%2E') is a dot segment that URL parsing removes, so the root folder's key is an encoded slash.
+  assert.equal(projectKey(''), '%2F');
+  assert.equal(dirFromKey(projectKey('')), '');
+  assert.equal(new URL(`https://x/r/o/r/p/${projectKey('')}/design`).pathname, '/r/o/r/p/%2F/design');
+  assert.equal(dirFromKey(encodeURIComponent('Example Projects/Main Board')), 'Example Projects/Main Board');
+  const one = await designGet('/r/Cameronrlewis/repo/design', [['/git/trees/', () => json({ tree: [{ type: 'blob', path: 'Only/Only.kicad_pro' }] })]]);
+  assert.equal(one.headers.get('Location'), '/r/Cameronrlewis/repo/p/Only/design');
+});
+
+test('project route keys preserve literal percent text after one decode', async () => {
+  const dirs = ['100%pass', '%2F'];
+  const routes = [['/commits?', () => json([{ sha: tipSha }])], ['/actions/artifacts?name=', () => json({ artifacts: [snap(55, 'ccccccc')] })],
+    ['design.blob.core.windows.net', () => new Response('<!doctype html><script>window.REVIEW_DATA = ' + JSON.stringify(payload(tipSha, dirs)) + ';</script>')]];
+  for (const [dir, index] of dirs.map((value, i) => [value, i])) {
+    const response = await designGet(`/r/Cameronrlewis/repo/p/${projectKey(dir)}/design`, routes);
+    assert.equal(response.status, 302, dir);
+    const location = new URL(response.headers.get('Location'), 'https://site.example');
+    assert.equal(location.searchParams.get('folder'), projectKey(dir));
+    assert.equal(location.searchParams.get('p'), String(index));
+  }
+});
+
+test('truncated recursive project trees fail closed', async () => {
+  const routes = [['/git/trees/', () => json({ truncated: true, tree: [{ type: 'blob', path: 'Only/Only.kicad_pro' }] })]];
+  for (const path of ['/r/Cameronrlewis/repo/projects', '/r/Cameronrlewis/repo/design']) {
+    const response = await designGet(path, routes);
+    assert.equal(response.status, 502, path);
+    assert.match(await response.text(), /GitHub did not answer\. Try again\./);
+  }
+});
+
+test('design resolves slash branches and explicit commits per folder, and refuses bad refs before calling GitHub', async () => {
+  const calls = [];
+  const routes = [['/commits?', (url) => { calls.push(url); return json([{ sha: tipSha }]); }], ['/actions/artifacts?name=', () => json({ artifacts: [snap(7, 'ccccccc')] })]];
+  const slash = await designGet('/r/Cameronrlewis/repo/p/A/design/feature%2Fx', routes);
+  assert.equal(slash.headers.get('Location'), '/r/Cameronrlewis/repo/a/7?design=feature%2Fx&tip=ccccccc&p=0&folder=A');
+  assert.ok(calls[0].includes('sha=feature%2Fx'));
+  calls.length = 0;
+  for (const bad of ['a..b', 'x%20y', '%E0%A4%A']) {
+    const response = await designGet(`/r/Cameronrlewis/repo/p/A/design/${bad}`, routes);
+    assert.equal(response.status, 404, bad);
+  }
+  assert.equal(calls.length, 0, 'a refused ref never reaches GitHub');
+});
+
+test('design says why there is no snapshot, and offers the render only to writers', async () => {
+  const routes = [['/commits?', () => json([{ sha: tipSha }])], ['/actions/artifacts?name=', () => json({ artifacts: [] })]];
+  const writer = await designGet(`/r/Cameronrlewis/repo/p/A/design/${tipSha}`, routes);
+  const body = await writer.text();
+  assert.equal(writer.status, 404);
+  assert.match(body, /No design snapshot for c{40}/);
+  assert.match(body, new RegExp(`action="/r/Cameronrlewis/repo/design/render"[^>]*><input type="hidden" name="key" value="A"><input type="hidden" name="sha" value="${tipSha}"`));
+  const reader = await (await designGet(`/r/Cameronrlewis/repo/p/A/design/${tipSha}`, routes, { push: false })).text();
+  assert.ok(!reader.includes('design/render') && reader.includes('Someone with write access'));
+  const unknown = await designGet('/r/Cameronrlewis/repo/p/A/design/nope', [['/commits?', () => json({ message: 'No commit found' }, 422)]]);
+  assert.equal(unknown.status, 404);
+  assert.match(await unknown.text(), /requested branch, tag or commit is unavailable/);
+  const down = await designGet('/r/Cameronrlewis/repo/p/A/design', [['/commits?', () => json({}, 500)]]);
+  assert.equal(down.status, 502);
+});
+
+test('a folder the snapshot does not contain says so, instead of opening another folder', async () => {
+  const routes = [['/git/trees/', () => json({ tree: [{ type: 'blob', path: 'A/A.kicad_pro' }] })], ['/commits?', () => json([{ sha: tipSha }])], ['/actions/artifacts?name=', () => json({ artifacts: [snap(55, 'ccccccc')] })]];
+  const response = await designGet('/r/Cameronrlewis/repo/p/C/design', routes);
+  assert.equal(response.status, 404);
+  assert.match(await response.text(), /This project folder is not in that design\./);
+});
+
+test('the release fallback opens the tag asset through the same wrapper, and its raw body is the authenticated file', async () => {
+  const sealed = await signedIn();
+  const releases = { 'v1.0': { assets: [{ id: 901, name: 'design-snapshot.html' }] } };
+  const routes = [['/commits?', () => json([{ sha: tipSha }])], ['/actions/artifacts?name=', () => json({ artifacts: [] })],
+    ['/releases/tags/v1.0', () => json(releases['v1.0'])],
+    ['/releases/assets/901', () => new Response(null, { status: 302, headers: { Location: 'https://release-assets.githubusercontent.com/design-snapshot.html?sig=x' } })],
+    ['release-assets.githubusercontent.com', () => new Response('<!doctype html><script>window.REVIEW_DATA = ' + JSON.stringify(payload(tipSha)) + ';</script>')]];
+  const opened = await designGet('/r/Cameronrlewis/repo/p/A/design/v1.0', routes);
+  assert.equal(opened.status, 302);
+  assert.equal(opened.headers.get('Location'), '/r/Cameronrlewis/repo/design-release/v1.0?design=v1.0&tip=ccccccc&p=0&folder=A');
+  const raw = await designGet('/r/Cameronrlewis/repo/design-release/v1.0/raw', routes);
+  assert.match(await raw.text(), /window\.REVIEW_DATA/);
+  // The raw file is the framed report: sandboxed like the artifact raw route (frameCsp's frame-ancestors 'none' would block the wrapper's iframe).
+  assert.equal(raw.headers.get('Content-Security-Policy'), reportCsp);
+  assert.equal(raw.headers.get('X-Frame-Options'), 'SAMEORIGIN');
+  const top = await designGet('/r/Cameronrlewis/repo/design-release/v1.0/raw', routes, { headers: { 'Sec-Fetch-Dest': 'document' } });
+  assert.equal(top.status, 302, 'a top-level visit to the raw file goes back to the wrapper');
+  assert.equal(top.headers.get('Location'), '/r/Cameronrlewis/repo/design-release/v1.0');
+  const wrapper = await (await designGet('/r/Cameronrlewis/repo/design-release/v1.0', routes)).text();
+  assert.ok(!wrapper.includes('/a/undefined'), 'release wrapper derives threadsClient link from rawPath instead of /a/undefined');
+  assert.match(wrapper, /"link":"[^"]*\/design-release\/v1\.0"/);
+});
+
+test('release design redirects refuse storage hosts outside the download allowlist', async () => {
+  let offHostFetches = 0;
+  const routes = [['/commits?', () => json([{ sha: tipSha }])],
+    ['/releases/tags/v1.0', () => json({ assets: [{ id: 901, name: 'design-snapshot.html' }] })],
+    ['/releases/assets/901', () => new Response(null, { status: 302, headers: { Location: 'https://evil.example/design-snapshot.html' } })],
+    ['evil.example', () => { offHostFetches += 1; return new Response('<!doctype html><script>window.REVIEW_DATA = ' + JSON.stringify(payload(tipSha)) + ';</script>'); }]];
+  const response = await designGet('/r/Cameronrlewis/repo/design-release/v1.0/raw', routes);
+  assert.equal(response.status, 502);
+  assert.equal(offHostFetches, 0);
+});
+
+test('a snapshot-only run opens its design, and the report wrapper names the design instead of a comparison', async () => {
+  const sealed = await signedIn();
+  const restore = mockFetch(async (url) => url === API ? accessibleRepo() : url.endsWith('/actions/runs/9') ? json({ status: 'completed', conclusion: 'success', html_url: 'https://github.com/o/r/actions/runs/9' })
+    : url.includes('/actions/runs/9/artifacts?per_page=100') ? json({ artifacts: [{ id: 77, name: 'kicad-design-ccccccc.html', expired: false }] }) : new Response('{}', { status: 404 }));
+  try {
+    const response = await call('/r/Cameronrlewis/repo/run/9', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.headers.get('Location'), '/r/Cameronrlewis/repo/a/77');
+  } finally { restore(); }
+  const page = reviewPage({ user: 'u', owner: 'o', repo: 'r', id: 77, name: 'kicad-design-bbbbbbb.html', designRef: 'main', tip: 'ccccccc', projectIndex: '1', folderKey: 'A' });
+  assert.match(page, /DESIGN<\/span> <code>bbbbbbb<\/code>/);
+  assert.match(page, /snapshot for <code>main<\/code> \(requested tip ccccccc\)/);
+  assert.match(page, /href="\/r\/o\/r\/p\/A\/designs">Revisions/);
+  assert.match(page, /src="\/r\/o\/r\/a\/77\/raw#p=1"/, 'the report opens at the folder index');
+  assert.ok(!page.includes('MERGE ·') && !page.includes('BASE'));
+  assert.match(reviewPage({ user: 'u', owner: 'o', repo: 'r', id: 1, name: 'kicad-design-bbbbbbb.html', designRef: '<b>', tip: 'bbbbbbb' }), /<code>&lt;b&gt;<\/code>/);
+  assert.match(reviewPage({ user: 'u', owner: 'o', repo: 'r', id: 2, name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html' }), /BASE<\/span> <code>aaaaaaa/);
+  assert.equal(designName.test('kicad-design-ccccccc.html'), true);
+  assert.equal(designName.test('kicad-review-aaaaaaa-bbbbbbb-pass.html'), false);
+  assert.ok(designMissingPage({ user: 'u', owner: 'o', repo: 'r', ref: '<i>', sha: tipSha, canRender: true }).includes('&lt;i&gt;'));
+});
+
+test('design wrapper keeps its snapshot navigation while Ask and MCP integrations are configured', () => {
+  const page = reviewPage({
+    user: 'u', owner: 'o', repo: 'r', id: 77, name: 'kicad-design-bbbbbbb.html',
+    designRef: 'main', tip: 'ccccccc', projectIndex: '1', folderKey: 'A',
+    ask: true, mcpOrigin: 'https://review.example',
+  });
+  assert.match(page, /DESIGN<\/span> <code>bbbbbbb<\/code>/);
+  assert.match(page, /href="\/r\/o\/r\/p\/A\/designs">Revisions/);
+  assert.match(page, /src="\/r\/o\/r\/a\/77\/raw#p=1"/);
+  assert.match(page, /"ask":"\/r\/o\/r\/a\/77\/ask"/);
+  assert.match(page, /claude mcp add --scope user --transport http kicad-review https:\/\/review\.example\/mcp/);
+});
+
+test('designQuery and folder validation canonicalizes and re-encodes via projectKey, preventing traversal and injection', async () => {
+  assert.equal(canonicalFolder('A'), 'A');
+  assert.equal(canonicalFolder(''), '');
+  assert.equal(canonicalFolder('/'), '');
+  assert.equal(canonicalFolder('%2F'), '');
+  assert.equal(canonicalFolder('Example Projects/Main Board'), 'Example Projects/Main Board');
+  assert.equal(canonicalFolder('Example%20Projects%2FMain%20Board'), 'Example Projects/Main Board');
+  // Traversal and injection inputs are rejected or sanitized
+  assert.equal(canonicalFolder('..'), null);
+  assert.equal(canonicalFolder('%2e%2e'), null);
+  assert.equal(canonicalFolder('%252e%252e'), '%2e%2e');
+  assert.equal(canonicalFolder('a/../b'), null);
+  assert.equal(canonicalFolder('a/./b'), null);
+  assert.equal(canonicalFolder('a\x00b'), null);
+
+  // designQuery re-encodes via projectKey
+  const q1 = designQuery(new URLSearchParams('folder=%252e%252e'));
+  assert.equal(q1.folderKey, '', 'traversal folder query yields empty folderKey');
+  const q2 = designQuery(new URLSearchParams('folder=a%3Fb%23c'));
+  assert.equal(q2.folderKey, 'a%3Fb%23c', 'query and fragment chars are re-encoded');
+  const q3 = designQuery(new URLSearchParams('folder=A'));
+  assert.equal(q3.folderKey, 'A');
+  const q4 = designQuery(new URLSearchParams('folder=%2F'));
+  assert.equal(q4.folderKey, '%2F');
+
+  // reviewPage sanitizes folderKey
+  const traversalPage = reviewPage({ user: 'u', owner: 'o', repo: 'r', id: 77, name: 'kicad-design-bbbbbbb.html', folderKey: '%2e%2e' });
+  assert.ok(!traversalPage.includes('/p/%2e%2e/'), 'no traversal in reviewPage action links');
+  assert.ok(traversalPage.includes('/r/o/r/projects'), 'falls back to projects page');
+  const injectionPage = reviewPage({ user: 'u', owner: 'o', repo: 'r', id: 77, name: 'kicad-design-bbbbbbb.html', folderKey: 'a?b#c' });
+  assert.ok(injectionPage.includes('/p/a%3Fb%23c/'), 'query/fragment are encoded in reviewPage');
+
+  // designMissingPage sanitizes key
+  const missingTraversal = designMissingPage({ user: 'u', owner: 'o', repo: 'r', key: '%2e%2e', ref: 'main', sha: tipSha });
+  assert.ok(!missingTraversal.includes('/p/%2e%2e/'), 'no traversal in designMissingPage');
+  const missingInjection = designMissingPage({ user: 'u', owner: 'o', repo: 'r', key: 'a?b#c', ref: 'main', sha: tipSha });
+  assert.ok(missingInjection.includes('/p/a%3Fb%23c/'), 'query/fragment encoded in designMissingPage');
+
+  // designRoute returns 404 for traversal folder key
+  const traversalRoute = await designGet('/r/Cameronrlewis/repo/p/%252e%252e/design', twoFolders);
+  assert.equal(traversalRoute.status, 404);
+});
+
+// A commit log for the history tests, newest first. A commit with `files` lists the files it changed; a renamed file
+// lists both names (filename and previous_filename). The mock answers the three calls the route makes: the tip, the
+// unfiltered commit list resumed from a sha (GitHub semantics: the listing starts at that sha, which is included),
+// and the commit's files. `calls` records every path so the tests can count requests.
+function historyGh(log, { tree = [{ type: 'blob', path: 'A/A.kicad_pro' }, { type: 'blob', path: 'B/B.kicad_pro' }], calls = [], thumbs = null, refs = null } = {}) {
+  const touches = (c, dir) => (c.files || []).some((f) => [f.filename, f.previous_filename].some((p) => p && (dir === '' || p === dir || p.startsWith(`${dir}/`))));
+  const bySha = new Map(log.map((c) => [c.sha, c]));
+  const hasDag = log.some((c) => Array.isArray(c.parents));
+  const branchSlice = (from) => {
+    const tip = refs && from in refs ? refs[from] : from === 'main' ? log[0]?.sha : from;
+    if (!tip || !bySha.has(tip)) return [];
+    if (!hasDag) {
+      const start = log.findIndex((c) => c.sha === tip);
+      return start < 0 ? [] : log.slice(start);
+    }
+    const reachable = new Set();
+    const queue = [tip];
+    while (queue.length) {
+      const sha = queue.shift();
+      if (!sha || reachable.has(sha) || !bySha.has(sha)) continue;
+      reachable.add(sha);
+      for (const p of bySha.get(sha).parents || []) queue.push(p);
+    }
+    return log.filter((c) => reachable.has(c.sha));
+  };
+  return async (path) => {
+    calls.push(path);
+    if (path.includes('/git/trees/')) return json({ tree });
+    if (path.includes('/releases/tags/design-thumbs')) return thumbs ?? new Response('{}', { status: 404 });
+    const u = new URL(`https://x${path}`);
+    const commitMatch = /\/commits\/([0-9a-f]{40})/.exec(u.pathname);
+    if (commitMatch) {
+      const hit = bySha.get(commitMatch[1]);
+      if (!hit) return json({}, 404);
+      const allFiles = hit.files || [];
+      const perPage = Number(u.searchParams.get('per_page') || 100);
+      const pageNum = Number(u.searchParams.get('page') || 1);
+      const offset = (pageNum - 1) * perPage;
+      const files = allFiles.slice(offset, offset + perPage);
+      return new Response(JSON.stringify({ sha: hit.sha, files }), {
+        headers: { 'Content-Type': 'application/json', ...(allFiles.length > offset + perPage ? { Link: '<x>; rel="next"' } : {}) },
+      });
+    }
+    if (u.pathname.endsWith('/commits')) {
+      const from = u.searchParams.get('sha');
+      const perPage = Number(u.searchParams.get('per_page') || 30);
+      const pageNum = Number(u.searchParams.get('page') || 1);
+      const offset = (pageNum - 1) * perPage;
+      const dir = u.searchParams.get('path') || '';
+      const hits = branchSlice(from).filter((c) => !dir || touches(c, dir));
+      const page = hits.slice(offset, offset + perPage).map((c) => ({ sha: c.sha, author: { login: 'ada' }, commit: { message: c.message || `Change ${c.sha.slice(0, 7)}\nbody`, author: { date: '2026-10-01T00:00:00Z' } } }));
+      return new Response(JSON.stringify(page), { headers: { 'Content-Type': 'application/json', ...(hits.length > offset + perPage ? { Link: '<x>; rel="next"' } : {}) } });
+    }
+    throw Error('unexpected ' + path);
+  };
+}
+const sha40 = (n) => String(n).padStart(40, '0');
+
+test('a folder page filters commit details and includes root-level inputs that affect every project', async () => {
+  const log = [
+    { sha: sha40(1), files: [{ filename: 'README.md' }] },
+    { sha: sha40(2), files: [{ filename: 'A/A.kicad_sch' }] },
+    { sha: sha40(3), files: [{ filename: 'B/B.kicad_pcb' }] },
+    { sha: sha40(4), files: [{ filename: 'A/notes.md' }] },
+    { sha: sha40(5), files: [{ filename: 'B/x.kicad_sch', previous_filename: 'A/x.kicad_sch', status: 'renamed' }] },
+    { sha: sha40(6), files: [{ filename: 'A/old.kicad_pcb', status: 'removed' }] },
+    { sha: sha40(7), files: [{ filename: 'A/y.kicad_pro' }, { filename: 'B/B.kicad_pcb' }] },
+    { sha: sha40(8), files: [{ filename: 'kicad-review.toml' }] },
+    { sha: sha40(9), files: [{ filename: 'sym-lib-table' }] },
+    { sha: sha40(10), files: [{ filename: 'fp-lib-table' }] },
+  ];
+  const calls = [], gh = historyGh(log, { calls });
+  const a = await (await designGet('/r/Cameronrlewis/repo/p/A/designs', [['/repos/Cameronrlewis/repo/', (url) => gh(url.replace('https://api.github.com', ''))]])).text();
+  assert.deepEqual([...a.matchAll(/\/p\/A\/design\/([0-9a-f]{40})"/g)].map((m) => m[1]), [sha40(2), sha40(5), sha40(6), sha40(7), sha40(8), sha40(9), sha40(10)]);
+  assert.match(a, /KiCad changes/);
+  assert.ok(!a.includes('Repository commit history'), 'the list is never labelled as all commits');
+  const b = await (await designGet('/r/Cameronrlewis/repo/p/B/designs', [['/repos/Cameronrlewis/repo/', (url) => gh(url.replace('https://api.github.com', ''))]])).text();
+  assert.deepEqual([...b.matchAll(/\/p\/B\/design\/([0-9a-f]{40})"/g)].map((m) => m[1]), [sha40(3), sha40(5), sha40(7), sha40(8), sha40(9), sha40(10)]);
+  assert.ok(calls.filter((path) => path.includes('/commits?')).every((path) => !new URL(`https://x${path}`).searchParams.has('path')), 'history listings are unfiltered so root inputs reach detail filtering');
+  for (const nested of ['B/sym-lib-table', 'B/fp-lib-table', 'B/kicad-review.toml']) assert.ok(!affects(nested, 'A'), `${nested} never affects A`);
+  assert.ok(affects('B/sym-lib-table', 'B') && affects('B/fp-lib-table', 'B') && !affects('B/kicad-review.toml', 'B'), 'a nested library table belongs to its own folder');
+  assert.match(a, new RegExp(`name="head" value="${sha40(1)}"`), 'Compare with newest targets the default-branch tip');
+  assert.equal((a.match(/Compare with newest/g) || []).length, 7, 'every row except the tip itself');
+});
+
+test('a mixed history pages by cursor: up to 25 KiCad rows per page, no duplicates, no skipped commit, and the scan limit is shown', async () => {
+  // 150 commits, newest first. Every other commit changes A/A.kicad_sch; the rest change A/notes.md, a file in the folder that is not KiCad.
+  const log = Array.from({ length: 150 }, (_, k) => ({ sha: sha40(150 - k), files: [{ filename: k % 2 === 0 ? 'A/A.kicad_sch' : 'A/notes.md' }] }));
+  const gh = historyGh(log);
+  const route = [['/repos/Cameronrlewis/repo/', (url) => gh(url.replace('https://api.github.com', ''))]];
+  const rowsOf = (page) => [...page.matchAll(/\/p\/A\/design\/([0-9a-f]{40})"/g)].map((m) => m[1]);
+  // 30 commit details per view (the subrequest budget) hold 15 of the alternating KiCad commits.
+  const first = await (await designGet('/r/Cameronrlewis/repo/p/A/designs', route)).text();
+  const rows1 = rowsOf(first);
+  assert.equal(rows1.length, 15);
+  assert.match(first, /Scanned 30 commits/);
+  const cursor = /cursor=([0-9a-f]{40})">Older/.exec(first)[1];
+  assert.equal(cursor, sha40(121), 'the Older link resumes after the last commit examined');
+  const second = await (await designGet(`/r/Cameronrlewis/repo/p/A/designs?cursor=${cursor}`, route)).text();
+  const rows2 = rowsOf(second);
+  assert.equal(rows2.length, 15);
+  assert.equal(rows2[0], sha40(150 - 30), 'the commit after the cursor starts the next page');
+  assert.ok(second.includes('href="/r/Cameronrlewis/repo/p/A/designs?ref=main">Newest'));
+  const all = [...rows1, ...rows2];
+  let page = second;
+  for (let n = 0; n < 10 && /cursor=([0-9a-f]{40})">Older/.test(page); n++) {
+    page = await (await designGet(`/r/Cameronrlewis/repo/p/A/designs?cursor=${/cursor=([0-9a-f]{40})">Older/.exec(page)[1]}`, route)).text();
+    const rows = rowsOf(page);
+    assert.ok(rows.length <= 25);
+    all.push(...rows);
+  }
+  assert.equal(all.length, 75, 'the 75 KiCad commits come at most 25 at a time');
+  assert.equal(new Set(all).size, 75, 'every KiCad commit once, none of the notes commits, no duplicates across pages');
+  // A folder with no KiCad change in the first 30 commits shows the notice and keeps Older.
+  const quiet = Array.from({ length: 200 }, (_, k) => ({ sha: sha40(300 - k), files: [{ filename: 'A/notes.md' }] }));
+  const calls = [];
+  const gh2 = historyGh(quiet, { calls });
+  const notice = await (await designGet('/r/Cameronrlewis/repo/p/A/designs', [['/repos/Cameronrlewis/repo/', (url) => gh2(url.replace('https://api.github.com', ''))]])).text();
+  assert.match(notice, /Scanned 30 commits/);
+  assert.equal(calls.filter((p) => /\/commits\/[0-9a-f]{40}/.test(p)).length, 30, 'one detail request per scanned commit, never more than 30');
+  assert.match(notice, /cursor=[0-9a-f]{40}">Older/);
+});
+
+test('the list makes one detail request per scanned commit and nothing per row beyond that', async () => {
+  const log = Array.from({ length: 25 }, (_, k) => ({ sha: sha40(k + 1), files: [{ filename: 'A/A.kicad_sch' }] }));
+  const calls = [];
+  const gh = historyGh(log, { calls });
+  await designGet('/r/Cameronrlewis/repo/p/A/designs', [['/repos/Cameronrlewis/repo/', (url) => gh(url.replace('https://api.github.com', ''))]]);
+  assert.equal(calls.filter((p) => /\/commits\/[0-9a-f]{40}/.test(p)).length, 25);
+  assert.equal(calls.length, 25 + 1 + 1 + 1, 'the tip, the listing, the thumbnail release lookup, plus one detail per scanned row');
+});
+
+test('the repository-level commit list and the Reviews page now point at the project picker', async () => {
+  assert.equal((await designGet('/r/Cameronrlewis/repo/designs?ref=a..b', [])).status, 404, 'the old repository-wide list is gone');
+  assert.match(reviewsPage({ user: 'u', owner: 'o', repo: 'r', items: [], counts: {} }), /<a class="btn" href="\/r\/o\/r\/projects">Latest design/);
+  assert.ok(designsPage({ user: 'u', owner: 'o', repo: 'r', key: 'A', ref: 'main', rows: [{ sha: tipSha, message: '<b>', author: 'a', date: '' }], tip: tipSha, next: null, truncated: false, thumbs: new Map(), started: false, first: true }).includes('&lt;b&gt;'));
+});
+
+function renderRequest(body, { sealed, origin = 'https://site.example' } = {}) {
+  return call('/r/Cameronrlewis/repo/design/render', { method: 'POST', headers: { ...(sealed ? { Cookie: `s=${sealed}` } : {}), ...(origin ? { Origin: origin } : {}), 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(body) });
+}
+
+test('design snapshots get the report routes\' provenance, size, storage-host and paging rules; a malformed render form is a 400', async () => {
+  const sha = shaOf(1), artifact = { ...snap(21, sha.slice(0, 7)), workflow_run: { id: 501, repository_id: 1, head_repository_id: 1 } };
+  const good = { event: 'push', path: '.github/workflows/kicad-review.yml', head_sha: sha, repository: { id: 1 }, head_repository: { id: 1 } };
+  const lookup = async (run, { pages = 1 } = {}) => {
+    const reads = [], listed = [];
+    const gh = async (path) => {
+      if (path.includes('/commits?')) return json([{ sha }]);
+      if (path.includes('/actions/artifacts?')) {
+        listed.push(path);
+        return new Response(JSON.stringify({ artifacts: pages > 1 ? [] : [artifact] }), { headers: listed.length < pages ? { Link: '<x>; rel="next"' } : {} });
+      }
+      if (/\/actions\/runs\/501$/.test(path)) return json(run);
+      return json({}, 404);
+    };
+    const found = await findDesign(gh, 't', 'o', 'r', sha, 'A', async (g, t, r, a) => { reads.push(a.id); return payload(sha); });
+    return { found, reads, listed };
+  };
+  assert.equal((await lookup(good)).found.state, 'found');
+  assert.equal((await lookup({ ...good, event: 'workflow_dispatch', head_sha: 'f'.repeat(40) })).found.state, 'found', 'a manual run may render another head');
+  for (const run of [{ ...good, path: '.github/workflows/other.yml' }, { ...good, head_sha: 'f'.repeat(40) }, { ...good, path: undefined }]) {
+    const result = await lookup(run);
+    assert.equal(result.found.state, 'missing', JSON.stringify(run));
+    assert.deepEqual(result.reads, [], 'a snapshot from another workflow or head is never downloaded');
+  }
+  const unpaged = await lookup(good, { pages: 3 });
+  assert.equal(unpaged.found.state, 'error', 'past the listing page cap the lookup fails closed');
+  assert.equal(unpaged.listed.length, 2);
+  // readSnapshot: a declared oversize artifact is never downloaded; a storage URL off the artifact hosts is refused.
+  let asked = 0;
+  assert.equal(await readSnapshot(async () => { asked++; return json({}); }, 't', '/repos/o/r', { ...artifact, size_in_bytes: 10 * 1024 * 1024 + 1 }), null);
+  assert.equal(asked, 0);
+  const restore = mockFetch(async () => assert.fail('an off-host storage URL is never fetched'));
+  try {
+    await assert.rejects(() => readSnapshot(async () => new Response(null, { status: 302, headers: { Location: 'https://evil.example/design' } }), 't', '/repos/o/r', artifact), /invalid artifact URL/);
+  } finally { restore(); }
+  const sealed = await signedIn();
+  const restore2 = mockFetch(async (url) => { if (url === API) return accessibleRepo(); assert.fail('no dispatch for a malformed form: ' + url); });
+  try {
+    const bad = await call('/r/Cameronrlewis/repo/design/render', { method: 'POST', headers: { Cookie: `s=${sealed}`, Origin: 'https://site.example', 'Content-Type': 'multipart/form-data; boundary=x' }, body: 'not multipart' });
+    assert.equal(bad.status, 400);
+  } finally { restore2(); }
+});
+
+test('render dispatches a snapshot-only run for one commit and follows the run', async () => {
+  const sealed = await signedIn(); let sent;
+  const restore = mockFetch(async (url, options = {}) => { if (url === API) return accessibleRepo(); sent = [url, options]; return json({ workflow_run_id: 321 }); });
+  try {
+    const response = await renderRequest({ sha: tipSha }, { sealed });
+    assert.equal(response.status, 303);
+    assert.equal(response.headers.get('Location'), `/r/Cameronrlewis/repo/run/321?head=${tipSha}`);
+    assert.equal(sent[0], `${API}/actions/workflows/kicad-review.yml/dispatches`);
+    assert.deepEqual(JSON.parse(sent[1].body), { ref: 'main', inputs: { head: tipSha, snapshot_only: 'true' }, return_run_details: true });
+  } finally { restore(); }
+});
+
+test('render refuses a foreign Origin, a bad commit and a caller workflow without the input', async () => {
+  const sealed = await signedIn(); let calls = 0;
+  const restore = mockFetch(async (url) => { calls += 1; return url === API ? accessibleRepo() : json({ message: 'Unexpected inputs provided' }, 422); });
+  try {
+    assert.equal((await renderRequest({ sha: tipSha }, { sealed, origin: 'https://evil.example' })).status, 403);
+    assert.equal((await renderRequest({ sha: tipSha }, { sealed, origin: null })).status, 403);
+    assert.equal(calls, 0);
+    for (const sha of ['', 'main', 'abc', '../../x', 'g'.repeat(40)]) assert.equal((await renderRequest({ sha }, { sealed })).status, 400, sha);
+    const refused = await renderRequest({ sha: tipSha }, { sealed });
+    assert.equal(refused.status, 403);
+    assert.match(await refused.text(), /snapshot_only input/);
+  } finally { restore(); }
+});
+
+test('designs list returns 404 for invalid cursor or disallowed ref', async () => {
+  for (const badRef of ['a..b', 'feature@{1}', 'v1.0^', '']) {
+    const res = await designGet(`/r/Cameronrlewis/repo/p/A/designs?ref=${encodeURIComponent(badRef)}`, []);
+    assert.equal(res.status, 404, badRef);
+  }
+  for (const badCursor of ['abc', 'not-a-40-hex-string', 'g'.repeat(40), '12345']) {
+    const res = await designGet(`/r/Cameronrlewis/repo/p/A/designs?cursor=${encodeURIComponent(badCursor)}`, []);
+    assert.equal(res.status, 404, badCursor);
+  }
+});
+
+test('render accepts 204 dispatch response, redirects with ?started=1, and renders the started notice', async () => {
+  const sealed = await signedIn();
+  const restore = mockFetch(async (url) => { if (url === API) return accessibleRepo(); return new Response(null, { status: 204 }); });
+  try {
+    // Valid folder key: redirects to /p/<key>/designs?started=1
+    const resWithKey = await renderRequest({ sha: tipSha, key: 'A' }, { sealed });
+    assert.equal(resWithKey.status, 303);
+    assert.equal(resWithKey.headers.get('Location'), '/r/Cameronrlewis/repo/p/A/designs?started=1');
+
+    // Non-folder key: redirects to /projects?started=1
+    const resNoKey = await renderRequest({ sha: tipSha, key: '' }, { sealed });
+    assert.equal(resNoKey.status, 303);
+    assert.equal(resNoKey.headers.get('Location'), '/r/Cameronrlewis/repo/projects?started=1');
+
+    // Non-folder key fallback on validation error (400)
+    const badShaNoKey = await renderRequest({ sha: 'bad', key: '' }, { sealed });
+    assert.equal(badShaNoKey.status, 400);
+    assert.match(await badShaNoKey.text(), /href="\/r\/Cameronrlewis\/repo\/projects">Back to revisions<\/a>/);
+
+    // Non-folder key in designsRoute returns 404
+    const badKeyRoute = await designGet('/r/Cameronrlewis/repo/p/%252e%252e/designs', []);
+    assert.equal(badKeyRoute.status, 404);
+  } finally { restore(); }
+
+  // Check the started notice on designsPage
+  const pageWithNotice = designsPage({ user: 'u', owner: 'o', repo: 'r', key: 'A', ref: 'main', rows: [], tip: '', next: null, truncated: false, thumbs: new Map(), started: true, first: true });
+  assert.match(pageWithNotice, /class="notice notice-info" role="status">The render has started\. It appears in the list in about two minutes\.<\/div>/);
+  const pageWithoutNotice = designsPage({ user: 'u', owner: 'o', repo: 'r', key: 'A', ref: 'main', rows: [], tip: '', next: null, truncated: false, thumbs: new Map(), started: false, first: true });
+  assert.ok(!pageWithoutNotice.includes('The render has started'));
+});
+
+test('designsPage renders thumbnail image when thumbs has a hit, placeholder otherwise, and displays decoded canonical dir in lead', () => {
+  const hitMap = new Map([[tipSha, 'iVBORw0KGgo=']]);
+  const row = { sha: tipSha, message: 'msg', author: 'auth', date: '2026-10-24T10:00:00Z' };
+  const htmlHit = designsPage({ user: 'u', owner: 'o', repo: 'r', key: 'Example%20Projects%2FMain%20Board', ref: 'main', rows: [row], tip: tipSha, next: null, truncated: false, thumbs: hitMap, started: false, first: true });
+  assert.match(htmlHit, /<img alt="" width="200" height="125" src="data:image\/png;base64,iVBORw0KGgo=">/);
+  assert.match(htmlHit, /<code>Example Projects\/Main Board<\/code>/, 'lead line shows decoded canonical dir rather than URL-encoded key');
+
+  const emptyMap = new Map();
+  const htmlMiss = designsPage({ user: 'u', owner: 'o', repo: 'r', key: 'A', ref: 'main', rows: [row], tip: tipSha, next: null, truncated: false, thumbs: emptyMap, started: false, first: true });
+  assert.match(htmlMiss, /<span class="design-thumb-missing" aria-hidden="true"><\/span>/);
+});
+
+test('history cursor stays anchored to the selected ref across merge DAGs and rejects unrelated foreign cursor SHAs', async () => {
+  // Merge DAG on main:
+  // Root is sha40(1).
+  // First-parent mainline commits sha40(2)..sha40(6) (5 commits) descend from Root.
+  // Merged branch commits sha40(101)..sha40(124) (24 commits) also descend from Root, with newer timestamps than sha40(2)..sha40(6).
+  // Merge commit sha40(200) (main tip) has parents [sha40(6), sha40(124)].
+  // Unrelated foreign branch commits sha40(902) -> sha40(901) -> sha40(1) are NOT reachable from main.
+  const rootSha = sha40(1);
+  const mainLine = Array.from({ length: 5 }, (_, i) => {
+    const n = 6 - i;
+    return { sha: sha40(n), parents: [n === 2 ? rootSha : sha40(n - 1)], files: [{ filename: 'A/A.kicad_sch' }] };
+  });
+  const mergedBranch = Array.from({ length: 24 }, (_, i) => {
+    const n = 124 - i;
+    return { sha: sha40(n), parents: [n === 101 ? rootSha : sha40(n - 1)], files: [{ filename: 'A/A.kicad_sch' }] };
+  });
+  const mergeTip = { sha: sha40(200), parents: [sha40(6), sha40(124)], files: [{ filename: 'A/A.kicad_sch' }] };
+  const foreignBranch = [
+    { sha: sha40(902), parents: [sha40(901)], files: [{ filename: 'A/A.kicad_sch' }] },
+    { sha: sha40(901), parents: [rootSha], files: [{ filename: 'A/A.kicad_sch' }] },
+  ];
+  // Chronological order in repository: foreignBranch newest, then mergeTip, mergedBranch, mainLine, root
+  const dagLog = [
+    ...foreignBranch,
+    mergeTip,
+    ...mergedBranch,
+    ...mainLine,
+    { sha: rootSha, parents: [], files: [{ filename: 'A/A.kicad_sch' }] },
+  ];
+  const calls = [];
+  const gh = historyGh(dagLog, { calls, refs: { main: mergeTip.sha, feature: sha40(902) } });
+  const route = [['/repos/Cameronrlewis/repo/', (url) => gh(url.replace('https://api.github.com', ''))]];
+
+  // Page 1 on main returns mergeTip (1) + mergedBranch (24) = 25 rows; cursor is sha40(101) (whose only parent is rootSha)
+  const page1 = await (await designGet('/r/Cameronrlewis/repo/p/A/designs?ref=main', route)).text();
+  const rows1 = [...page1.matchAll(/\/p\/A\/design\/([0-9a-f]{40})"/g)].map((m) => m[1]);
+  assert.equal(rows1.length, 25);
+  assert.equal(rows1[0], sha40(200));
+  assert.equal(rows1[24], sha40(101));
+  const cursor1 = /cursor=([0-9a-f]{40})">Older/.exec(page1)[1];
+  assert.equal(cursor1, sha40(101));
+
+  // Page 2 with cursor=sha40(101) must stay anchored to ref=main and NOT skip mainLine (sha40(6)..sha40(2))
+  const page2 = await (await designGet(`/r/Cameronrlewis/repo/p/A/designs?ref=main&cursor=${cursor1}`, route)).text();
+  const rows2 = [...page2.matchAll(/\/p\/A\/design\/([0-9a-f]{40})"/g)].map((m) => m[1]);
+  assert.deepEqual(rows2, [sha40(6), sha40(5), sha40(4), sha40(3), sha40(2), rootSha], 'sibling branch commits across merge topology are preserved');
+  assert.ok(calls.filter((p) => p.includes('/commits?')).every((p) => p.includes('sha=main')), 'every commit list request stays anchored to sha=main');
+
+  // Foreign cursor SHA (valid commit on another branch, not reachable from main) must not pivot off main
+  calls.length = 0;
+  await assert.rejects(
+    () => scanHistory(gh, 't', '/repos/Cameronrlewis/repo', 'main', 'A', sha40(902)),
+    (err) => err instanceof CursorNotFoundError
+  );
+  assert.equal(calls.filter((p) => p.includes(`/commits/${sha40(901)}`) || p.includes(`/commits/${sha40(902)}`)).length, 0, 'foreign commits are never inspected');
+  const foreignRes = await designGet(`/r/Cameronrlewis/repo/p/A/designs?ref=main&cursor=${sha40(902)}`, route);
+  assert.equal(foreignRes.status, 404, 'unrelated cursor SHA on designsRoute returns 404 instead of pivoting off main');
+  const foreignText = await foreignRes.text();
+  assert.ok(!foreignText.includes(sha40(901)) && !foreignText.includes(sha40(902)), 'no foreign branch commit is rendered');
+});
+
+test('MAX_SCAN bounds total commit-detail HTTP requests across paginated commit details', async () => {
+  // 25 commits where each commit has 250 files (3 detail pages of 100, 100, 50 files), with the KiCad change on page 3.
+  const multiPageFiles = [
+    ...Array.from({ length: 249 }, (_, i) => ({ filename: `docs/f${i}.md` })),
+    { filename: 'A/A.kicad_sch' },
+  ];
+  const log = Array.from({ length: 25 }, (_, k) => ({ sha: sha40(25 - k), files: multiPageFiles }));
+  const calls = [];
+  const gh = historyGh(log, { calls });
+  const route = [['/repos/Cameronrlewis/repo/', (url) => gh(url.replace('https://api.github.com', ''))]];
+
+  const first = await (await designGet('/r/Cameronrlewis/repo/p/A/designs', route)).text();
+  const detailCalls = calls.filter((p) => /\/commits\/[0-9a-f]{40}/.test(p));
+  assert.equal(detailCalls.length, 30, 'at most 30 commit-detail HTTP requests per view even when commits paginate');
+  const rows1 = [...first.matchAll(/\/p\/A\/design\/([0-9a-f]{40})"/g)].map((m) => m[1]);
+  assert.equal(rows1.length, 10, '10 commits x 3 detail pages = 30 detail requests');
+  assert.match(first, /Scanned 30 commits/);
+  const cursor = /cursor=([0-9a-f]{40})">Older/.exec(first)[1];
+  assert.equal(cursor, sha40(16), 'resumes after the 10th commit');
+
+  // Resuming with cursor scans the next 10 commits (30 detail requests), then the remaining 5 (15), without skipping any commit
+  calls.length = 0;
+  const second = await (await designGet(`/r/Cameronrlewis/repo/p/A/designs?cursor=${cursor}`, route)).text();
+  const rows2 = [...second.matchAll(/\/p\/A\/design\/([0-9a-f]{40})"/g)].map((m) => m[1]);
+  assert.deepEqual(rows2, Array.from({ length: 10 }, (_, k) => sha40(15 - k)));
+  assert.equal(calls.filter((p) => /\/commits\/[0-9a-f]{40}/.test(p)).length, 30);
+  calls.length = 0;
+  const third = await (await designGet(`/r/Cameronrlewis/repo/p/A/designs?cursor=${/cursor=([0-9a-f]{40})">Older/.exec(second)[1]}`, route)).text();
+  const rows3 = [...third.matchAll(/\/p\/A\/design\/([0-9a-f]{40})"/g)].map((m) => m[1]);
+  assert.deepEqual(rows3, [sha40(5), sha40(4), sha40(3), sha40(2), sha40(1)]);
+  assert.equal(calls.filter((p) => /\/commits\/[0-9a-f]{40}/.test(p)).length, 15);
+
+  // Mid-commit budget exhaustion: 9 commits x 3 pages (27 requests) + 1 commit x 2 pages (29 requests) + 1 commit needing 3 pages.
+  // The 11th commit hits the 30-request ceiling on its page 1, so it must not be skipped; cursor stays at the 10th commit.
+  const twoPageFiles = [
+    ...Array.from({ length: 149 }, (_, i) => ({ filename: `docs/f${i}.md` })),
+    { filename: 'A/A.kicad_sch' },
+  ];
+  const partialLog = [
+    ...Array.from({ length: 9 }, (_, k) => ({ sha: sha40(30 - k), files: multiPageFiles })),
+    { sha: sha40(11), files: twoPageFiles },
+    { sha: sha40(10), files: multiPageFiles },
+  ];
+  const partialCalls = [];
+  const partialGh = historyGh(partialLog, { calls: partialCalls });
+  const partialRes = await scanHistory(partialGh, 't', '/repos/Cameronrlewis/repo', 'main', 'A', '');
+  assert.equal(partialCalls.filter((p) => /\/commits\/[0-9a-f]{40}/.test(p)).length, 30, 'stops at 30 detail HTTP requests mid-commit');
+  assert.equal(partialRes.rows.length, 10);
+  assert.equal(partialRes.truncated, true);
+  assert.equal(partialRes.next, sha40(11), 'cursor stays at the last fully scanned commit so the incomplete commit is not skipped');
+  const resumedPartial = await scanHistory(partialGh, 't', '/repos/Cameronrlewis/repo', 'main', 'A', partialRes.next);
+  assert.deepEqual(resumedPartial.rows.map((r) => r.sha), [sha40(10)], 'resuming from cursor scans the previously incomplete commit in full');
+  assert.equal(resumedPartial.next, null);
+});
+
+test('exhausted history with exactly 25 terminal matches returns next: null and omits Older link', async () => {
+  const exact25 = Array.from({ length: 25 }, (_, k) => ({ sha: sha40(25 - k), files: [{ filename: 'A/A.kicad_sch' }] }));
+  const gh25 = historyGh(exact25);
+  const res25 = await scanHistory(gh25, 't', '/repos/Cameronrlewis/repo', 'main', 'A', '');
+  assert.equal(res25.rows.length, 25);
+  assert.equal(res25.next, null, 'no Older cursor when batch and GitHub pagination are exhausted at the 25th match');
+  assert.equal(res25.truncated, false);
+  const page25 = await (await designGet('/r/Cameronrlewis/repo/p/A/designs', [['/repos/Cameronrlewis/repo/', (url) => gh25(url.replace('https://api.github.com', ''))]])).text();
+  assert.ok(!page25.includes('>Older<'), 'Older button is omitted when history is exhausted at 25 rows');
+});
+
+test('first commit exhausting detail budget advances scan with truncated true and documented ceiling', async () => {
+  // A single commit with 65 pages of files (6500 files, KiCad file at file 10).
+  // Detail budget exhausts at page 30 (MAX_SCAN = 30).
+  const hugeFiles = [
+    ...Array.from({ length: 9 }, (_, i) => ({ filename: `docs/f${i}.md` })),
+    { filename: 'A/A.kicad_sch' },
+    ...Array.from({ length: 6490 }, (_, i) => ({ filename: `extra/f${i}.md` })),
+  ];
+  const log = [{ sha: sha40(1), files: hugeFiles }, { sha: sha40(2), files: [{ filename: 'A/A.kicad_sch' }] }];
+  const calls = [];
+  const gh = historyGh(log, { calls });
+  const res = await scanHistory(gh, 't', '/repos/Cameronrlewis/repo', 'main', 'A', '');
+  const detailCalls = calls.filter((p) => /\/commits\/[0-9a-f]{40}/.test(p));
+  assert.equal(detailCalls.length, 30, 'detail budget is capped at 30 requests');
+  assert.equal(res.truncated, true);
+  assert.equal(res.rows.length, 1);
+  assert.equal(res.rows[0].sha, sha40(1));
+  assert.equal(res.next, sha40(1), 'advances past the incomplete first commit');
+});
+
+test('list page budget bounds cursor skip and unexhausted history returns 502 instead of false 404', async () => {
+  // Mock GitHub that responds with 60 pages of commits (all non-matching) and hasNextPage: true
+  const calls = [];
+  const mockGh = async (path) => {
+    calls.push(path);
+    if (path.includes('/git/trees/')) return json({ tree: [] });
+    if (path.includes('/releases/tags/design-thumbs')) return new Response('{}', { status: 404 });
+    const u = new URL(`https://x${path}`);
+    if (u.pathname.endsWith('/commits')) {
+      const pageNum = Number(u.searchParams.get('page') || 1);
+      // Return 100 commits per page, none matching cursor, Link: next always present
+      const items = Array.from({ length: 100 }, (_, i) => ({ sha: sha40((pageNum - 1) * 100 + i + 1000) }));
+      return new Response(JSON.stringify(items), {
+        headers: { 'Content-Type': 'application/json', Link: '<x>; rel="next"' },
+      });
+    }
+    return json({}, 404);
+  };
+
+  // scanHistory looking for cursor that is not in the first 10 pages throws history unavailable, not CursorNotFoundError
+  await assert.rejects(
+    () => scanHistory(mockGh, 't', '/repos/Cameronrlewis/repo', 'main', 'A', sha40(99999)),
+    (err) => !(err instanceof CursorNotFoundError) && err.message === 'history unavailable'
+  );
+  assert.equal(calls.filter((p) => p.includes('/commits?')).length, 10, 'bounded at MAX_LIST_PAGES list requests');
+
+  // designsRoute returns 502 (history unavailable), NOT 404 (cursor missing)
+  const route = [['/repos/Cameronrlewis/repo/', (url) => mockGh(url.replace('https://api.github.com', ''))]];
+  const res = await designGet(`/r/Cameronrlewis/repo/p/A/designs?ref=main&cursor=${sha40(99999)}`, route);
+  assert.equal(res.status, 502, 'list budget exhaustion returns 502, not 404');
+
+  // When cursor is the last item of page 10 and a next page exists, no commit after cursor is examined (!progressed);
+  // must throw 'history unavailable' (502) instead of returning { rows: [], next: cursor, truncated: true }.
+  const cursorAt50End = sha40((10 - 1) * 100 + 99 + 1000);
+  await assert.rejects(
+    () => scanHistory(mockGh, 't', '/repos/Cameronrlewis/repo', 'main', 'A', cursorAt50End),
+    (err) => !(err instanceof CursorNotFoundError) && err.message === 'history unavailable'
+  );
+  const resAt50End = await designGet(`/r/Cameronrlewis/repo/p/A/designs?ref=main&cursor=${cursorAt50End}`, route);
+  assert.equal(resAt50End.status, 502, 'cursor at end of page 10 with no progress returns 502 instead of self-looping Older link');
+});
+
+test('list thumbnails cost at most three GitHub requests, however many rows there are, and never send the token to the signed URL', async () => {
+  const index = { v: 1, projects: { A: [{ sha: sha40(1), date: '2026-10-24T10:00:00Z', png: 'iVBORw0KGgo=' }] } };
+  for (const rows of [1, 25]) {
+    const seen = [];
+    const restore = mockFetch(async (url, options = {}) => {
+      seen.push({ url, auth: options.headers?.Authorization || null });
+      if (url.endsWith('/releases/tags/design-thumbs')) return json({ assets: [{ id: 555, name: 'thumbs.json' }] });
+      if (url.endsWith('/releases/assets/555')) return new Response(null, { status: 302, headers: { Location: 'https://release-assets.githubusercontent.com/t.json?sig=1' } });
+      if (url === 'https://release-assets.githubusercontent.com/t.json?sig=1') return json(index);
+      return new Response('{}', { status: 404 });
+    });
+    try {
+      const gh = async (path, token, init) => fetch(`https://api.github.com${path}`, { ...init, headers: { Authorization: `Bearer ${token}`, ...(init?.headers || {}) } });
+      const shas = Array.from({ length: rows }, (_, i) => sha40(i + 1));
+      const found = await thumbnailsFor(gh, 'tok', '/repos/o/r', 'A', shas);
+      assert.equal(seen.length, 3, `${rows} rows`);
+      assert.equal(seen[2].auth, null, 'the signed URL never receives the token');
+      assert.equal(found.get(sha40(1)), 'iVBORw0KGgo=', 'the thumbnail for a listed commit is returned');
+      assert.equal(found.has(sha40(999)), false);
+      const page = designsPage({ user: 'u', owner: 'o', repo: 'r', key: 'A', ref: 'main',
+        rows: [{ sha: sha40(1), message: 'm', author: 'a', date: '' }, { sha: sha40(2), message: 'm2', author: 'a', date: '' }],
+        tip: sha40(1), next: null, truncated: false, thumbs: found, started: false, first: true });
+      assert.match(page, /<img alt="" width="200" height="125" src="data:image\/png;base64,iVBORw0KGgo=">/);
+      assert.match(page, /<span class="design-thumb-missing" aria-hidden="true"><\/span>/);
+    } finally { restore(); }
+  }
+});
+
+test('thumbnails at the shared size limit are shown; one character over is a placeholder (the producer never writes one)', async () => {
+  const { THUMB_PNG_B64_MAX } = await import('./design.js');
+  assert.equal(THUMB_PNG_B64_MAX, 40000, 'kicad_review.py THUMB_PNG_B64_MAX pins the same number');
+  const at = 'A'.repeat(THUMB_PNG_B64_MAX), over = 'A'.repeat(THUMB_PNG_B64_MAX + 1);
+  const index = { v: 1, projects: { A: [{ sha: sha40(1), date: '', png: at }, { sha: sha40(2), date: '', png: over }] } };
+  const restore = mockFetch(async (url) => {
+    if (url.endsWith('/releases/tags/design-thumbs')) return json({ assets: [{ id: 555, name: 'thumbs.json' }] });
+    if (url.endsWith('/releases/assets/555')) return new Response(null, { status: 302, headers: { Location: 'https://release-assets.githubusercontent.com/t.json' } });
+    if (url === 'https://release-assets.githubusercontent.com/t.json') return json(index);
+    return new Response('{}', { status: 404 });
+  });
+  try {
+    const gh = async (path, token, init) => fetch(`https://api.github.com${path}`, init);
+    const found = await thumbnailsFor(gh, 'tok', '/repos/o/r', 'A', [sha40(1), sha40(2)]);
+    assert.equal(found.get(sha40(1)), at);
+    assert.equal(found.has(sha40(2)), false);
+  } finally { restore(); }
+});
+
+test('a missing thumbnail asset leaves every row a placeholder, and never fails the list', async () => {
+  const restore = mockFetch(async () => new Response('{}', { status: 404 }));
+  try {
+    const gh = async (path, token, init) => fetch(`https://api.github.com${path}`, init);
+    assert.equal((await thumbnailsFor(gh, 'tok', '/repos/o/r', 'A', [sha40(1)])).size, 0);
+  } finally { restore(); }
+});
+
+test('a stored report with a board still but no 3D model inlines poster code only and loads no script at run time', () => {
+  const data = { version: 1, blobs: { poster: 'png-base64' }, projects: [{ dir: 'p', changes: [], board: { poster3d: { head: 'poster' } } }] };
+  const bundle = '<script type="application/octet-stream" id="three-bundle">retained</script>';
+  const html = currentReport(storedImageReport(data) + bundle);
+  assert.equal(html.split('window.Review3D = (() =>').length - 1, 1, 'review3d.js inlined once');
+  assert.ok(!html.includes('id="three-bundle"') && !html.includes('id="three-decode-worker"'), 'no 3D bundle without a model');
+  assert.ok(!html.includes('src="review3d.js"'));
+  assert.doesNotMatch(html, /\.src\s*=\s*['"][^'"]*\.js['"]/, 'self-contained report must not load scripts at run time');
+  assert.ok(html.indexOf('window.Review3D = (() =>') < html.indexOf('const D = window.REVIEW_DATA'));
 });
 
 import { validateAsk, askOptedIn, systemBlocks, followupSplitter, sseEvents, answerEvents, frame as askFrame, LIMITS } from './ask.js';

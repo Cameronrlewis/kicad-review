@@ -6,6 +6,7 @@ import { readinessClient } from './readiness-client.js';
 import { threadsClient } from './threads-client.js';
 import { askClient } from './ask-client.js';
 import { threeClient } from './three-client.js';
+import { designName, projectKey, canonicalFolder, MAX_SCAN } from './design.js';
 
 export function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
@@ -119,7 +120,40 @@ export function reviewsPage({ user, owner, repo, items, counts = {}, filter = 'a
       return `<section><h2>${safeUrl ? link(group.url, group.title) : e(group.title)}</h2>${progress}${table(group.items.map(card).join(''))}</section>`;
     }).join('');
   }
-  return frame({ title: 'Reviews', user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: 'Reviews' }], body: `<main class="page page-wide bench-opening"><div class="page-head"><div><h1>Reviews</h1><p class="lead">${e(owner)}/${e(repo)}</p></div><div class="page-actions">${link(`${path}/commits`, 'Compare commits', 'btn btn-primary')}</div></div>${started ? '<div class="notice notice-info">Your review has started. It appears here in about two minutes. You can leave this page.</div>' : ''}<nav class="filter-row" aria-label="Review filters">${chips}</nav>${content}</main>` });
+  return frame({ title: 'Reviews', user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: 'Reviews' }], body: `<main class="page page-wide bench-opening"><div class="page-head"><div><h1>Reviews</h1><p class="lead">${e(owner)}/${e(repo)}</p></div><div class="page-actions">${link(`${path}/projects`, 'Latest design', 'btn')}${link(`${path}/commits`, 'Compare commits', 'btn btn-primary')}</div></div>${started ? '<div class="notice notice-info">Your review has started. It appears here in about two minutes. You can leave this page.</div>' : ''}<nav class="filter-row" aria-label="Review filters">${chips}</nav>${content}</main>` });
+}
+
+export function designMissingPage({ user, owner, repo, key, ref, sha, canRender }) {
+  const path = repoPath(owner, repo);
+  const canonical = canonicalFolder(key);
+  const safeKey = canonical === null ? '' : projectKey(canonical);
+  const browseLink = safeKey ? link(`${path}/p/${safeKey}/designs`, 'Browse revisions', 'btn') : link(`${path}/projects`, 'Browse revisions', 'btn');
+  const render = canRender ? `<form method="post" action="${path}/design/render"><input type="hidden" name="key" value="${e(safeKey || key)}"><input type="hidden" name="sha" value="${e(sha)}"><button class="btn btn-primary">Render this revision</button></form>` : '<p class="muted">Someone with write access can render it from here.</p>';
+  return frame({ title: 'No design snapshot', user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: 'Design' }],
+    body: `<main class="page message-page design-site"><section class="card message-card"><h1>No design snapshot for ${e(ref)}</h1><p><code>${e(String(sha).slice(0, 7))}</code> has no design snapshot. Snapshots are made on pushes to the default branch and on version tags, and expire with the repository's artifact retention.</p>${render}<p class="message-actions">${browseLink} ${link(path, 'Reviews', 'btn')}</p></section></main>` });
+}
+
+// The project folders of the default branch: one design page each.
+export function projectsPage({ user, owner, repo, projects }) {
+  const path = repoPath(owner, repo);
+  const rows = projects.map((dir) => `<tr><td class="mono">${dir ? e(dir) : '<span class="muted">Repository root</span>'}</td><td><span class="page-actions">${link(`${path}/p/${projectKey(dir)}/design`, 'Latest design', 'btn btn-primary')}${link(`${path}/p/${projectKey(dir)}/designs`, 'Revisions', 'btn')}</span></td></tr>`).join('');
+  return frame({ title: 'Projects', user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: 'Projects' }],
+    body: `<main class="page design-site"><div class="page-head"><div><h1>Projects</h1><p class="lead">The KiCad project folders on the default branch. Each has its own design page.</p></div></div>${projects.length ? siteTable(['Folder', 'Open'], rows, 'Projects') : '<section class="card empty"><h2>No KiCad project</h2><p>This repository has no folder with a .kicad_pro file on its default branch.</p></section>'}</main>` });
+}
+
+// The KiCad-change history of one project folder. thumbs is a Map of sha to a base64 PNG (Task 8A); a missing thumbnail is a
+// plain placeholder. Older resumes after the last row shown (cursor); Newest returns to the first page; a truncated scan says so.
+export function designsPage({ user, owner, repo, key, ref, rows, tip, next, truncated, thumbs, first, started }) {
+  const canonical = canonicalFolder(key);
+  const safeKey = canonical === null ? '' : projectKey(canonical);
+  const displayDir = canonical !== null ? (canonical || '.') : key;
+  const path = repoPath(owner, repo), base = safeKey ? `${path}/p/${safeKey}` : `${path}/projects`;
+  const list = (cursor) => `${base}/designs?ref=${encodeURIComponent(ref)}${cursor ? `&cursor=${cursor}` : ''}`;
+  const body = rows.map((r) => `<tr><td class="design-thumb">${thumbs?.has(r.sha) ? `<img alt="" width="200" height="125" src="data:image/png;base64,${thumbs.get(r.sha)}">` : '<span class="design-thumb-missing" aria-hidden="true"></span>'}</td><td><code>${e(r.sha.slice(0, 7))}</code></td><td title="${e(r.message)}">${e(r.message)}</td><td>${e(r.author)}</td><td class="mono" title="${e(r.date)}">${e(relativeTime(r.date))}</td><td class="design-actions">${link(safeKey ? `${base}/design/${r.sha}` : `${path}/projects`, 'View', 'btn')}${tip && r.sha !== tip ? `<form method="post" action="${path}/compare"><input type="hidden" name="base" value="${e(r.sha)}"><input type="hidden" name="head" value="${e(tip)}"><button class="btn" title="Review what changed from this commit to the newest one">Compare with newest</button></form>` : ''}</td></tr>`).join('');
+  const notice = truncated ? `<div class="notice notice-info" role="status">Scanned ${MAX_SCAN} commits. Older KiCad changes follow with Older.</div>` : '';
+  const nav = `${first ? '' : link(list(''), 'Newest', 'btn')}${next ? link(list(next), 'Older', 'btn') : ''}`;
+  return frame({ title: 'KiCad changes', user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { href: `${path}/projects`, label: 'Projects' }, { label: 'KiCad changes' }],
+    body: `<main class="page page-wide design-site"><div class="page-head"><div><h1>KiCad changes</h1><p class="lead">${e(owner)}/${e(repo)} · <code>${e(displayDir)}</code> · <code>${e(ref)}</code></p></div><div class="page-actions">${link(safeKey ? `${base}/design` : `${path}/projects`, 'Latest design', 'btn btn-primary')}</div></div>${started ? '<div class="notice notice-info" role="status">The render has started. It appears in the list in about two minutes.</div>' : ''}<p class="muted">Commits on the default branch that changed a KiCad file in this project folder (schematic, board, symbols, footprints, project, rules, worksheet, 3D models). README and other edits are not listed.</p>${notice}${rows.length ? siteTable(['Snapshot', 'Commit', 'Message', 'Author', 'When', 'Open'], body, 'KiCad changes') : '<p class="muted">No commit in this folder has changed a KiCad file in the range scanned.</p>'}<p class="page-actions">${nav}</p></main>` });
 }
 
 export function commitsPage({ user, owner, repo, branch, branches, tag = '', tags = [], commits, base = '', head = '', notice = null, files = [], swap = false }) {
@@ -182,20 +216,29 @@ export function commitsPage({ user, owner, repo, branch, branches, tag = '', tag
   return frame({ title: 'Compare commits', user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: 'Compare commits' }], body: `<main class="page bench-opening"><div class="page-head"><div><h1>Compare commits</h1><p class="lead">Pick the earlier revision as Base and the later one as Head. The review shows what changed from Base to Head.</p></div></div>${alert}${swapForm}<form method="post" action="${path}/compare" class="compare-form"><div class="source-picker"><label>Branch <select name="branch" form="source-picker">${branchOptions}</select></label><span class="muted">or a tag</span><label class="sr-only" for="tag">Tag</label><select id="tag" name="tag" form="source-picker"><option value="">Select a tag</option>${tagOptions}</select><button class="btn" form="source-picker">Show</button></div><div class="table-scroll"><table class="table" aria-label="Commit revisions"><thead><tr><th>Base <span class="compare-letter" aria-hidden="true">A</span></th><th>Head <span class="compare-letter" aria-hidden="true">B</span></th><th>SHA</th><th>Message</th><th>Author</th><th>Date</th><th></th></tr></thead><tbody>${rows}</tbody></table></div><div class="compare-bar">${selection('Base', baseCommit)}<span class="compare-arrow" aria-hidden="true">→</span>${selection('Head', headCommit)}<div class="compare-action"><button class="btn btn-primary" type="submit">Start review</button><div class="muted" role="status"></div></div></div></form><form id="source-picker" method="get"></form>${script}</main>` });
 }
 
-export function reviewPage({ user, owner, repo, id, name, workflowRunId, pdf = false, pull = null, runStatus = null, runConclusion = null, share = false, ask = false, mcpOrigin = null }) {
+export function reviewPage({ user, owner, repo, id, name, workflowRunId, pdf = false, pull = null, runStatus = null, runConclusion = null, share = false, ask = false, mcpOrigin = null, designRef = '', tip = '', projectIndex = '', folderKey = '', rawPath = '' }) {
   const path = repoPath(owner, repo);
   const match = /^kicad-review-([0-9a-f]{7}|none)-([0-9a-f]{7})-(pass|fail)\.html$/.exec(name || '');
-  const revision = match ? `${match[1]} → ${match[2]}` : 'Review';
+  const design = designName.exec(name || '');
+  const canonicalFolderKey = folderKey ? canonicalFolder(folderKey) : null;
+  const safeFolderKey = canonicalFolderKey === null ? '' : projectKey(canonicalFolderKey);
+  const folder = safeFolderKey ? `${path}/p/${safeFolderKey}` : '';
+  const designLinks = { latest: folder ? `${folder}/design` : `${path}/projects`, revisions: folder ? `${folder}/designs` : `${path}/projects` };
+  const revision = match ? `${match[1]} → ${match[2]}` : design ? `Design ${design[1]}` : 'Review';
   const result = runStatus === 'completed' && runConclusion ? (runConclusion === 'success' ? '<span class="status status-pass">✓ run passing</span>' : `<span class="status status-fail">✕ run ${e(runConclusion.replace(/_/g, ' '))}</span>`)
     : runStatus ? `<span class="status">… run ${e(runStatus.replace(/_/g, ' '))}</span>`
     : '<span class="muted">Run result not recorded</span>';
-  const raw = `${path}/a/${encodeURIComponent(id)}/raw`;
+  const raw = rawPath || `${path}/a/${encodeURIComponent(id)}/raw`;
+  const start = projectIndex ? `#p=${projectIndex}` : '';
   const run = /^\d+$/.test(String(workflowRunId)) ? `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/runs/${encodeURIComponent(workflowRunId)}` : '';
   const runLink = run ? link(run, 'Open run ↗') : '';
   const models = `${path}/a/${encodeURIComponent(id)}/3d/`;
   // Lazy 3D models: only this authenticated wrapper fetches; the sandboxed report asks it by digest.
   // threeClient validates the endpoint itself and installs no broker for a malformed one.
-  const script = reportFrameScript(raw) + `<script>(${threeClient.toString()})(${JSON.stringify({ endpoint: models }).replace(/</g, '\\u003c')});</script>`;
+  // A design link opens at its folder's report index; the frame script then loads raw + location.hash.
+  let script = (start ? `<script>if (!location.hash) history.replaceState(null, '', ${JSON.stringify(start)});</script>` : '') + reportFrameScript(raw)
+    + (/^\d{1,20}$/.test(String(id)) ? `<script>(${threeClient.toString()})(${JSON.stringify({ endpoint: models }).replace(/</g, '\\u003c')});</script>` : '');
+  if (design) script += `<script>(${designMetadataClient.toString()})(${JSON.stringify(design[1])});</script>`;
   const sharing = share ? shareControls(`${path}/a/${encodeURIComponent(id)}/share`, `${path}/share/revoke`) : '';
   const readiness = mergeBadge(Number.isInteger(pull) ? 'Checking…' : 'Not a PR', Number.isInteger(pull) ? 'Checking merge readiness…' : 'Merge readiness requires a pull request.');
   const readinessScript = Number.isInteger(pull) ? `<script>(${readinessClient.toString()})(${JSON.stringify({ readiness: `${path}/pull/${pull}/readiness`, reviewHead: match ? match[2] : null }).replace(/</g, '\\u003c')});</script>` : '';
@@ -209,9 +252,9 @@ export function reviewPage({ user, owner, repo, id, name, workflowRunId, pdf = f
       <label>Reply<textarea name="text" rows="3" maxlength="10000"></textarea></label>
       <p class="muted thread-shortcut">Ctrl+Enter to submit · Esc to close</p>
       <p role="status" class="muted"></p><p class="dialog-actions"><button class="btn btn-primary" data-act="reply">Reply</button> <button class="btn" data-act="resolve">Resolve</button> <button class="btn" data-act="issue" hidden>Create issue</button> <button type="button" class="btn" data-act="close">Close</button></p></form></dialog>
-    <script>(${threadsClient.toString()})(${JSON.stringify({ threads: Number.isInteger(pull) ? `${path}/pull/${pull}/threads` : null, issues: `${path}/issues`, pull, rerun: Number.isInteger(pull) ? `${path}/pull/${pull}/rerun` : null, run: `${path}/run/`, link: `${path}/a/${encodeURIComponent(id)}` }).replace(/</g, '\\u003c')});</script>`;
+    <script>(${threadsClient.toString()})(${JSON.stringify({ threads: Number.isInteger(pull) ? `${path}/pull/${pull}/threads` : null, issues: `${path}/issues`, pull, rerun: Number.isInteger(pull) ? `${path}/pull/${pull}/rerun` : null, run: `${path}/run/`, link: id !== undefined ? `${path}/a/${encodeURIComponent(id)}` : (rawPath ? rawPath.replace(/\/raw$/, '') : path) }).replace(/</g, '\\u003c')});</script>`;
   const askScript = ask ? `<script>(${askClient.toString()})(${JSON.stringify({ ask: `${path}/a/${encodeURIComponent(id)}/ask`, insight: `${path}/a/${encodeURIComponent(id)}/ask/insight` }).replace(/</g, '\\u003c')});</script>` : '';
-  return frame({ title: revision, user, reviewStatus: match?.[3] === 'fail' || (runStatus === 'completed' && runConclusion && runConclusion !== 'success') ? '✕ NEEDS WORK' : match ? '✓ CHECKS PASSING' : 'REVIEW', crumbs: [{ href: path, label: `${owner}/${repo}` }, { label: Number.isInteger(pull) ? `PR #${pull}` : 'Review' }], body: `<main class="review-page"><nav class="review-bar" aria-label="Review navigation">${revisionChips(match)}${Number.isInteger(pull) ? link(`https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pull/${pull}`, `PR #${pull} ↗`) : ''}${workflowRunId && /^\d+$/.test(String(workflowRunId)) ? `<span class="mono">Run ${e(workflowRunId)}</span>` : ''}${result}${readiness}${reviewOverflow(`${Number.isInteger(pull) ? link(`${path}/pull/${pull}/history`, 'History') : '<button disabled title="History requires a pull request">History</button>'}${share ? '<button id="share-open" type="button">Share…</button>' : '<button disabled title="Sharing is not enabled for this review">Share…</button>'}${runLink || '<button disabled title="Run not recorded">Open run</button>'}${pdf ? link(`${path}/a/${encodeURIComponent(id)}/pdf`, 'Download PDF') : ''}${connectPanel(mcpOrigin)}`)}${notice}</nav><div class="review-stage"><div id="review-loading" class="review-loading"><span class="spinner" aria-hidden="true"></span><span>Loading the review…</span></div><iframe id="review-report" src="${e(raw)}" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads" allow="clipboard-write" referrerpolicy="same-origin" title="KiCad review report"></iframe></div></main>${script}${readinessScript}${threads}${askScript}${sharing}` });
+  return frame({ title: revision, user, reviewStatus: design ? 'DESIGN' : match?.[3] === 'fail' || (runStatus === 'completed' && runConclusion && runConclusion !== 'success') ? '✕ NEEDS WORK' : match ? '✓ CHECKS PASSING' : 'REVIEW', crumbs: [{ href: path, label: `${owner}/${repo}` }, { label: design ? 'Design' : Number.isInteger(pull) ? `PR #${pull}` : 'Review' }], body: `<main class="review-page${design ? ' design-site' : ''}"><nav class="review-bar" aria-label="Review navigation">${design ? designChips(design[1], designRef, tip, designLinks) : revisionChips(match)}${Number.isInteger(pull) ? link(`https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pull/${pull}`, `PR #${pull} ↗`) : ''}${workflowRunId && /^\d+$/.test(String(workflowRunId)) ? `<span class="mono">Run ${e(workflowRunId)}</span>` : ''}${design ? '' : result}${design ? '' : readiness}${reviewOverflow(`${design ? link(designLinks.revisions, 'Revisions') : Number.isInteger(pull) ? link(`${path}/pull/${pull}/history`, 'History') : '<button disabled title="History requires a pull request">History</button>'}${share ? '<button id="share-open" type="button">Share…</button>' : '<button disabled title="Sharing is not enabled for this review">Share…</button>'}${runLink || '<button disabled title="Run not recorded">Open run</button>'}${pdf ? link(`${path}/a/${encodeURIComponent(id)}/pdf`, 'Download PDF') : ''}${connectPanel(mcpOrigin)}`)}${notice}</nav><div class="review-stage"><div id="review-loading" class="review-loading"><span class="spinner" aria-hidden="true"></span><span>Loading the review…</span></div><iframe id="review-report" src="${e(raw + start)}" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads" allow="clipboard-write" referrerpolicy="same-origin" title="KiCad review report"></iframe></div></main>${script}${readinessScript}${threads}${askScript}${sharing}` });
 }
 
 const revisionSha = /^[0-9a-f]{7,40}$/;
@@ -316,6 +359,27 @@ function status(value) { return siteBadge(value); }
 // bench-t2: the frame owns both chrome rows; the report owns the drawing tools.
 function revisionChips(match) {
   return `<span class="bench-revision"><span class="bench-label">BASE</span> <code>${e(match?.[1] || 'unknown')}</code></span><span aria-hidden="true">→</span><span class="bench-revision"><span class="bench-label">HEAD</span> <code>${e(match?.[2] || 'unknown')}</code></span>`;
+}
+// links = {latest, revisions}: the folder's own pages, or the project picker when no folder is known.
+function designChips(sha, ref, tip, links) {
+  const note = ref && tip && tip !== sha ? `<span class="muted">snapshot for <code>${e(ref)}</code> (requested tip ${e(tip)})</span>` : ref ? `<span class="muted"><code>${e(ref)}</code></span>` : '';
+  return `<span class="bench-revision"><span class="bench-label">DESIGN</span> <code>${e(sha)}</code></span>${note}<span class="design-metadata"><code data-design-ref></code><time data-design-date></time><span data-design-subject></span></span><span class="design-actions">${link(links.revisions, 'Revisions', 'btn design-action')}${link(links.latest, 'Latest design', 'btn design-action')}</span>`;
+}
+// The framed report hides its own chrome, so the wrapper shows the recorded ref, date and subject.
+// Only the sandboxed report frame is believed, and only for the commit the artifact is named for; text only.
+function designMetadataClient(expected) {
+  const iframe = document.getElementById('review-report');
+  addEventListener('message', event => {
+    if (event.source !== iframe.contentWindow || event.origin !== 'null') return;
+    const data = event.data?.designSnapshot;
+    if (!data || typeof data.sha !== 'string' || !/^[0-9a-f]{40}$/.test(data.sha) || !data.sha.startsWith(expected)) return;
+    if (typeof data.ref !== 'string' || !data.ref || data.ref.length > 255 || /[\u0000-\u001f\u007f]/.test(data.ref)) return;
+    if (typeof data.committedAt !== 'string' || !Number.isFinite(Date.parse(data.committedAt)) || typeof data.message !== 'string' || data.message.length > 10000) return;
+    const date = document.querySelector('[data-design-date]'), subject = document.querySelector('[data-design-subject]'), ref = document.querySelector('[data-design-ref]');
+    date.dateTime = data.committedAt; date.textContent = new Date(data.committedAt).toISOString().slice(0, 10);
+    subject.textContent = data.message; subject.title = data.message;
+    ref.textContent = data.ref;
+  });
 }
 function mergeBadge(state, text) {
   return `<details class="bench-menu bench-merge"><summary id="merge-badge">MERGE · ${e(state)}</summary><section id="readiness" class="readiness bench-popover" aria-live="polite"><ul>${['This review', 'GitHub approval', 'Blocking threads'].map(label => `<li class="wait">… ${label}: ${e(text)}</li>`).join('')}</ul></section></details>`;

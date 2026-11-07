@@ -22,7 +22,7 @@ function harness() {
   };
   const S = {p: 0, v: 'board', m: 'side', t: 'changes'};
   const ctx = vm.createContext({
-    D, S, Appearance, location: {pathname: '/x'}, leftTab: 'project', leftCollapsed: false,
+    D, S, Appearance, location: {pathname: '/x'}, leftTab: 'project', leftCollapsed: false, single: () => false,
     window: {ThreeStudio: {normalizeLighting: x => x, PRESETS: {bench: {}}}},
     proj: () => D.projects[S.p], canon: n => n.replace('_', '.'),
     valid: st => ({p: st.p, v: st.v, layers: st.layers, revision: 'head'}),

@@ -228,8 +228,9 @@
     selectedCopper(pane,selectedRow,state);
     renderer.setAppearance(look);
   }
-  function mount({stage, scenes, changes, state, appearance, onLost, attachPanZoom}) {
-    const panes = [], actions = actionMap(changes), sideMode = state.m === 'side';
+  // single: the label of one head-only pane (a design report), or false for a comparison.
+  function mount({stage, scenes, changes, state, appearance, onLost, attachPanZoom, single = false}) {
+    const panes = [], actions = actionMap(changes), sideMode = state.m === 'side' || !!single;
     let disposed = false, frame = 0, observer = null, unsubscribe = null;
     const getAppearance = () => typeof appearance === 'function' ? appearance() : appearance.get();
     const controller = {
@@ -327,13 +328,13 @@
       }
     };
     try {
-      for (const sides of sideMode ? [['base'],['head']] : [['base','head']]) {
+      for (const sides of single ? [['head']] : sideMode ? [['base'],['head']] : [['base','head']]) {
         const vp = document.createElement('div'), canvas = document.createElement('canvas'), hud = document.createElement('div');
         vp.className = 'vp board'; vp.dataset.boardGl = ''; if (sideMode) vp.dataset.side = sides[0];
         canvas.className = 'board-gl'; canvas.setAttribute('aria-label',`${sides.join(' and ')} board`);
         hud.className = 'board-hud'; vp.append(canvas,hud);
         const label = document.createElement('span'); label.className = 'tag';
-        label.textContent = sideMode ? (sides[0] === 'base' ? 'Base' : 'Head') + (!scenes[sides[0]] ? ' — not present' : '')
+        label.textContent = single ? single : sideMode ? (sides[0] === 'base' ? 'Base' : 'Head') + (!scenes[sides[0]] ? ' — not present' : '')
           : state.m === 'overlay' ? 'Base (red) · Head (green) · both (black)' : state.m === 'semantic' ? 'Changes only' : 'Base under Head';
         if (!sideMode && state.m === 'overlay') label.replaceChildren(...[['del','Base (red) · '],['add','Head (green) · '],['both','both (black)']].flatMap(([sw,text])=>{
           const i = document.createElement('i'); i.className = 'sw '+sw; return [i, document.createTextNode(text)];

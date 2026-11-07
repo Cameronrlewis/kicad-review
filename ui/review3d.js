@@ -126,14 +126,41 @@ window.Review3D = (() => {
       });
     } catch (error) { return Promise.reject(error); }
   }
-  async function poster3d(side, id, s) {
-    if (!id || !window.REVIEW_DATA.blobs[id]) return null;
-    // Small stills retain the native stream path; model and vendor bytes use the worker.
-    const bytes = await guardSession(s, gunzip(window.REVIEW_DATA.blobs[id]).arrayBuffer());
-    const url = URL.createObjectURL(new Blob([bytes], {type:'image/png'}));
-    s.urls.add(url); s.resourceCounts.urls = s.urls.size;
+  // One page-lifetime blob-URL cache for gzip blobs (posters, PcbDraw plots); revoked when the page unloads (not on entering the back/forward cache), never by a viewer closing.
+  const blobLoads = new Map();
+  const blobUrls = new Map();
+  async function blobUrl(id, type, s = null) {
+    if (!id) return null;
+    if (blobUrls.has(id)) return blobUrls.get(id);
+    if (!blobLoads.has(id)) {
+      // The shared load is session-free so one closed viewer cannot fail it for every later caller.
+      const promise = (async () => {
+        const b64 = window.REVIEW_DATA?.blobs?.[id];
+        if (typeof b64 !== 'string') return null;
+        const bytes = await gunzip(b64).arrayBuffer();
+        const url = URL.createObjectURL(new Blob([bytes], {type}));
+        blobUrls.set(id, url);
+        return url;
+      })().then(url => { if (!url) blobLoads.delete(id); return url; }, error => { blobLoads.delete(id); throw error; });
+      blobLoads.set(id, promise);
+    }
+    return s ? guardSession(s, blobLoads.get(id)) : blobLoads.get(id);
+  }
+  async function poster3d(side, id, s = null) {
+    const url = await blobUrl(id, 'image/png', s);
+    if (!url) return null;
     const image = new Image(); image.dataset.poster = side; image.alt = side + ' revision 3D preview';
-    image.src = url; await guardSession(s, image.decode()); return image;
+    image.src = url;
+    await (s ? guardSession(s, image.decode()) : image.decode());
+    return image;
+  }
+  if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+    window.addEventListener('pagehide', event => {
+      if (event?.persisted) return;   // into the back/forward cache: a restored page still shows these images
+      for (const url of blobUrls.values()) URL.revokeObjectURL(url);
+      blobUrls.clear();
+      blobLoads.clear();
+    });
   }
   const loadThree = async s => {
     if (window.THREE3D) return window.THREE3D;
@@ -823,6 +850,7 @@ window.Review3D = (() => {
       assembled:appState.assembled3d !== false, hidden:[], lighting:normalizeLighting(appState.lighting3d), hiddenBodies:false, visible:true, hostsBySide:{}, stage, project, appState
     };
     const state = window.Review3D.state = session.state = {
+      allowedSides:session.allowedSides,
       roots:session.roots, views:session.views, mode:session.mode, decodedScenes:session.decodedScenes, disposed:false, firstFrame:false, loading:false,
       revision:session.revision, assembled:session.assembled, lighting:session.lighting, modelDigests:{},
       readyBySide:{base:{frame:false},head:{frame:false}},
@@ -1024,5 +1052,5 @@ window.Review3D = (() => {
   // Node and headless browser contracts share one explicit test seam.
   const testSeam = {sampleFrame, session:()=>active, poster3d, parseByDigest, releaseGpu};
   if (typeof module !== 'undefined') module.exports = testSeam;
-  return {show,dispose,cameraBar,frame,focus,focusPart,clearSelection,changeForPart,setHidden,setLighting,setAssembled,normalizeLighting,cameraState,setCameraState,setBlend,toggleBlend,resize,setRevision,state:null,testSeam};
+  return {show,dispose,cameraBar,frame,focus,focusPart,clearSelection,changeForPart,setHidden,setLighting,setAssembled,normalizeLighting,cameraState,setCameraState,setBlend,toggleBlend,resize,setRevision,session:()=>active,poster3d,blobUrl,state:null,testSeam};
 })();

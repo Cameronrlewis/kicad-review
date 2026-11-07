@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
+const URL_ = URL;
 
 // Exercise the production helper through the shared explicit test seam.
 function cache() {
@@ -261,6 +262,81 @@ test('BR02 single renderer rejects a comparison fixture instead of skipping',asy
   assert.equal(result,'fixture is not single mode');
 });
 
+test('BR06 poster load aborted by a closed session does not poison the shared poster cache', async () => {
+  const png = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=='), c => c.charCodeAt(0));
+  const gz = new Uint8Array(await new Response(new Blob([png]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+  const window = {REVIEW_DATA:{blobs:{poster:Buffer.from(gz).toString('base64')}}};
+  const document = {createElement:() => ({}), head:{appendChild() {}}};
+  const module = {exports:{}};
+  let made = 0;
+  class Image { constructor() { this.dataset = {}; } decode() { return Promise.resolve(); } }
+  const URL = {createObjectURL:() => `blob:p${++made}`, revokeObjectURL() {}};
+  runInNewContext(readFileSync(new URL_('./review3d.js', import.meta.url), 'utf8'),
+    {window, document, DOMException, module, Response, Blob, DecompressionStream, Uint8Array, atob, Image, URL});
+  const dead = {dead:true, urls:new Set(), resourceCounts:{}};
+  await assert.rejects(module.exports.poster3d('head', 'poster', dead), {name:'AbortError'});
+  const image = await module.exports.poster3d('head', 'poster', null);
+  assert.ok(image, 'a later caller still gets the poster');
+  assert.equal(image.src, 'blob:p1');
+  assert.equal(made, 1, 'the blob is decoded into one shared URL');
+});
+
+test('BR06 closing a 3D viewer never revokes the shared navigation poster URL', async () => {
+  const png = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=='), c => c.charCodeAt(0));
+  const gz = new Uint8Array(await new Response(new Blob([png]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+  const window = {REVIEW_DATA:{blobs:{poster:Buffer.from(gz).toString('base64')}}};
+  const document = {createElement:() => ({}), head:{appendChild() {}}, removeEventListener() {}};
+  let made = 0;
+  const revoked = [];
+  class Image { constructor() { this.dataset = {}; } decode() { return Promise.resolve(); } }
+  const URL = {createObjectURL:() => `blob:p${++made}`, revokeObjectURL:url => revoked.push(url)};
+  const source = readFileSync(new URL_('./review3d.js', import.meta.url), 'utf8')
+    .replace('let active = null, bundle;', 'let active = null, bundle; window.setTestSession = s => active = s;');
+  runInNewContext(source, {window, document, DOMException, Response, Blob, DecompressionStream, Uint8Array, atob, Image, URL,
+    clearTimeout, cancelAnimationFrame() {}});
+  const api = window.Review3D;
+  // The navigation card loads the head poster with no session (sheet view has none).
+  const nav = await api.poster3d('head', 'poster');
+  assert.equal(nav.src, 'blob:p1');
+  // A viewer opens, shows the same poster as its own fallback, and closes.
+  const session = {dead:false, abort:new AbortController(), pending:new Map(), urls:new Set(), worker:null,
+    resourceCounts:{workers:0, urls:0, pending:0}, animationFrames:new Set(), renderHooks:[], views:[], roots:[],
+    parses:new Map(), decodedModels:new Map(), decodedScenes:[], environments:new Map(),
+    state:{loadingBySide:{base:false, head:false}}};
+  window.setTestSession(session);
+  const own = await api.poster3d('head', 'poster', session);
+  assert.equal(own.src, nav.src, 'the viewer reuses the shared page-lifetime URL');
+  assert.equal(session.urls.has(nav.src), false, 'a session never owns a shared URL');
+  api.dispose();
+  assert.equal(session.dead, true);
+  assert.deepEqual(revoked, [], 'closing the viewer leaves the navigation poster URL valid');
+  // A later caller still gets the same live URL from the cache, not a fresh decode.
+  assert.equal((await api.poster3d('head', 'poster')).src, 'blob:p1');
+  assert.equal(made, 1);
+});
+
+test('BR06 entering the back/forward cache keeps the shared poster URLs; a real unload releases them', async () => {
+  const png = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=='), c => c.charCodeAt(0));
+  const gz = new Uint8Array(await new Response(new Blob([png]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+  const listeners = {};
+  const window = {REVIEW_DATA:{blobs:{poster:Buffer.from(gz).toString('base64')}}, addEventListener:(type, fn) => { (listeners[type] ||= []).push(fn); }};
+  const document = {createElement:() => ({}), head:{appendChild() {}}};
+  const module = {exports:{}};
+  let made = 0;
+  const revoked = [];
+  class Image { constructor() { this.dataset = {}; } decode() { return Promise.resolve(); } }
+  const URL = {createObjectURL:() => `blob:p${++made}`, revokeObjectURL:url => revoked.push(url)};
+  runInNewContext(readFileSync(new URL_('./review3d.js', import.meta.url), 'utf8'),
+    {window, document, DOMException, module, Response, Blob, DecompressionStream, Uint8Array, atob, Image, URL});
+  const first = await module.exports.poster3d('head', 'poster', null);
+  for (const fn of listeners.pagehide) fn({persisted:true});   // navigating away into the back/forward cache
+  assert.deepEqual(revoked, [], 'a page restored from the cache still shows its posters and plots');
+  assert.equal((await module.exports.poster3d('head', 'poster', null)).src, first.src);
+  assert.equal(made, 1);
+  for (const fn of listeners.pagehide) fn({persisted:false});
+  assert.deepEqual(revoked, [first.src], 'a real unload releases the URL');
+});
+
 test('BR02 3D view normalizes wipe mode to side in valid and select', () => {
   const reviewSource = readFileSync(new URL('./review.js', import.meta.url), 'utf8');
   const validFn = reviewSource.slice(reviewSource.indexOf('function valid(st) {'), reviewSource.indexOf('function applyState('));
@@ -274,12 +350,16 @@ test('BR02 3D view normalizes wipe mode to side in valid and select', () => {
     MODES: { side: true, overlay: true, wipe: true, blend: true, semantic: true },
     GROUPS3D: [],
     LIGHT_RIGS3D: [],
+    single: () => false,
     window: { ThreeStudio: { normalizeLighting: x => x } }
   };
   runInNewContext(modeFn + validFn, validCtx);
   const normalized = validCtx.valid({ v: '3d', m: 'wipe' });
   assert.equal(normalized.v, '3d');
   assert.equal(normalized.m, 'side');
+  // A design (single-revision) report takes no mode from a link at all, wipe included.
+  validCtx.single = () => true;
+  for (const v of ['3d', 'board']) assert.equal(Object.hasOwn(validCtx.valid({ v, m: 'wipe' }), 'm'), false, v);
 
   const S = { v: 'board', m: 'wipe' };
   const selectCtx = {
@@ -454,10 +534,35 @@ test('BR02 applyState normalizes a retained wipe mode to side when the link has 
     viewerIdFor: () => 'viewer',
     proj: () => ctx.D.projects[0],
     canon: x => x,
+    single: () => false,
     window: {ThreeStudio: {normalizeLighting: x => x, PRESETS: {bench: {}}}}
   };
   runInNewContext(applySource, ctx);
   ctx.applyState({v: '3d'});
   assert.equal(S.v, '3d');
   assert.equal(S.m, 'side');
+});
+
+test('BR02 a design report link to 3D with wipe opens side by side', () => {
+  const reviewSource = readFileSync(new URL('./review.js', import.meta.url), 'utf8');
+  const applySource = reviewSource.slice(reviewSource.indexOf('function modeFor('), reviewSource.indexOf('const PX = 4;'));
+  for (const retained of ['wipe', 'side']) {
+    const S = {p: 0, v: 'board', m: retained, s: null, t: 'checks', layers: null};
+    const ctx = {
+      S,
+      D: {mode: 'single', projects: [{board: {layers: [], model3d: {head: 'head-id'}}, sheets: [], changes: [], checks: []}]},
+      GROUPS3D: [], LIGHT_RIGS3D: [],
+      MODES: {side: true, overlay: true, wipe: true, blend: true, semantic: true},
+      boardAvailable: () => true, modelAvailable: () => true, firstChangedView: () => 'board',
+      clearImageSelection: () => {}, renderModes: () => {}, renderNav: () => {}, renderPanel: () => {},
+      renderInspector: () => {}, renderZoombar: () => {}, draw: () => Promise.resolve(), goTo: () => {},
+      Appearance: {patch: () => {}, configure: () => {}}, viewerIdFor: () => 'viewer',
+      proj: () => ctx.D.projects[0], canon: x => x, single: () => true,
+      window: {ThreeStudio: {normalizeLighting: x => x, PRESETS: {bench: {}}}}
+    };
+    runInNewContext(applySource, ctx);
+    ctx.applyState({v: '3d', m: 'wipe'});
+    assert.equal(S.v, '3d');
+    assert.equal(S.m, 'side', `retained ${retained}`);
+  }
 });

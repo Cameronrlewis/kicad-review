@@ -2054,8 +2054,12 @@ return true;
    }
    const st=Review3D.state;
    if(fault==='worker-postMessage-throws'&&st.resourceCounts.pending!==0)return 'postMessage leaked pending job';
-   if(['worker-start','worker-error','worker-messageerror'].includes(fault)&&
-      (st.resourceCounts.urls!==liveURLs.size||liveURLs.size!==2))return 'failed worker retained blob URL: '+JSON.stringify({counts:st.resourceCounts,live:liveURLs.size});
+   if(['worker-start','worker-error','worker-messageerror'].includes(fault)) {
+     // Posters live in the page-lifetime blob cache and outlive the session; every session-owned URL must be revoked.
+     const shared=new Set(await Promise.all(['base','head'].map(side=>Review3D.blobUrl(p.board.poster3d?.[side],'image/png'))));
+     const owned=[...liveURLs].filter(url=>!shared.has(url));
+     if(st.resourceCounts.urls!==0||owned.length)return 'failed worker retained blob URL: '+JSON.stringify({counts:st.resourceCounts,owned:owned.length});
+   }
    if(st.loading)return 'failure left loading unsettled';
    if(!st.errorsBySide.head)return 'head error not recorded';
    if(fault!=='corrupt-model'&&st.firstFrame)return 'failure reported a genuine first frame';
@@ -6737,10 +6741,10 @@ return true;
     return true;`],
   ["Ask single design: an unready Ask falls back to Checks, never a hidden Changes tab", "v=board", askOpen + `
     // ponytail: askOpen leaves Ask ready; drop readiness so the unready fallback under test applies.
-    document.body.classList.add('design-single'); ASK.ready = false;
+    const mode = D.mode; D.mode = 'single'; document.body.classList.add('design-single'); ASK.ready = false;
     S.t = 'ask'; renderPanel();
     const landed = S.t;
-    document.body.classList.remove('design-single');
+    D.mode = mode; document.body.classList.remove('design-single');
     return landed === 'checks' || 'single design fell back to ' + landed;`],
   ...['top','flipped'].map(view => ["BR09 fixture keeps the 4-layer board in KiCad order with the tab open: " + view, "v=board", askOpen + `
     const scene=await loadBoardScene(proj().board?.geometry?.head);
@@ -8073,6 +8077,349 @@ CHECKS.push(...['parent-corrupt-reply','parent-delayed-reply'].map(fault=>["BR02
    frame.remove();Review3D.dispose();
  }
 `]));
+
+CHECKS.push(["design site screen: wrapper, missing or history is reachable", "", `
+  if(!window.__dpSiteFixture)return 'skip';
+  const root=document.querySelector('main.design-site'); if(!root)return 'missing design-site root on marked fixture '+window.__dpSiteFixture;
+  const W=document.documentElement.clientWidth;
+  if(document.documentElement.scrollWidth>W+1)return 'document overflows '+document.documentElement.scrollWidth+'/'+W;
+  const actions=[...root.querySelectorAll('a.btn,button:not([disabled]),summary,input:not([type=hidden])')].filter(el=>el.getClientRects().length);
+  if(document.querySelector('#review-report'))for(const label of ['Revisions','Latest design']){
+    const link=[...root.querySelectorAll('a.design-action')].find(el=>el.textContent===label);
+    if(!link || !link.getClientRects().length || getComputedStyle(link).visibility!=='visible' || link.tabIndex<0)return 'missing or hidden wrapper action '+label;
+  }
+  if(window.__dpSiteFixture.includes('design-history')){
+    if(root.querySelector('h1')?.textContent!=='KiCad changes')return 'missing KiCad changes heading';
+    if(!root.querySelector('.notice')?.textContent.includes('Scanned 60 commits'))return 'missing scan notice';
+    if(actions.filter(el=>el.textContent==='View').length!==25)return 'expected 25 View actions';
+    if(actions.filter(el=>el.textContent==='Compare with newest').length!==24)return 'expected 24 Compare actions';
+    if(!actions.some(el=>el.textContent==='Older'))return 'missing Older action';
+  }
+  for(const el of actions){
+    el.scrollIntoView({block:'nearest',inline:'nearest'}); el.focus();
+    const r=el.getBoundingClientRect();
+    if(r.width<44 || r.height<44)return 'touch target '+el.textContent+' '+r.width+'x'+r.height;
+    if(r.left < -1 || r.right > W+1 || r.top < -1 || r.bottom > innerHeight+1)return 'unreachable '+el.textContent;
+    if(document.activeElement!==el)return 'not focusable '+el.textContent;
+  }
+  const grouped=[...root.querySelectorAll('.design-actions,.page-actions,.message-actions')];
+  for(const group of grouped){const controls=[...group.querySelectorAll('a.btn,button')].filter(el=>el.getClientRects().length); for(let i=0;i<controls.length;i++)for(let j=i+1;j<controls.length;j++){const a=controls[i].getBoundingClientRect(),b=controls[j].getBoundingClientRect();const dx=Math.max(a.left-b.right,b.left-a.right),dy=Math.max(a.top-b.bottom,b.top-a.bottom); if(dx<8 && dy<8)return 'action gap below 8 px';}}
+  if(document.querySelector('#review-report')){
+    for(let n=0;n<100&&!document.querySelector('[data-design-subject]')?.textContent;n++)await new Promise(r=>setTimeout(r,50));
+    const subject=document.querySelector('[data-design-subject]');
+    if(subject?.textContent!=='Move R16 <b>bold</b>' || subject.querySelector('b'))return 'hosted subject absent or interpreted as HTML';
+    if(document.querySelector('[data-design-date]')?.textContent!=='2026-10-24')return 'hosted date absent';
+    if(document.querySelector('[data-design-ref]')?.textContent!=='main')return 'recorded snapshot ref absent on query-free artifact entry';
+    const bad=document.createElement('iframe'); bad.hidden=true; bad.srcdoc='<script>parent.postMessage({designSnapshot:{sha:"'+'c'.repeat(40)+'",committedAt:"2020-01-01",message:"FORGED"}},"*")<'+ '/script>'; document.body.append(bad);
+    await new Promise(r=>setTimeout(r,100)); if(subject.textContent==='FORGED')return 'foreign frame metadata accepted'; bad.remove();
+  }
+  window.scrollTo(0,0); return true;
+`]);
+
+CHECKS.push(["design revisions thumbnails: every row has an image or a placeholder, the box is 8:5, no overflow", "", `
+  if(!window.__dpSiteFixture?.includes('design-history'))return 'skip';
+  const W=document.documentElement.clientWidth;
+  if(document.documentElement.scrollWidth>W+1)return 'document overflows '+document.documentElement.scrollWidth+'/'+W;
+  const cells=[...document.querySelectorAll('td.design-thumb')];
+  if(cells.length!==25)return 'expected 25 thumbnail cells, got '+cells.length;
+  for(const td of cells){
+    const box=td.querySelector('img,.design-thumb-missing');
+    if(!box)return 'thumbnail cell without image or placeholder';
+    const r=box.getBoundingClientRect();
+    if(r.width<60 || r.height<37 || Math.abs(r.width/r.height-1.6)>0.08)return 'bad thumbnail box '+r.width+'x'+r.height;
+    if(r.right>W+1)return 'thumbnail overflows viewport';
+  }
+  const img=document.querySelector('td.design-thumb img');
+  if(!img || !img.complete || img.naturalWidth<1)return 'thumbnail data URL did not decode';
+  return true;
+`]);
+
+// ---- Design report (D.mode === "single"): one revision, nothing compared ----
+// Turns the loaded comparison report into the data a design snapshot has: head side only, nothing changed, nothing new.
+// A report whose data has a board still or PcbDraw plots inlines review3d.js (inline_page has_poster; the site's
+// currentReport hasPoster). The plain dev page (ui/review.html) does not, so a check that adds that data loads it as well.
+const WITH_REVIEW3D = `
+  if (!window.Review3D) await new Promise((resolve, reject) => { const s = document.createElement('script'); s.src = 'review3d.js';
+    s.onload = resolve; s.onerror = () => reject(new Error('review3d.js did not load')); document.head.appendChild(s); });
+`;
+const TO_SINGLE = `
+  D.mode = 'single'; D.base = null; D.snapshot = {ref:'main', sha:D.head, committedAt:'2026-10-24T10:00:00Z', message:'Move R16 <b>bold</b>'};
+  for (const p of D.projects) {
+    p.changes = []; p.status = 'unchanged';
+    for (const o of p.objects || []) { delete o.added; delete o.action; delete o.pos_before; }
+    for (const s of p.sheets) { s.status = 'unchanged'; if (s.svg) s.svg.base = null; }
+    p.board.changed = false; p.board.status = 'unchanged';
+    for (const l of p.board.layers) { l.changed = false; l.svg.base = null; }
+    if (p.board.geometry) p.board.geometry.base = null;
+    if (p.board.model3d) { p.board.model3d.base = null; p.board.model3d.changed = false; }
+    for (const c of p.checks) { c.new_errors = c.new_warnings = c.fixed = 0; for (const v of c.violations) v.new = false; }
+  }
+  rightTab = 'checks'; leftTab = 'project'; S.t = 'checks'; S.m = 'side'; S.s = null; S.v = null;
+  document.body.classList.add('design-single');
+`;
+CHECKS.push(
+  ["design page: head only, no comparison controls, forged state ignored, absolute checks", "", `
+    ${TO_SINGLE}
+    await applyState({p: 0, v: 'sheet:/', m: 'overlay', t: 'changes', s: 'c1'});
+    renderHeader();
+    const visible = el => el && el.getClientRects().length > 0;
+    if (S.m !== 'side' || S.t !== 'checks') return 'forged mode or tab accepted: ' + S.m + ' ' + S.t;
+    const panes = [...document.querySelectorAll('#stage .vp')];
+    if (panes.length !== 1 || document.querySelector('#stage .stack.base') || !document.querySelector('#stage .stack.head')) return 'panes ' + panes.length;
+    if (!panes[0].querySelector('.tag').textContent.startsWith('Design · ')) return 'pane label ' + panes[0].querySelector('.tag').textContent;
+    for (const el of document.querySelectorAll('[data-compare], #project-filter, .diff-mark-legend, .board-mark-key')) if (visible(el)) return 'comparison control visible: ' + (el.id || el.getAttribute('aria-label') || el.className);
+    const tabs = [...document.querySelectorAll('#panel-tabs [data-tab]')].map(t => t.dataset.tab);
+    if (tabs.includes('changes') || tabs.includes('threads') || !tabs.includes('checks')) return 'tabs ' + tabs;
+    const bar = document.querySelector('#report-review-bar');
+    if (!bar.textContent.includes('DESIGN') || /BASE|MERGE|Run result/.test(bar.textContent)) return 'bar ' + bar.textContent;
+    if (!bar.textContent.includes('Move R16 <b>bold</b>') || bar.querySelector('b')) return 'message is not text';
+    if (/NEW/.test(document.querySelector('#report-state').textContent) || document.querySelector('#nav .counts')) return 'compare words in single';
+    if (document.querySelector('#nav').textContent.includes('Libraries') || document.querySelector('.no-change-notice')) return 'compare leftovers';
+    if (document.querySelector('[data-check-scope="new"]') || document.querySelector('.new-tag') || /\\+\\d+ new|fixed/.test(document.querySelector('#panel-body').textContent)) return 'new/fixed in checks';
+    const status = document.querySelector('[data-view-mode]').textContent;
+    return status === 'Design' || 'status ' + status;
+  `],
+  ["design page: a report without mode keeps every comparison control", "", `
+    if (D.mode) return 'skip';
+    await applyState({p: 0, m: 'overlay'});
+    const hidden = [...document.querySelectorAll('[data-compare]')].filter(el => !el.getClientRects().length);
+    const tabs = [...document.querySelectorAll('#panel-tabs [data-tab]')].map(t => t.dataset.tab);
+    return !document.body.classList.contains('design-single') && !hidden.length && tabs.includes('changes') && tabs.includes('threads') && S.m === 'overlay'
+      && document.querySelector('#report-review-bar').textContent.includes('BASE') || 'comparison report changed: ' + hidden.length + ' ' + tabs + ' ' + S.m;
+  `],
+);
+// ui/fixtures/vf-order-4.kicad_pcb through board_geometry(); test_kicad_review.py (DP-S8) keeps this equal to the fixture.
+const DESIGN_FOUR_LAYER_SCENE = '{"version":1,"units":"um","complete":true,"warnings":[],"bounds":[1000,4000,19000,6000],"layers":[{"id":2,"name":"B.Cu","type":"signal","enabled":true},{"id":6,"name":"In2.Cu","type":"signal","enabled":true},{"id":4,"name":"In1.Cu","type":"signal","enabled":true},{"id":0,"name":"F.Cu","type":"signal","enabled":true}],"nets":[{"id":0,"name":""}],"objects":[{"kind":"track","uuid":"00000000-0000-4000-8000-000000000001","changeUuid":"00000000-0000-4000-8000-000000000001","ref":"","layers":["F.Cu"],"net":0,"side":null,"category":"tracks","hidden":false,"geometry":{"segments":[[2000,5000,18000,5000,2000]]},"box":[1000,4000,19000,6000]},{"kind":"track","uuid":"00000000-0000-4000-8000-000000000002","changeUuid":"00000000-0000-4000-8000-000000000002","ref":"","layers":["In1.Cu"],"net":0,"side":null,"category":"tracks","hidden":false,"geometry":{"segments":[[2000,5000,18000,5000,2000]]},"box":[1000,4000,19000,6000]},{"kind":"track","uuid":"00000000-0000-4000-8000-000000000003","changeUuid":"00000000-0000-4000-8000-000000000003","ref":"","layers":["In2.Cu"],"net":0,"side":null,"category":"tracks","hidden":false,"geometry":{"segments":[[2000,5000,18000,5000,2000]]},"box":[1000,4000,19000,6000]},{"kind":"track","uuid":"00000000-0000-4000-8000-000000000004","changeUuid":"00000000-0000-4000-8000-000000000004","ref":"","layers":["B.Cu"],"net":0,"side":null,"category":"tracks","hidden":false,"geometry":{"segments":[[2000,5000,18000,5000,2000]]},"box":[1000,4000,19000,6000]}],"copperStack":["F.Cu","In1.Cu","In2.Cu","B.Cu"]}';
+CHECKS.push(
+  ["design page: every sheet, the board and all its layers stay reachable", "", `
+    ${TO_SINGLE}
+    const seen = [];
+    for (let i = 0; i < D.projects.length; i++) {
+      openProject(i); await applyState({p: i}); const p = proj();
+      const views = [...document.querySelectorAll('#nav [data-view]')].map(b => b.dataset.view);
+      for (const s of p.sheets) if (s.svg && !views.includes('sheet:' + s.path)) return 'sheet missing from the tree: ' + s.path;
+      if (boardAvailable(p) && !views.includes('board')) return 'board missing from the tree';
+      for (const view of views.filter(v => v !== '3d')) {
+        select(view); await draw();
+        const layers = document.querySelectorAll('#stage .stack.head .layer').length;
+        const expected = view === 'board' ? layersOn().length : 1;
+        if (!boardView.useGL && layers !== expected) return p.name + ' ' + view + ' drew ' + layers + ' of ' + expected;
+        if (document.querySelector('#stage .stack.base')) return 'base stack drawn in ' + view;
+        seen.push(p.name + ':' + view);
+      }
+    }
+    return seen.length >= D.projects.length || 'nothing visited';
+  `],
+  ["design page: a four-copper-layer board keeps KiCad stack order, flip and the single head pane", "", `
+    ${TO_SINGLE}
+    const scene = ${DESIGN_FOUR_LAYER_SCENE};
+    const bytes = new Uint8Array(await new Response(new Blob([JSON.stringify(scene)]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+    D.blobs.dp4 = btoa(String.fromCharCode(...bytes)); proj().board.geometry = {base: null, head: 'dp4'};
+    boardView.failed = null; Appearance.reset(); Object.assign(S, {v: 'board', m: 'side', t: 'appearance', x: 10, y: 5, z: 30}); renderPanel(); await draw();
+    if (!boardDiff || boardDiff.panes.length !== 1 || boardDiff.panes[0].sides.join() !== 'head') return 'panes ' + (boardDiff?.panes.length);
+    if (!boardDiff.panes[0].vp.querySelector('.tag').textContent.startsWith('Design · ')) return 'label';
+    const colour = expected => {
+      const r = boardView.renderers[0]; r.draw();
+      const q = r.worldToScreen([10, 5]), p = r.readPixel(Math.floor(q[0] * devicePixelRatio), r.gl.canvas.height - 1 - Math.floor(q[1] * devicePixelRatio));
+      return p.slice(0, 3).every((v, i) => Math.abs(v - KicadColors.layers[expected][i]) <= 1) || 'expected ' + expected + ' got ' + p;
+    };
+    for (const [patch, expected] of [[{activeLayer: null}, 'F.Cu'], [{activeLayer: null, flip: true}, 'B.Cu'], [{activeLayer: 'In1.Cu', flip: false}, 'In1.Cu'], [{activeLayer: 'In2.Cu'}, 'In2.Cu'], [{activeLayer: null}, 'F.Cu']]) {
+      Appearance.patch(patch); const r = colour(expected); if (r !== true) return JSON.stringify(patch) + ' ' + r;
+    }
+    // Exercise the actual Appearance control; isolate F.Cu over the same background.
+    Appearance.patch({activeLayer:null, flip:false, layers:Object.fromEntries(scene.copperStack.map(name => [name,{visible:name === 'F.Cu',opacity:1}]))});
+    renderPanel();
+    const control = document.querySelector('input[aria-label="F.Cu opacity"]');
+    if (!control) return 'missing actual F.Cu opacity control';
+    control.value = '50'; control.dispatchEvent(new Event('input',{bubbles:true}));
+    const renderer = boardView.renderers[0]; renderer.draw();
+    const pixel = x => { const q=renderer.worldToScreen([x,5]); return renderer.readPixel(Math.floor(q[0]*devicePixelRatio),renderer.gl.canvas.height-1-Math.floor(q[1]*devicePixelRatio)); };
+    const half = pixel(5);
+    control.value = '100'; control.dispatchEvent(new Event('input',{bubbles:true})); renderer.draw();
+    if (half.slice(0,3).every((v,i)=>Math.abs(v-pixel(5)[i])<=2)) return 'opacity input has no pixel effect';
+    // Two overlapping F.Cu tracks must composite once as a layer, not once per object.
+    const duplicate = structuredClone(scene.objects[0]); duplicate.uuid=duplicate.changeUuid='00000000-0000-4000-8000-000000000099';
+    duplicate.geometry.segments=[[8000,5000,18000,5000,2000]]; duplicate.box=[7000,4000,19000,6000]; scene.objects.push(duplicate);
+    const bytes2=new Uint8Array(await new Response(new Blob([JSON.stringify(scene)]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+    D.blobs.dp4overlap=btoa(String.fromCharCode(...bytes2)); proj().board.geometry.head='dp4overlap'; await draw(); renderPanel();
+    const opacity=document.querySelector('input[aria-label="F.Cu opacity"]'); opacity.value='50'; opacity.dispatchEvent(new Event('input',{bubbles:true}));
+    const rr=boardView.renderers[0]; rr.draw();
+    const sample=x=>{const q=rr.worldToScreen([x,5]); return rr.readPixel(Math.floor(q[0]*devicePixelRatio),rr.gl.canvas.height-1-Math.floor(q[1]*devicePixelRatio));};
+    const once=sample(5), overlap=sample(10);
+    if (!once.slice(0,3).every((v,i)=>Math.abs(v-overlap[i])<=2)) return 'per-path attenuation: '+JSON.stringify({once,overlap});
+    const names = boardView.scenes[1].copperStack.join();
+    const hits = boardDiff.hits(boardDiff.panes[0].vp, {clientX: boardDiff.panes[0].vp.getBoundingClientRect().left + boardDiff.panes[0].vp.clientWidth / 2, clientY: boardDiff.panes[0].vp.getBoundingClientRect().top + boardDiff.panes[0].vp.clientHeight / 2});
+    return names === 'F.Cu,In1.Cu,In2.Cu,B.Cu' && hits.every(h => h.side === 'head') || 'stack ' + names;
+  `],
+);
+CHECKS.push(
+  ["design Parts: absolute BOM ignores stale changed filter", "t=parts", `
+    if(!proj().parts) return 'skip'; ${TO_SINGLE}
+    const parts=proj().parts; parts.changes=[]; parts.field_changes=[]; if(parts.coverage) parts.coverage.base=null;
+    S.partsFilter.changed=true; S.partsFilter.problems=false; S.partsFilter.q=''; S.t='parts'; rightTab='parts'; renderPanel();
+    const root=document.querySelector('#panel-body');
+    if(root.querySelector('[data-parts-filter="changed"]') || /Only changed|change from base/.test(root.innerHTML)) return 'comparison help/filter remains';
+    if(S.partsFilter.changed || root.querySelector('th')?.textContent==='Δ') return 'stale delta filter/column';
+    if(root.querySelectorAll('.parts-row').length!==parts.lines.length) return 'BOM rows missing';
+    root.querySelector('[data-parts-filter="problems"]').click();
+    return root.querySelectorAll('.parts-row').length===parts.lines.length && document.querySelectorAll('#panel-body .parts-row').length===parts.lines.filter(blocking).length || 'absolute problem filter changed';
+  `],
+);
+CHECKS.push(
+  ["design readiness: existing canvas cannot satisfy another view", "", `
+    ${TO_SINGLE}
+    const p=proj(), sheet=p.sheets.find(s=>s.svg?.head); if(!sheet || !boardAvailable(p)) return 'skip';
+    const frames=()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+    await applyState({p:0,v:'sheet:'+sheet.path}); await frames();
+    const ready=(v)=>window.reviewViewReady?.project===S.p && window.reviewViewReady?.dir===p.dir && window.reviewViewReady?.view===v && S.v===v;
+    if(!ready('sheet:'+sheet.path) || ready('board')) return 'wrong-view readiness accepted';
+    const drawing=draw(); if(ready('board')) return 'old canvas satisfied board readiness'; await drawing;
+    await applyState({p:0,v:'board'}); await frames();
+    return ready('board') && !ready('sheet:'+sheet.path) || 'board renderer never became ready';
+  `],
+  ["design readiness: undecoded image retries until settled", "", `
+    ${TO_SINGLE}
+    const p = proj(), sheet = p.sheets.find(s => s.svg?.head); if (!sheet) return 'skip';
+    await applyState({ p: 0, v: 'sheet:' + sheet.path });
+    const frames = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    await frames();
+    window.reviewViewReady = null;
+    const stage = document.querySelector('#stage');
+    const img = document.createElement('img');
+    img.style.width = '100px'; img.style.height = '100px';
+    let complete = false;
+    Object.defineProperty(img, 'complete', { get: () => complete, configurable: true });
+    Object.defineProperty(img, 'naturalWidth', { get: () => complete ? 100 : 0, configurable: true });
+    stage.appendChild(img);
+    afterDraw(currentView());
+    for (let i = 0; i < 35; i++) await frames();
+    if (window.reviewViewReady !== null) { img.remove(); return 'stamped before image settled'; }
+    complete = true;
+    img.dispatchEvent(new Event('load'));
+    await frames();
+    const ready = window.reviewViewReady?.project === S.p && window.reviewViewReady?.view === 'sheet:' + sheet.path;
+    img.remove();
+    return ready || 'readiness never stamped after image settled';
+  `],
+);
+CHECKS.push(['design inspector: actual snapshot object and finding are absolute', '', `
+  if(D.mode!=='single' || D.snapshot?.message!=='Inspector fixture')return 'skip';
+  S.p=0; S.v='board'; S.m='side'; await draw();
+  for(let n=0;n<200&&!boardDiff?.scenes?.head;n++)await new Promise(r=>setTimeout(r,25));
+  const object=boardDiff?.scenes?.head?.objects?.find(o=>o.uuid==='00000000-0000-4000-8000-000000000001');
+  if(!object)return 'actual fixture track absent';
+  const finding=allViolations().find(v=>v.description==='Inspect fixture track');
+  if(!finding)return 'actual snapshot DRC finding absent';
+  for(const selected of [object,finding]) {
+    S.io=null; S.ig=selected===object?{object:{...object,side:'head'}}:null; S.s=selected===finding?finding.id:null;
+    renderInspector();
+    const dock=document.querySelector('#inspector');
+    if(!dock?.querySelector('dd') || !dock.textContent.includes('Placement · current (mm)'))return 'current inspector properties absent';
+    if(dock.querySelector('del,ins,.insp-arrow,.badge') || /base.*head/i.test(dock.textContent))return 'comparison markup in single inspector';
+    if(!inspectorProperties()?.head.uuid && selected===object)return 'current UUID absent';
+  }
+  return true;
+`]);
+CHECKS.push(["design framed: single report never enables PR discussions", "", `
+  if(!window.__dpSiteFixture || ['design-missing.html','design-history.html'].includes(window.__dpSiteFixture))return 'skip';
+  if(window.__dpSiteFixture!=='design-wrapper.html' || !document.querySelector('main.design-site #review-report'))return 'malformed marked wrapper fixture';
+  for(let n=0;n<200&&!window.__dpProof;n++)await new Promise(r=>setTimeout(r,50));
+  return window.__dpProof?.ok===true && window.__dpComposerRequests===0 && !document.querySelector('dialog[open]') || JSON.stringify({proof:window.__dpProof,requests:window.__dpComposerRequests});
+`]);
+CHECKS.push(
+  ["design empty project: no drawing or board still opens and says so", "", `
+    const i = D.projects.findIndex(p => !p.board.layers.length && p.sheets.every(s => !s.svg)); if (i < 0) return 'skip';
+    ${TO_SINGLE}
+    await applyState({p: i});
+    const empty = document.querySelector('#stage .empty');
+    return !!empty && empty.textContent === 'This drawing is unavailable.' && !document.querySelector('#stage .stack') || 'stage ' + document.querySelector('#stage').textContent;
+  `],
+  ["design page: the poster and header fit their docks and the board still is decoded once", "", `
+    ${TO_SINGLE}
+    ${WITH_REVIEW3D}
+    const png = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=='), c => c.charCodeAt(0));
+    const gz = new Uint8Array(await new Response(new Blob([png]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+    let decodeCount = 0;
+    const rawPoster = btoa(String.fromCharCode(...gz));
+    Object.defineProperty(D.blobs, 'dpposter', {
+      get() { decodeCount++; return rawPoster; },
+      configurable: true,
+      enumerable: true
+    });
+    proj().board.poster3d = {head: 'dpposter'};
+    await applyState({p: 0, v: 'sheet:/'}); renderNav();
+    let img = null, nav = document.querySelector('#nav');
+    for (let n = 0; n < 40 && (!img || img.hidden || !img.src?.startsWith('blob:')); n++) {
+      await new Promise(r => setTimeout(r, 50));
+      img = document.querySelector('#nav .design-poster');
+    }
+    if (!img || img.hidden || !img.src.startsWith('blob:')) return 'poster not shown';
+    renderNav();
+    let cards = null;
+    for (let n = 0; n < 40 && (!cards || cards.length !== 1); n++) {
+      await new Promise(r => setTimeout(r, 50));
+      cards = document.querySelectorAll('#nav .design-poster');
+    }
+    if (cards.length !== 1 || !img.complete || img.naturalWidth <= 0 || img.getBoundingClientRect().width > nav.getBoundingClientRect().width || !img.alt.endsWith('board, rendered')) return 'poster size or duplicate card';
+    if (decodeCount !== 1) return 'poster decoded ' + decodeCount + ' times';
+    return true;
+  `],
+  ["design 3D: one viewport, no base pane, no comparison notice", "v=3d", `
+    if (!window.Review3D || !REVIEW_DATA.projects[0].board.model3d?.head) return 'skip';
+    ${TO_SINGLE}
+    const p = proj();
+    let forbiddenBaseRead = false;
+    const baseTrap = (id) => {
+      Object.defineProperty(D.blobs, id, {
+        get() { forbiddenBaseRead = true; return 'H4sIAAAAAAAC/wMAAAAAAAAAAAA='; },
+        configurable: true,
+        enumerable: true
+      });
+    };
+    baseTrap('dp-base-model');
+    baseTrap('dp-base-parts');
+    baseTrap('dp-base-poster');
+    p.board.model3d.base = 'dp-base-model';
+    p.board.parts3d = {head: p.board.parts3d?.head || null, base: 'dp-base-parts'};
+    p.board.poster3d = {head: p.board.poster3d?.head || null, base: 'dp-base-poster'};
+    const stage = document.querySelector('#stage');
+    // As the report calls it (review.js renderStage): a design report asks for its head-only viewer.
+    await Review3D.show(stage, p, {...S, m: 'side', s: null}, {single: D.mode === 'single'});
+    if (forbiddenBaseRead) return 'forbidden base blob accessed in single mode';
+    const hosts = [...stage.querySelectorAll('.view3d')];
+    if (hosts.length !== 1 || !hosts[0].classList.contains('one') || hosts[0].querySelector('.tag').textContent !== 'Design') return 'hosts ' + hosts.length;
+    if (Review3D.state.renderers.length !== 1 || stage.textContent.includes('not in this revision') || stage.querySelector('.no-change-notice')) return 'base pane or notice';
+    if (!Review3D.state.allowedSides || Review3D.state.allowedSides.join() !== 'head') return 'allowedSides not head-only: ' + Review3D.state.allowedSides;
+    return Review3D.state.cameras.length === 1;
+  `],
+);
+CHECKS.push(["design PcbDraw card: front plot, back toggle, note when skipped", "", `
+  ${TO_SINGLE}
+  ${WITH_REVIEW3D}
+  const settled = () => { const c = document.querySelector('#nav .design-pcbdraw'), st = c?.querySelector('.pcbdraw-stage'), b = c?.querySelector('button[data-face="back"]');
+    return c && (!st || st.querySelector('img[data-face="front"]') && (!b || b.onclick)); };
+  const setPlot = async (value) => { proj().board.pcbdraw = {head: value, base: null}; await applyState({p: 0, v: 'sheet:/'}); renderNav(); for (let n = 0; n < 60 && !settled(); n++) await new Promise(r => setTimeout(r, 50)); };
+  const svg = (fill) => new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg" width="40" height="25"><rect width="40" height="25" fill="' + fill + '"/></svg>');
+  const gz = async (bytes) => btoa(String.fromCharCode(...new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer())));
+  D.blobs.dppcbf = await gz(svg('#2a6')); D.blobs.dppcbb = await gz(svg('#a26'));
+  await setPlot({front: 'dppcbf', back: 'dppcbb', note: ''});
+  const card = document.querySelector('#nav .design-pcbdraw'); if (!card) return 'card missing';
+  const front = card.querySelector('img[data-face="front"]');
+  if (!front || !front.src.startsWith('blob:') || front.hidden) return 'front plot not shown';
+  const toggle = card.querySelector('button[data-face="back"]'); if (!toggle) return 'no Back toggle';
+  if (toggle.getBoundingClientRect().height < 44) return 'Back toggle height under 44px: ' + toggle.getBoundingClientRect().height;
+  toggle.click(); await new Promise(r => setTimeout(r, 100));
+  const shown = card.querySelector('img:not([hidden])');
+  if (!shown || shown.dataset.face !== 'back') return 'Back toggle did not switch the plot';
+  const vis = [...card.querySelectorAll('img')].filter(i => getComputedStyle(i).display !== 'none');
+  if (vis.length !== 1 || vis[0].dataset.face !== 'back') return 'visible plots: ' + vis.map(i => i.dataset.face);
+  await setPlot({front: 'dppcbf', back: 'dppcbmissing', note: ''});
+  if (document.querySelector('#nav .design-pcbdraw button[data-face="back"]')) return 'Back toggle shown without a back plot';
+  await setPlot({front: null, back: null, note: 'PcbDraw skipped: no closed Edge.Cuts outline.'});
+  const noted = document.querySelector('#nav .design-pcbdraw');
+  if (!noted || !noted.textContent.includes('no closed Edge.Cuts outline') || noted.querySelector('img')) return 'skip note not shown alone';
+  return true;
+`]);
 
 CHECKS.push(['Download dialog lists GitHub zips, exported files and safe commands', '', `
   const saved = { links: D.links, run_id: D.run_id, repo: D.repo, downloads: proj().downloads, hosted: window.hostedBase };

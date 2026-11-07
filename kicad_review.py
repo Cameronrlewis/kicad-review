@@ -42,6 +42,7 @@ import xml.etree.ElementTree as ET
 KICAD_SUFFIXES = (".kicad_sch", ".kicad_pcb", ".kicad_pro", ".kicad_sym", ".kicad_mod", ".kicad_dru", ".kicad_wks")
 KICAD_NAMES = ("sym-lib-table", "fp-lib-table")
 SETTINGS_FILE = "kicad-review.toml"
+SNAPSHOT_REASON = "design snapshot (no comparison)"  # detect.json reason of a run that leaves only a design snapshot
 FAB_TABLE = pathlib.Path(__file__).with_name("fab_limits.json")
 
 
@@ -89,6 +90,11 @@ def resolve_revisions(env):
         head = env["PR_HEAD"]
         return git("merge-base", env["PR_BASE"], head), head, "pull request head vs merge base"
     if event == "workflow_dispatch":
+        if env.get("SNAPSHOT_ONLY") == "true":  # a design snapshot has one revision and nothing to compare it with
+            head = commit(env["IN_HEAD"])
+            if not head:
+                sys.exit(f"Cannot resolve revision: head={env['IN_HEAD']!r}")
+            return None, head, SNAPSHOT_REASON
         base, head = commit(env["IN_BASE"]), commit(env["IN_HEAD"])
         if not base or not head:
             sys.exit(f"Cannot resolve revisions: base={env['IN_BASE']!r} head={env['IN_HEAD']!r}")
@@ -155,30 +161,66 @@ def detect(base, head):
     return projects
 
 
+def design_enabled():
+    """Trusted workflow checkout policy, never the historical head or comparison base. Unreadable settings warn and mean off."""
+    try:
+        return load_settings(("",))["design"]["enabled"]
+    except tomllib.TOMLDecodeError as error:
+        problem = f"syntax error: {error}"
+    except (SystemExit, OSError) as error:
+        problem = f"invalid settings: {error}"
+    print("::warning::" + workflow_command_escape(f"{SETTINGS_FILE} {problem}; defaulting to design = false"), file=sys.stderr)
+    return False
+
+
+def snapshot_plan(env):
+    """(wanted, only). wanted: this event leaves a design snapshot. only: it leaves nothing else (no comparison report)."""
+    if env.get("EVENT") == "workflow_dispatch":
+        manual = env.get("SNAPSHOT_ONLY") == "true"
+        return manual, manual
+    if env.get("TAG"):
+        return True, False  # a tag without release.review becomes snapshot-only in cmd_detect
+    return env.get("EVENT") == "push" and bool(env.get("REF_NAME")) and env.get("REF_NAME") == env.get("DEFAULT_BRANCH"), False
+
+
 def cmd_detect(args):
     env = dict(os.environ)
+    wanted, only = snapshot_plan(env)
+    design = design_enabled()
+    wanted = wanted and design
     if env.get("TAG"):
         try:
             review = load_settings(("",))["release"]["review"]
         except (SystemExit, tomllib.TOMLDecodeError, OSError):
             print("::warning::" + workflow_command_escape("Cannot read tag review settings; tag review stays off."))
             review = False
-        if not review:
-            with open(env.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as fh:
-                fh.write("base=\nhead=\nchanged=false\n")
-            print("Tag review is off ([release] review = false); only fabrication outputs are made.")
-            return
+        only = only or not review
+    if only and not wanted:
+        with open(env.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as fh:
+            fh.write("base=\nhead=\nchanged=false\n")
+        print("Nothing to compare: tag review is off ([release] review = false) and design snapshots are off ([design] enabled = false).")
+        return
     base, head, reason = resolve_revisions(env)
+    if only:
+        base, reason = None, SNAPSHOT_REASON
     projects = detect(base, head)
     ids = [project_id(p["dir"]) for p in projects]
     if len(set(ids)) < len(ids):
         sys.exit("Detected project ids collide; rename one project directory")
     result = {"base": base, "head": head, "reason": reason, "projects": projects}
+    if wanted:
+        # The trusted workflow checkout's validated settings, captured before any revision is checked out:
+        # the only snapshot policy, even for a historical head that predates [design].
+        result["snapshot_settings"] = load_settings(("",))
+        show = lambda fmt: git("show", "-s", f"--format={fmt}", head, check=False) or ""
+        result["snapshot"] = {"ref": env.get("IN_HEAD") or env.get("TAG") or env.get("REF_NAME", ""), "sha": head,
+                              "committedAt": show("%cI"), "message": show("%s")}
     os.makedirs("../review", exist_ok=True)  # runs inside the project checkout
     with open("../review/detect.json", "w", encoding="utf-8") as fh:
         json.dump(result, fh, indent=2)
     with open(env.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as fh:
-        fh.write(f"base={base or ''}\nhead={head}\nchanged={'true' if projects else 'false'}\n")
+        fh.write(f"base={base or ''}\nhead={head}\nchanged={'true' if projects else 'false'}\ndesign={'true' if design else 'false'}\n")
+        fh.write(f"review={'true' if projects and not only else 'false'}\nsnapshot={'true' if projects and wanted else 'false'}\n")
     print(f"Comparing {base} -> {head} ({reason})")
     for p in projects:
         print(f"  {p['name']} ({p['dir'] or '.'}, {p['status']})")
@@ -875,6 +917,61 @@ def export_glb(p, side, out, *, model=True, poster=True, viewer=True):
         (folder / "poster.png").unlink(missing_ok=True)
 
 
+PCBDRAW_VERSION = "1.3.0"   # the version the evidence installed; review.yml pins the same number
+PCBDRAW_NO_OUTLINE = "Board has no closed outline on Edge.Cuts"
+
+
+def pcbdraw_argv(face, board, out):
+    """The call from kicad10-commands.md, run by the KiCad image's Python: `python3 -m pcbdraw` fails there, so the entry point is imported."""
+    args = ["pcbdraw", "plot", "--side", face, "--placeholders", board, out]
+    return ["python3", "-c", "from pcbdraw.ui import run; import sys; sys.argv=[%s]; run()" % ",".join(json.dumps(a) for a in args)]
+
+
+def pcbdraw_svg_valid(path):
+    try:
+        with open(path, "rb") as f:
+            head = f.read(256)
+    except OSError:
+        return False
+    return b"<svg" in head and os.path.getsize(path) > 0
+
+
+def pcbdraw_run(argv):
+    try:
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        return 124, "timeout"
+    return done.returncode, done.stderr + done.stdout
+
+
+def pcbdraw_plot(board, side_dir, run):
+    """Front and back SVGs of one board. A board without a closed outline stops with a note; any other failure warns and keeps the other face."""
+    os.makedirs(side_dir, exist_ok=True)
+    products, note = {"front": None, "back": None}, ""
+    for face in ("front", "back"):
+        out = os.path.join(side_dir, f"pcbdraw-{face}.svg")
+        if not pcbdraw_svg_valid(out):
+            rc, text = run(pcbdraw_argv(face, board, out))
+            if PCBDRAW_NO_OUTLINE in text:
+                return products, "PcbDraw skipped: no closed Edge.Cuts outline."
+            if rc != 0 or not pcbdraw_svg_valid(out):
+                err_lines = [
+                    (line[:197] + "…") if len(line) > 200 else line
+                    for raw in (text or "").splitlines()
+                    if (line := raw.strip())
+                ][:5]
+                err_detail = ("\n" + "\n".join(err_lines)) if err_lines else ""
+                print("::warning::" + workflow_command_escape(f"PcbDraw {face} plot failed for {board} (rc {rc}){err_detail}"), file=sys.stderr)
+                continue
+        products[face] = out
+    if not any(products.values()):
+        note = "PcbDraw failed for both faces: see the job log."
+    elif not all(products.values()):
+        failed_faces = [face for face in ("front", "back") if products[face] is None]
+        note = f"PcbDraw failed for {failed_faces[0]} face: see the job log."
+    return products, note
+
+
 def render_tool_identity():
     """The pinned image identifies CI's KiCad, including on the host before it is pulled."""
     if os.environ.get("KICAD_IMAGE"):
@@ -888,47 +985,129 @@ def render_tool_identity():
     return "local-kicad-unavailable"
 
 
-def render_cache_complete(cache, p, side, settings, *, check_release=True):
-    if not cache or not image_cache_complete(cache, p, side):
+def render_cache_complete(cache, p, side, settings, purposes=("comparison",)):
+    return bool(cache) and image_cache_complete(cache, p, side) and not missing_products(cache, p, side, settings, purposes)
+
+
+def run_purposes(det):
+    """Run modes this render serves: a snapshot-only run has no comparison; a comparison run also leaves a snapshot when det["snapshot"] is set.
+
+    cmd_detect records SNAPSHOT_REASON for a snapshot-only run. A first release or first commit also has no base
+    but is still a comparison (every project added), so base=None alone means snapshot-only only when no reason is recorded."""
+    if det.get("reason") == SNAPSHOT_REASON if "reason" in det else det.get("base") is None:
+        return ("snapshot",)
+    return ("comparison", "snapshot") if det.get("snapshot") else ("comparison",)
+
+
+def nonempty_dir(path):
+    path = pathlib.Path(path)
+    return path.is_dir() and any(path.iterdir())
+
+
+def poster_png_valid(path):
+    """02's still: a PNG on the shared 1600x1000 canvas (normalize_poster's output)."""
+    return poster_size(path) == (1600, 1000)
+
+
+def glb_valid(cache):
+    """02's export_glb publishes board.raw.glb and board.glb only when it wrote a non-empty file; a failed export deletes its target."""
+    return all(pathlib.Path(cache, name).is_file() and pathlib.Path(cache, name).stat().st_size > 0 for name in ("board.raw.glb", "board.glb"))
+
+
+def downloads_valid(cache, purpose, policy):
+    """07's downloads.json envelope in the purpose's folder, written for that purpose and under this policy's download_policy_key.
+
+    download_directory and download_policy_key are 07's; this is reached only once 07 adds the [downloads] section."""
+    try:
+        envelope = json.loads(pathlib.Path(download_directory(str(cache), purpose), "downloads.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return False
-    board_exists = pathlib.Path(board_path(p, side)).is_file()
+    return envelope.get("purpose") == purpose and envelope.get("policy") == download_policy_key(policy)
+
+
+def pcbdraw_settled(cache):
+    """pcbdraw.json records plots or a deterministic skip (no closed outline). A failure is retried on the next cache hit.
+    ponytail: a board PcbDraw always fails on is retried every run (at most 2 x 300 s); add an attempt counter if that cost shows up."""
+    try:
+        note = json.loads(pathlib.Path(cache, "pcbdraw.json").read_text(encoding="utf-8")).get("note", "")
+    except (OSError, ValueError, AttributeError):
+        return False
+    return isinstance(note, str) and not note.startswith("PcbDraw failed")
+
+
+def raw_glb_valid(cache):
+    """07's download source: 02's uncompressed board.raw.glb, non-empty."""
+    raw = pathlib.Path(cache, "board.raw.glb")
+    return raw.is_file() and raw.stat().st_size > 0
+
+
+def release_package_valid(fab_dir, p, side, settings):
+    """A non-empty fab/ package, which fab_parts accepts for this preset when the revision has a board or schematic.
+    A revision with no project file needs none."""
+    pro = posixpath.join(side, p["dir"], f"{p['name']}.kicad_pro")
+    if not os.path.exists(pro):
+        return True
+    if not (os.path.isfile(board_path(p, side)) or os.path.isfile(pro[:-len(".kicad_pro")] + ".kicad_sch")):
+        return pathlib.Path(fab_dir).is_dir()  # no fabrication inputs: the rendered directory is intentionally empty
+    if not nonempty_dir(fab_dir):
+        return False
+    try:
+        fab_parts(pro, p["name"], settings, str(fab_dir))
+    except (SystemExit, OSError, ValueError, ArithmeticError, IndexError, KeyError, csv.Error, zipfile.BadZipFile):
+        return False
+    return True
+
+
+def missing_products(cache, p, side, settings, purposes):
+    """Names of the products this settings object requests that are absent or invalid in the per-side cache directory.
+
+    Pure check, never exports. Never lists SVG, schematic or board images (image_cache_complete validates those).
+    A .failed marker is 02's record of a best-effort export that was attempted, so it satisfies the product."""
+    missing = []
+    cache = pathlib.Path(cache)
+    board = os.path.isfile(board_path(p, side))
+    if (settings["design"]["enabled"] or settings["3d"]["enabled"]) and board:
+        if not poster_png_valid(cache / "poster.png") and not (cache / "poster.png.failed").is_file():
+            missing.append("poster")
+    attempted = (cache / "board.raw.glb.failed").is_file()
+    if settings["3d"]["enabled"] and board and not glb_valid(cache) and not attempted:
+        missing.append("glb")
+    # 07: board.raw.glb is required for head only when downloads.enabled is True. Release-only renders stage
+    # fab files but never produce raw GLB, so requiring raw GLB for release-only would cause permanent cache misses.
+    elif side == "head" and settings.get("downloads", {}).get("enabled") and board and not raw_glb_valid(cache) and not attempted:
+        missing.append("glb")
+    if settings["design"]["enabled"] and board and not pcbdraw_settled(cache):
+        missing.append("pcbdraw")
     if fab_enabled(settings):
         try:
             doc = json.loads((cache / "fab-limits.json").read_text(encoding="utf-8"))
             sections = doc.get("sections") if isinstance(doc, dict) else None
-            if not isinstance(sections, list):
-                return False
-            if board_exists:
-                if any(sum(1 for s in sections if isinstance(s, dict) and s.get("vendor") == v) != 1 for v in FAB_VENDORS):
-                    return False
+            if not isinstance(sections, list) or (board and any(
+                    sum(1 for section in sections if isinstance(section, dict) and section.get("vendor") == vendor) != 1
+                    for vendor in FAB_VENDORS)):
+                missing.append("fab-limits")
         except (OSError, ValueError):
-            return False
-    # board.raw.glb is required for head only when downloads.enabled is True (spec lines 27-28,
-    # plan-context.md line 7). Release-only renders stage fab files but never produce raw GLB,
-    # so requiring raw GLB for release-only would cause permanent cache misses.
-    if side == "head" and settings.get("downloads", {}).get("enabled") and board_exists:
-        raw = cache / "board.raw.glb"
-        if (not raw.is_file() or not raw.stat().st_size) and not (cache / "board.raw.glb.failed").is_file():
-            return False
-    need_still = settings["3d"]["enabled"] or settings.get("design", {}).get("enabled", False)
-    if need_still and board_exists:
-        if settings["3d"]["enabled"]:
-            raw = cache / "board.raw.glb"
-            glb = cache / "board.glb"
-            if not (cache / "board.raw.glb.failed").is_file():
-                if not raw.is_file() or not raw.stat().st_size or not glb.is_file() or not glb.stat().st_size:
-                    return False
-        poster = cache / "poster.png"
-        if not (poster_size(poster) == (1600, 1000) or (cache / "poster.png.failed").is_file()):
-            return False
-    if check_release and settings["checks"].get("release", "off") != "off":
-        pro = posixpath.join(side, p["dir"], f"{p['name']}.kicad_pro")
-        if os.path.exists(pro) and (board_exists or os.path.isfile(posixpath.join(side, p["dir"], f"{p['name']}.kicad_sch"))):
-            try:
-                fab_parts(pro, p["name"], settings, str(pathlib.Path(cache) / "fab"))
-            except (SystemExit, OSError, ValueError, ArithmeticError, IndexError, KeyError, csv.Error, zipfile.BadZipFile):
-                return False
-    return True
+            missing.append("fab-limits")
+    if settings["checks"].get("release", "off") != "off" and not release_package_valid(cache / "fab", p, side, settings):
+        missing.append("fab")
+    pro = posixpath.join(side, p["dir"], f"{p['name']}.kicad_pro")
+    fabrication_inputs = os.path.isfile(pro) and (board or os.path.isfile(pro[:-len(".kicad_pro")] + ".kicad_sch"))
+    snapshot_fab = cache / "fab-snapshot"  # without fabrication inputs the rendered directory is intentionally empty
+    if settings.get("_snapshot_fabrication") is not None and not (nonempty_dir(snapshot_fab) or (not fabrication_inputs and snapshot_fab.is_dir())):
+        missing.append("fab-snapshot")
+    downloads = settings.get("downloads", {}).get("enabled", False)
+    policy = settings.get("_snapshot_fabrication")
+    if side == "head":  # 07 exports downloads for head only
+        for purpose in purposes:  # comparison reads downloads/, snapshot reads downloads-snapshot/
+            if purpose == "comparison" and downloads and not downloads_valid(cache, "comparison", settings):
+                missing.append("downloads")
+            # render_downloads makes downloads-snapshot/ whenever the trusted policy was captured (release checks or downloads),
+            # and a head restored from base's shared revision cache has none. With no captured policy there is nothing to
+            # validate against: still missing, never skipped.
+            if purpose == "snapshot" and (downloads or policy is not None):
+                if policy is None or not downloads_valid(cache, "snapshot", snapshot_download_policy(settings)):
+                    missing.append("downloads-snapshot")
+    return missing
 
 
 def glb_input_digest(p, side):
@@ -1003,17 +1182,117 @@ def render_cache(p, side, det, settings):
     return pathlib.Path(".render-cache") / revision / project_id(p["dir"]) / hashlib.sha256(identity).hexdigest()[:16]
 
 
+def render_settings(det):
+    """Comparison settings (base wins) plus the configuration-independent products the trusted snapshot policy asks for.
+
+    Policy-dependent products (fabrication, DigiKey) are kept in their own locations, keyed by their own policy."""
+    settings = json.loads(json.dumps(load_settings()))
+    snapshot = det.get("snapshot_settings")
+    if snapshot:
+        settings["design"]["enabled"] = snapshot["design"]["enabled"]
+        # Configuration-independent products are unioned: 02's GLB and still, library drawings, and
+        # 07's downloads and 09's Ask inputs once those sections exist.
+        for section in ("3d", "libraries", "downloads", "ask"):
+            if section in settings and section in snapshot:
+                settings[section]["enabled"] |= snapshot[section]["enabled"]
+        if snapshot["checks"].get("interfaces", "off") != "off" and settings["checks"].get("interfaces", "off") == "off":
+            settings["checks"]["interfaces"] = snapshot["checks"]["interfaces"]
+        # Release checks need the trusted fabrication policy; so will 07's snapshot downloads (its manifest is keyed by it).
+        if snapshot["checks"].get("release", "off") != "off" or snapshot.get("downloads", {}).get("enabled", False):
+            settings["_snapshot_fabrication"] = snapshot["fabrication"]
+            if isinstance(snapshot.get("downloads"), dict):
+                settings["_snapshot_downloads"] = snapshot["downloads"]
+    return settings
+
+
+def snapshot_download_policy(settings):
+    """The trusted policy downloads-snapshot/ is exported under and cmd_snapshot verifies: the trusted fabrication preset
+    and the trusted [downloads] table (so its step choice, not the comparison's, decides the manifest key). None when not captured."""
+    fabrication = settings.get("_snapshot_fabrication")
+    if fabrication is None:
+        return None
+    return {**settings, "fabrication": fabrication, "downloads": settings.get("_snapshot_downloads") or settings.get("downloads", {})}
+
+
+def render_fabrication(p, side, out, settings, products=("fab", "fab-snapshot")):
+    """fab/ under the comparison policy, fab-snapshot/ under the trusted snapshot policy; never one preset's files relabelled as another.
+
+    fab-snapshot/ is made for either side: the revision cache is shared by base and head.
+    Only the named products are rebuilt, each into an emptied folder so no earlier preset's files remain."""
+    pro = posixpath.join(side, p["dir"], p["name"] + ".kicad_pro")
+    compared = settings["checks"].get("release", "off") != "off"
+    snapshot = settings.get("_snapshot_fabrication")
+    if "fab" in products and (not compared or not os.path.isfile(pro)):
+        shutil.rmtree(f"{out}/fab", ignore_errors=True)
+    if "fab-snapshot" in products and (snapshot is None or not os.path.isfile(pro)):
+        shutil.rmtree(f"{out}/fab-snapshot", ignore_errors=True)
+    if not os.path.isfile(pro):
+        return
+
+    def release(policy, dest):
+        try:
+            release_project(pro, "review", policy, dest, p["name"])
+        except (SystemExit, OSError, ValueError, IndexError, KeyError, csv.Error, zipfile.BadZipFile):
+            print("::warning::" + workflow_command_escape(f"{p['name']}: release outputs incomplete; continuing other exports"))
+
+    if compared and "fab" in products:
+        shutil.rmtree(f"{out}/fab", ignore_errors=True)
+        os.makedirs(f"{out}/fab")
+        release(settings, f"{out}/fab")
+    if snapshot is not None and "fab-snapshot" in products:
+        dest = f"{out}/fab-snapshot"
+        shutil.rmtree(dest, ignore_errors=True)
+        if compared and snapshot == settings["fabrication"] and nonempty_dir(f"{out}/fab"):
+            shutil.copytree(f"{out}/fab", dest)
+        else:
+            os.makedirs(dest)
+            release({**settings, "fabrication": snapshot}, dest)
+
+
+def glb_revision_matches(out, revision):
+    """07's Task 9A gate input: the full SHA the raw exporter in this folder last ran on."""
+    try:
+        return pathlib.Path(out, "board.raw.glb.revision").read_text(encoding="utf-8").strip() == revision
+    except (OSError, UnicodeError):
+        return False
+
+
+def record_glb_revision(out, revision):
+    """Written only after export_glb ran on this side's own checkout; never for bytes copied from the other side."""
+    if isinstance(revision, str) and re.fullmatch(r"[0-9a-f]{40}", revision):
+        pathlib.Path(out).mkdir(parents=True, exist_ok=True)
+        pathlib.Path(out, "board.raw.glb.revision").write_text(revision + "\n", encoding="utf-8")
+
+
+def render_downloads(p, side, out, settings, head, purposes, missing):
+    """07's head downloads: downloads/ under the comparison policy, downloads-snapshot/ under the trusted snapshot policy.
+
+    A full render (missing is None) makes each folder the run's purposes use; a partial cache hit only the missing ones."""
+    src = posixpath.join(side, p["dir"])
+    wanted = settings["downloads"]["enabled"] or settings["checks"].get("release", "off") != "off"
+    # A downloads folder packages the fab folder of the same policy, so a rebuilt fab folder rebuilds its downloads.
+    if "comparison" in purposes and wanted and (missing is None or {"downloads", "fab"} & set(missing)):
+        export_downloads(p, src, out, settings, head)
+    trusted = snapshot_download_policy(settings)
+    if "snapshot" in purposes and trusted is not None and (missing is None or {"downloads-snapshot", "fab-snapshot"} & set(missing)):
+        try:
+            export_downloads(p, src, out, trusted, head, policy=trusted, purpose="snapshot")
+        except ValueError as error:  # the revision gate refused: the design report goes without downloads
+            print("::warning::" + workflow_command_escape(f"{p['name']}: design snapshot downloads skipped: {error}"))
+
+
 def restore_renders(args=None):
     """Use complete revision caches without starting/downloading the KiCad container."""
     det = json.loads(pathlib.Path("review/detect.json").read_text())
-    settings = load_settings()
+    settings = render_settings(det)
     # Library drawings are selected by the compared pair, not the revision alone.
     if settings["libraries"]["enabled"]:
         raise SystemExit(1)
     entries = [(p, side, render_cache(p, side, det, settings)) for p in det["projects"]
                for side in ("base", "head")
                if not (side == "base" and p["status"] == "added" or side == "head" and p["status"] == "removed")]
-    if any(not render_cache_complete(cache, p, side, settings) for p, side, cache in entries):
+    purposes = run_purposes(det)
+    if any(not render_cache_complete(cache, p, side, settings, purposes) for p, side, cache in entries):
         raise SystemExit(1)
     for p, side, cache in entries:
         out = f"review/{project_id(p['dir'])}/{side}"
@@ -1025,7 +1304,7 @@ def restore_renders(args=None):
 def cache_renders(args=None):
     """Snapshot final outputs, including workflow-compressed GLBs."""
     det = json.loads(pathlib.Path("review/detect.json").read_text())
-    settings = load_settings()
+    settings = render_settings(det)
     for p in det["projects"]:
         for side in ("base", "head"):
             cache = render_cache(p, side, det, settings)
@@ -1068,7 +1347,8 @@ def cmd_render(args):
     _board_warnings.clear()
     with open("review/detect.json", encoding="utf-8") as fh:
         det = json.load(fh)
-    settings = load_settings()
+    settings = render_settings(det)
+    purposes = run_purposes(det)
     for p in det["projects"]:
         export_3d = settings["3d"]["enabled"]
         need_still = export_3d or settings.get("design", {}).get("enabled", False)
@@ -1078,14 +1358,15 @@ def cmd_render(args):
                 continue
             out = f"review/{project_id(p['dir'])}/{side}"
             cache = render_cache(p, side, det, settings)
-            if render_cache_complete(cache, p, side, settings):
-                shutil.rmtree(f"{out}/fab", ignore_errors=True)
+            if cache and image_cache_complete(cache, p, side):
+                # A hit restores what is valid and exports only the products missing_products names.
+                for folder in ("fab", "fab-snapshot"):
+                    shutil.rmtree(f"{out}/{folder}", ignore_errors=True)
                 shutil.copytree(cache, out, dirs_exist_ok=True)
-                print(f"{p['name']}: {side} render cache hit ({det[side]})")
-                continue
-            if render_cache_complete(cache, p, side, settings, check_release=False):
-                shutil.rmtree(f"{out}/fab", ignore_errors=True)
-                shutil.copytree(cache, out, dirs_exist_ok=True)
+                missing = missing_products(cache, p, side, settings, purposes)
+                if not missing:
+                    print(f"{p['name']}: {side} render cache hit ({det[side]})")
+                    continue
             else:
                 # Connectivity evidence for every present schematic, whatever the check settings.
                 render_side(posixpath.join(side, p["dir"]), p["name"], out, netlist=True, ask=bool(settings.get("ask", {}).get("enabled")))
@@ -1094,8 +1375,18 @@ def cmd_render(args):
                         render_fab(p, side, out, settings)
                     except (OSError, ValueError, RuntimeError) as exc:
                         sys.exit(f"Fab limits could not run for {p['name']}: {exc}")
-                if pathlib.Path(board_path(p, side)).is_file():
-                    if side == "head" and shared_3d and (export_3d or not settings["downloads"]["enabled"]):
+                missing = None  # a full render makes every product
+            board = pathlib.Path(board_path(p, side)).is_file()
+            # The trusted snapshot's fabrication/download policy needs head's own raw export (07's Task 9A revision gate).
+            snapshot_downloads = side == "head" and "snapshot" in purposes and settings.get("_snapshot_fabrication") is not None and board
+            if missing is None or {"poster", "glb"} & set(missing) or (snapshot_downloads and "downloads-snapshot" in missing and not glb_revision_matches(out, det.get(side))):
+                own_head_glb = side == "head" and board and (snapshot_downloads or (
+                    settings["downloads"]["enabled"] and (not shared_3d or not export_3d)))
+                if own_head_glb:
+                    export_glb(p, side, out, model=settings["downloads"]["enabled"] or export_3d, poster=need_still, viewer=export_3d)
+                    record_glb_revision(out, det.get(side))
+                elif need_still and board:
+                    if side == "head" and shared_3d:
                         os.makedirs(out, exist_ok=True)
                         for name in ("board.raw.glb", "board.glb", "poster.png", "glb.log", "poster.log", "board.raw.glb.failed", "poster.png.failed"):
                             source = pathlib.Path(f"review/{project_id(p['dir'])}/base/{name}")
@@ -1103,23 +1394,16 @@ def cmd_render(args):
                             dest.unlink(missing_ok=True)
                             if source.is_file():
                                 shutil.copyfile(source, dest)
-                    elif side == "head" and settings["downloads"]["enabled"]:
-                        export_glb(p, side, out, model=True, poster=need_still, viewer=export_3d)
-                    elif need_still:
+                        pathlib.Path(out, "board.raw.glb.revision").unlink(missing_ok=True)  # base bytes are never labelled as head's revision
+                    else:
                         export_glb(p, side, out, model=export_3d)
-            if settings["checks"].get("release", "off") != "off":
-                pro = posixpath.join(side, p["dir"], f"{p['name']}.kicad_pro")
-                shutil.rmtree(f"{out}/fab", ignore_errors=True)
-                if os.path.exists(pro):
-                    os.makedirs(f"{out}/fab", exist_ok=True)
-                    try:
-                        release_project(pro, "review", settings, f"{out}/fab", p["name"])
-                    except (SystemExit, OSError, ValueError, IndexError, KeyError, csv.Error, zipfile.BadZipFile):
-                        print("::warning::" + workflow_command_escape(f"{p['name']}: release outputs incomplete; continuing other exports"))
-            else:
-                shutil.rmtree(f"{out}/fab", ignore_errors=True)
-            if side == "head" and det.get("head") and (settings["downloads"]["enabled"] or settings["checks"].get("release", "off") != "off"):
-                export_downloads(p, posixpath.join(side, p["dir"]), out, settings, det["head"])
+                        record_glb_revision(out, det.get(side))
+            if settings.get("design", {}).get("enabled", False) and board and (missing is None or "pcbdraw" in missing):
+                _, note = pcbdraw_plot(board_path(p, side), out, pcbdraw_run)
+                pathlib.Path(out, "pcbdraw.json").write_text(json.dumps({"note": note}), encoding="utf-8")
+            render_fabrication(p, side, out, settings, ("fab", "fab-snapshot") if missing is None else missing)
+            if side == "head" and det.get("head"):
+                render_downloads(p, side, out, settings, det["head"], purposes, missing)
             print(f"{p['name']}: rendered {side}")
         if settings["libraries"]["enabled"]:
             roots = {side: posixpath.join(side, p["dir"]) for side in ("base", "head")}
@@ -2499,9 +2783,10 @@ def project_objects(proj_dir, name, issues=None):
     return objs
 
 
-def project_pair(p):
+def project_pair(p, *, single=False):
+    """Both sides' objects; single=True (a design report) leaves base empty and never reads its checkout."""
     issues = []
-    objs = {side: project_objects(posixpath.join(side, p["dir"]), p["name"], issues) for side in ("base", "head")}
+    objs = {side: {} if single and side == "base" else project_objects(posixpath.join(side, p["dir"]), p["name"], issues) for side in ("base", "head")}
     for key in {i["unknownMeta"] for i in issues if "unknownMeta" in i}:
         for side in objs:
             objs[side].pop(key, None)
@@ -2735,6 +3020,7 @@ DEFAULT_SETTINGS = {
     "waivers": {"enabled": False},
     "inventory": {"enabled": False},
     "libraries": {"enabled": False},
+    "design": {"enabled": False},  # head-only design snapshot on default-branch pushes, version tags and manual snapshot runs
     "ask": {"enabled": False},
 }
 CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields", "interfaces": "Interfaces", "release": "Release package", "fab_limits": "Fab limits"}
@@ -2790,7 +3076,7 @@ def load_settings(roots=("base", "head")):
                 else:
                     settings[k] = v
             break
-    for section in ("checks", "bom", "fabrication", "3d", "parts", "release", "digikey", "threads", "issues", "github", "waivers", "inventory", "libraries", "interfaces", "pdf", "downloads", "ask"):
+    for section in ("checks", "bom", "fabrication", "3d", "parts", "release", "digikey", "threads", "issues", "github", "waivers", "inventory", "libraries", "interfaces", "pdf", "downloads", "design", "ask"):
         if not isinstance(settings[section], dict):
             sys.exit(f"{SETTINGS_FILE}: {section} must be a table")
     if not isinstance(settings["bom"]["required_fields"], list) or not all(isinstance(f, str) for f in settings["bom"]["required_fields"]):
@@ -2845,6 +3131,8 @@ def load_settings(roots=("base", "head")):
         sys.exit(f"{SETTINGS_FILE}: inventory.enabled must be true or false")
     if not isinstance(settings["libraries"]["enabled"], bool):
         sys.exit(f"{SETTINGS_FILE}: libraries.enabled must be true or false")
+    if not isinstance(settings["design"]["enabled"], bool):
+        sys.exit(f"{SETTINGS_FILE}: design.enabled must be true or false")
     for key, value in (("threads.block_merge", settings["threads"]["block_merge"]), ("github.check_runs", settings["github"]["check_runs"])):
         if not isinstance(value, bool):
             sys.exit(f"{SETTINGS_FILE}: {key} must be true or false")
@@ -4325,7 +4613,7 @@ def fab_read_audit(out_dir, side, p, vendor):
     return sections[0]
 
 
-def fab_check(p, settings, out_dir, waivers, vendor):
+def fab_check(p, settings, out_dir, waivers, vendor, *, single=False):
     if not fab_enabled(settings):
         return None
     level = settings['checks']['fab_limits']
@@ -4342,16 +4630,18 @@ def fab_check(p, settings, out_dir, waivers, vendor):
         if waivers is not None:
             result['waived'] = 0
         return result
-    reason = output_not_run(p, out_dir, ('head', 'base'), 'fab-limits.json')
+    reason = output_not_run(p, out_dir, ('head',) if single else ('head', 'base'), 'fab-limits.json')
     if reason:
         result = {**empty,'status':'not_run','reason':reason,'incomplete':True}
         if waivers is not None:
             result['waived'] = 0
         return result
     head_meta = fab_read_audit(out_dir, 'head', p, vendor)
-    base_board = board_path(p, 'base')
-    fab_regular_input(pathlib.Path(base_board))
-    base_meta = fab_read_audit(out_dir, 'base', p, vendor) if os.path.isfile(base_board) else None
+    # A design report (single) never reads the base checkout, even when it is still on disk.
+    base_board = None if single else board_path(p, 'base')
+    if base_board is not None:
+        fab_regular_input(pathlib.Path(base_board))
+    base_meta = fab_read_audit(out_dir, 'base', p, vendor) if base_board is not None and os.path.isfile(base_board) else None
     # A base comparison needs both audits to be supported; an unsupported side is never compared.
     baseline = base_meta is not None and not base_meta['unsupported'] and not head_meta['unsupported']
     head_raw = head_meta['violations']
@@ -4383,15 +4673,18 @@ def fab_check(p, settings, out_dir, waivers, vendor):
     return result
 
 
-def fab_checks(p, settings, out_dir, waivers=None):
-    return [c for c in (fab_check(p, settings, out_dir, waivers, vendor) for vendor in FAB_VENDORS) if c]
+def fab_checks(p, settings, out_dir, waivers=None, *, single=False):
+    return [c for c in (fab_check(p, settings, out_dir, waivers, vendor, single=single) for vendor in FAB_VENDORS) if c]
 
 
-def project_checks(p, settings, objs, waivers=None):
+def project_checks(p, settings, objs, waivers=None, *, single=False):
     out_dir = f"review/{project_id(p['dir'])}"
-    sch = lambda s: os.path.exists(posixpath.join(s, p["dir"], f"{p['name']}.kicad_sch"))
+    # Single-revision design report: the base checkout may still be on disk, but nothing is compared with it.
+    sch = lambda s: not (single and s == "base") and os.path.exists(posixpath.join(s, p["dir"], f"{p['name']}.kicad_sch"))
 
     def side(s, f, k):
+        if single and s == "base":
+            return None
         src = posixpath.join(s, p["dir"], f"{p['name']}.{'kicad_sch' if k == 'erc' else 'kicad_pcb'}")
         if os.path.exists(src) and not os.path.exists(f"{out_dir}/{s}/{f}"):  # never drop a check because its output is missing
             sys.exit(f"kicad-cli wrote no {f} for {src}")
@@ -4408,8 +4701,9 @@ def project_checks(p, settings, objs, waivers=None):
                 **({"incomplete": True} if incomplete else {}),
                 "errors": 0, "new_errors": 0, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []}
     fields = settings["bom"]["required_fields"]
-    drc_reason = drc_not_run(("head", "base"))
-    parity_reason = drc_not_run([s for s in ("head", "base") if sch(s)]) if sch("head") else None
+    check_sides = ("head",) if single else ("head", "base")
+    drc_reason = drc_not_run(check_sides)
+    parity_reason = drc_not_run([s for s in check_sides if sch(s)]) if sch("head") else None
     checks = [
         run_check("erc", settings, side("head", "erc.json", "erc"), side("base", "erc.json", "erc"), waivers),
         not_run("drc", drc_reason, True) if drc_reason else
@@ -4425,19 +4719,20 @@ def project_checks(p, settings, objs, waivers=None):
     if settings["checks"].get("release", "off") != "off":
         pcb = lambda s: posixpath.join(s, p["dir"], f"{p['name']}.kicad_pcb")
         preset = settings["fabrication"]["preset"]
-        release_reason = output_not_run(p, out_dir, ("head", "base"), f"fab/{p['name']}-review-{preset}-gerbers.zip")
+        fab = "fab-snapshot" if single else "fab"  # a design report reads the trusted-policy package
+        release_reason = output_not_run(p, out_dir, check_sides, f"{fab}/{p['name']}-review-{preset}-gerbers.zip")
         if not os.path.exists(pcb("head")):
             out.append({"name": "release", "title": CHECK_NAMES["release"], "level": settings["checks"]["release"], "status": "not_run",
                         "reason": "no board", "errors": 0, "new_errors": 0, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []})
         elif release_reason:
             out.append(not_run("release", release_reason, True))
         else:
-            side = lambda s: release_findings(f"{out_dir}/{s}/fab", p["name"], preset, pcb(s), objs[s]) if os.path.exists(pcb(s)) else None
+            side = lambda s: release_findings(f"{out_dir}/{s}/{fab}", p["name"], preset, pcb(s), objs[s]) if os.path.exists(pcb(s)) and not (single and s == "base") else None
             c = run_check("release", settings, side("head"), side("base"))
-            c["package"] = package_summary(f"{out_dir}/head/fab")
+            c["package"] = package_summary(f"{out_dir}/head/{fab}")
             out.append(c)
-    out.extend(fab_checks(p, settings, out_dir, waivers))
-    ic = interface_check(p, settings, objs, f"review/{project_id(p['dir'])}")
+    out.extend(fab_checks(p, settings, out_dir, waivers, single=single))
+    ic = interface_check(p, settings, objs, f"review/{project_id(p['dir'])}", single=single)
     return out + ([ic] if ic else [])
 
 
@@ -4940,7 +5235,7 @@ def matches(name, patterns):
     return any(p.upper() in tokens or (name or "").upper() == p.upper() for p in patterns)
 
 
-def interface_check(p, settings, objs, out_dir):
+def interface_check(p, settings, objs, out_dir, *, single=False):
     if settings["checks"].get("interfaces", "off") == "off":
         return None
     def not_run(reason, incomplete=False):
@@ -4950,8 +5245,8 @@ def interface_check(p, settings, objs, out_dir):
     if not pathlib.Path("head", p["dir"], p["name"] + ".kicad_sch").is_file():
         return not_run("no schematic")
     patterns = {k: INTERFACE_PATTERNS[k] + settings["interfaces"].get(k, []) for k in INTERFACE_PATTERNS}
-    findings, coverage = {}, None
-    for side in ("head", "base"):
+    findings, coverage = {"base": None}, None
+    for side in ("head",) if single else ("head", "base"):  # a design report never reads the base checkout
         if not pathlib.Path(side, p["dir"], p["name"] + ".kicad_sch").is_file():
             findings[side] = None  # An absent base schematic is an empty baseline, not failed evidence.
             continue
@@ -5674,12 +5969,12 @@ def artifact3d(raw, suffix, root=pathlib.Path('review/3d')):
     (root / name).write_bytes(packed)
     return {'digest': digest, 'artifactName': name, 'bytes': len(packed)}
 
-def attach3d(board, out, blobs):
+def attach3d(board, out, blobs, allowed_sides=("base", "head")):
     """Attach stills independently, and coverage/index/assets only for verified processed sets."""
     board.pop('coverage3d', None)
     board.update({key:{side:None for side in ('base','head')}
                   for key in ('parts3d','poster3d','coverage3dBySide','assets3d')})
-    for side in ("base", "head"):
+    for side in allowed_sides:
         folder = pathlib.Path(out,side)
         poster = folder / 'poster.png'
         try:
@@ -5727,6 +6022,29 @@ def attach3d(board, out, blobs):
         board['coverage3d'] = coverage
 
 
+def attach_pcbdraw(board, root, blobs, allowed_sides):
+    """board.pcbdraw.{base,head}: front and back blob ids plus the note. Single mode lists head only, so base is never read."""
+    board["pcbdraw"] = {"base": None, "head": None}
+    for side in allowed_sides:
+        folder = os.path.join(root, side)
+        meta = os.path.join(folder, "pcbdraw.json")
+        if not os.path.isfile(meta):
+            continue
+        try:
+            raw_meta = json.loads(pathlib.Path(meta).read_text(encoding="utf-8"))
+            if not isinstance(raw_meta, dict):
+                continue
+            note = str(raw_meta.get("note") or "")
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        entry = {"front": None, "back": None, "note": note}
+        for face in ("front", "back"):
+            path = os.path.join(folder, f"pcbdraw-{face}.svg")
+            if pcbdraw_svg_valid(path):
+                entry[face] = add_blob(blobs, pathlib.Path(path).read_bytes())
+        board["pcbdraw"][side] = entry
+
+
 def image_pair(base, head):
     return {'base': base, 'head': head}
 
@@ -5747,11 +6065,11 @@ def write_image_assets(blobs, assets, directory):
         (dest / filename).write_bytes(payload)
 
 
-def model3d_missing(out, objs):
+def model3d_missing(out, objs, which=("base", "head")):
     """Missing 3D models from KiCad's export log and footprints without a model declaration."""
     missing = {}
     add = lambda ref, side, reason: missing.setdefault((ref, reason), set()).add(side)
-    for side in ("base", "head"):
+    for side in which:
         log = f"{out}/{side}/glb.log"
         if os.path.exists(log):
             with open(log, encoding="utf-8") as fh:
@@ -5904,10 +6222,10 @@ def electrical_summary(rows, issues, present=None):
             "incomplete":issues,"documents":documents}
 
 
-def build_project(p, blobs, settings, waivers=None, change_offset=0, bom_sink=None, *, context=None):
-    """`context`, when a dict, receives this project's Ask context builder under p["dir"]. 06 adds the keyword-only `single` beside it."""
+def build_project(p, blobs, settings, waivers=None, change_offset=0, bom_sink=None, *, single=False, context=None):
+    """single=True: the design as it is at head. The base side may still be on disk; it is not read."""
     out = f"review/{project_id(p['dir'])}"
-    sides = [s for s in ("base", "head") if os.path.isdir(f"{out}/{s}")]
+    sides = [s for s in (("head",) if single else ("base", "head")) if os.path.isdir(f"{out}/{s}")]
     theme_paths = {side: read_optional_json(f'{out}/{side}/sheet-images.json', {}) for side in sides}
     pages_by_side = {side: sheet_pages(posixpath.join(side, p['dir']), p['name']) for side in sides}
     hotspot_ids = image_pair(None, None)
@@ -5942,7 +6260,7 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0, bom_sink=No
         texts = pg.pop("svg")
         del pg["stem"]
         b, h = texts.get("base"), texts.get("head")
-        pg["status"] = "added" if b is None and h else "removed" if h is None and b else "modified" if b != h else "unchanged"
+        pg["status"] = "unchanged" if single else "added" if b is None and h else "removed" if h is None and b else "modified" if b != h else "unchanged"
         pg["size"] = svg_size(h or b)
         pg["svg"] = {"base": add_blob(blobs, b), "head": add_blob(blobs, h)}
         pg['hotspots'] = {side: hotspot_ids[side] if texts.get(side) is not None else None for side in ('base', 'head')}
@@ -5958,16 +6276,16 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0, bom_sink=No
     layers, changed = [], False
     names = sorted({f for s in sides if os.path.isdir(f"{out}/{s}/pcb") for f in os.listdir(f"{out}/{s}/pcb")})
     for f in names:
-        b, h = (svg_body(f"{out}/{s}/pcb/{f}") for s in ("base", "head"))
-        changed |= b != h
+        b, h = (svg_body(f"{out}/{s}/pcb/{f}") if s in sides else None for s in ("base", "head"))
+        changed |= b != h and not single
         if b is not None or h is not None:
             layers.append({"name": f[len(p["name"]) + 1: -4], "base": b, "head": h})
-    has = {s: os.path.isfile(board_path(p, s)) for s in ("base", "head")}
+    has = {s: False if (single and s == "base") else os.path.isfile(board_path(p, s)) for s in ("base", "head")}
     board = {"changed": changed, "layers": [],
-             "status": "added" if not has["base"] else "removed" if not has["head"] else "modified" if changed else "unchanged"}
+             "status": "unchanged" if single else "added" if not has["base"] else "removed" if not has["head"] else "modified" if changed else "unchanged"}
     if layers:
         board["size"] = svg_size(next(t for l in layers for t in (l["head"], l["base"]) if t))
-        board["layers"] = [{"name": l["name"], "changed": l["base"] != l["head"],
+        board["layers"] = [{"name": l["name"], "changed": l["base"] != l["head"] and not single,
                             "svg": {"base": add_blob(blobs, l["base"]), "head": add_blob(blobs, l["head"])}}
                            for l in layers]
     for row in board['layers']:
@@ -5988,22 +6306,28 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0, bom_sink=No
                 text = gzip.decompress(base64.b64decode(blobs[key])).decode() if key else None
                 pair[side] = add_blob(blobs, comparison_svg(text, side, schematic)) if text else None
             row['svgCompare'] = pair
-    objs, source_issues = project_pair(p)
-    det = read_optional_json("review/detect.json", {})
-    extra, issues = electrical_changes(p, out, objs, {s: det.get(s, "") for s in ("base", "head")})
-    changes = [classify_change(r) for r in dedupe_electrical(diff_objects(objs["base"], objs["head"]), extra)] + extra
-    present = {d for d, suffix in (("schematic", ".kicad_sch"), ("board", ".kicad_pcb"))
-               if any(pathlib.Path(s, p["dir"], p["name"] + suffix).is_file() for s in ("base", "head"))}
-    summary = electrical_summary(changes, source_issues + issues, present)
+    objs, source_issues = project_pair(p, single=single)
+    summary = None
+    if single:  # one revision: no change rows, no electrical summary (so no fake "removed nets")
+        changes = []
+    else:
+        det = read_optional_json("review/detect.json", {})
+        extra, issues = electrical_changes(p, out, objs, {s: det.get(s, "") for s in ("base", "head")})
+        changes = [classify_change(r) for r in dedupe_electrical(diff_objects(objs["base"], objs["head"]), extra)] + extra
+        present = {d for d, suffix in (("schematic", ".kicad_sch"), ("board", ".kicad_pcb"))
+                   if any(pathlib.Path(s, p["dir"], p["name"] + suffix).is_file() for s in ("base", "head"))}
+        summary = electrical_summary(changes, source_issues + issues, present)
     for n, change in enumerate(changes, change_offset + 1):
         change["id"] = f"c{n}"
     inspect = image_pair(None, None)
     geometry = {}
     pcbs = {side: posixpath.join(side, p["dir"], p["name"] + ".kicad_pcb") for side in ("base", "head")}
-    same_board = all(os.path.isfile(f) for f in pcbs.values()) and filecmp.cmp(pcbs["base"], pcbs["head"], shallow=False)
+    same_board = not single and all(os.path.isfile(f) for f in pcbs.values()) and filecmp.cmp(pcbs["base"], pcbs["head"], shallow=False)
     for side in ("base", "head"):
         pcb = pcbs[side]
         geometry[side] = None
+        if single and side == "base":
+            continue
         if side == "head" and same_board:
             geometry[side] = geometry["base"]
             inspect[side] = inspect["base"]
@@ -6050,28 +6374,45 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0, bom_sink=No
                  "summary": bom_summary(lines["head"]), "exports": bom_exports(lines["head"], settings["fabrication"]["preset"], settings["fabrication"].get("part_field"), objs["head"]),
                  "coverage": {"base": bom_coverage(objs["base"], settings) if has_base else None, "head": bom_coverage(objs["head"], settings)},
                  "field_changes": field_changes(objs["base"], objs["head"]), "dnp_mismatch": dnp_mismatches(objs["head"])}
+        if single:  # nothing is compared, so no part is added and no problem is new
+            parts["changes"] = parts["field_changes"] = []
+            parts["coverage"]["base"] = None
+            for line in parts["lines"]:
+                line["new_problems"] = []
         if bom_sink is not None:  # repository BOM (Task 5A) reads the head lines and objects
             bom_sink.append({"name": p["name"], "lines": lines["head"], "objects": objs["head"]})
+    allowed_sides = ("head",) if single else ("base", "head")
     if settings["3d"]["enabled"]:
-        models = {side: f"{out}/{side}/board.glb" for side in ("base", "head")}
-        board["model3d"] = {side: add_blob(blobs, pathlib.Path(path).read_bytes()) if os.path.exists(path) else None
-                            for side, path in models.items()}
+        models = {side: f"{out}/{side}/board.glb" for side in allowed_sides}
+        board["model3d"] = {side: None for side in ("base", "head")}
+        for side in allowed_sides:
+            path = models[side]
+            if os.path.exists(path):
+                board["model3d"][side] = add_blob(blobs, pathlib.Path(path).read_bytes())
         board["model3d"].update({"enabled": True,
-                                 "changed": board["model3d"].get("base") != board["model3d"].get("head"),
-                                 "errors": {side: "3D export unavailable" for side in ("base", "head")
+                                 "changed": board["model3d"].get("base") != board["model3d"].get("head") and not single,
+                                 "errors": {side: "3D export unavailable" for side in allowed_sides
                                             if has[side] and not board["model3d"].get(side)}})
-        board["no_model"] = model3d_missing(out, objs)
+        board["no_model"] = model3d_missing(out, objs, allowed_sides)
     if settings["3d"]["enabled"] or settings.get("design", {}).get("enabled", False):
-        attach3d(board, out, blobs)
+        attach3d(board, out, blobs, allowed_sides=allowed_sides)
+    if settings.get("design", {}).get("enabled", False):
+        attach_pcbdraw(board, out, blobs, allowed_sides)
     index = object_index(objs["base"], objs["head"], libraries=settings["libraries"]["enabled"]) if any(
         settings.get(name, {}).get("enabled") for name in ("threads", "issues", "inventory", "libraries", "ask")) else None
+    if single and index is not None:   # one revision: nothing was added or moved
+        for item in index:
+            for key in ("added", "action", "pos_before"):
+                item.pop(key, None)
     libraries = None
-    if settings["libraries"]["enabled"]:
+    if settings["libraries"]["enabled"] and not single:
         roots = {side: posixpath.join(side, p["dir"]) for side in ("base", "head")}
         items = {side: library_items(root) for side, root in roots.items()}
         libraries = library_report(library_changes(items["base"], items["head"]), index, out, blobs,
                                    local_items=set(items["base"]) | set(items["head"])) or None
-    checks = project_checks(p, settings, objs, waivers)
+    checks = project_checks(p, settings, objs, waivers, single=single)
+    if single:
+        absolute_checks(checks)
     ask = None
     if context is not None:
         with open("review/detect.json", encoding="utf-8") as fh: revision_shas = json.load(fh)
@@ -6080,7 +6421,7 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0, bom_sink=No
         # An absent side is null, never {}.
         ask = {"nets": {side: (ask_index(f"{out}/{side}")["nets"] if side in sides else None) for side in ("base", "head")}}
     return {"name": p["name"], "dir": p["dir"], "status": p["status"], "sheets": sheets, "board": board,
-            "changes": changes, "summary": summary, "checks": checks,
+            "changes": changes, **({} if single else {"summary": summary}), "checks": checks,
             **({"parts": parts} if parts else {}),
             **({"libraries": libraries} if libraries else {}),
             **({"objects": index} if index is not None else {}),
@@ -6088,6 +6429,16 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0, bom_sink=No
             **({"identity": {side: identity_index(ask["nets"][side], identity_objects(objs[side]))
                              for side in ("base", "head") if ask["nets"][side] is not None}}
                if ask is not None else {})}
+
+
+def absolute_checks(checks):
+    """A design report compares nothing, so no finding is new and none was fixed. Counts stay absolute."""
+    for c in checks:
+        for v in c["violations"]:
+            v["new"] = False
+        c["new_errors"] = c["new_warnings"] = 0
+        if "fixed" in c:  # 04's not_run fab result has no base comparison, so it carries no fixed key at all
+            c["fixed"] = 0
 
 
 def assign_ids(projects):
@@ -6172,6 +6523,7 @@ def inline_page(data_js):
     """ui/review.html with its CSS, the run's data and its JS inlined: one file that works offline."""
     read = lambda name: open(posixpath.join(UI_DIR, name), encoding="utf-8").read()
     has_3d = '"model3d"' in data_js
+    has_poster = '"poster3d"' in data_js or '"pcbdraw"' in data_js
     page = (read("review.html")
             .replace('<link rel="stylesheet" href="tokens.css">\n<link rel="stylesheet" href="review.css">', f"<style>\n{read('tokens.css')}</style>\n<style>\n{read('review.css')}</style>")
             .replace('<script src="sample/review-data.js"></script>', f"<script>{data_js}</script>"))
@@ -6183,6 +6535,8 @@ def inline_page(data_js):
         worker = base64.b64encode(open(posixpath.join(UI_DIR, "three-decode.js"), "rb").read()).decode()
         worker_tag = f'<script type="application/octet-stream" id="three-decode-worker">{worker}</script>'
         prefix = f'<script type="application/octet-stream" id="three-bundle">{bundle}</script>{worker_tag}<script>\n{read("three-parts.js")}</script><script>\n{read("review3d.js")}</script>'
+    elif has_poster:
+        prefix = f'<script>\n{read("review3d.js")}</script>'
     page = page.replace('<script src="review.js"></script>', f"{prefix}<script>\n{read('review.js')}</script>")
     for asset in ("kicad-colors.js", "appearance-state.js", "board-gl.js", "appearance.js", "board-marks.js", "board-diff.js", "three-studio.js", "image-view.js", "ask.js"):
         page = page.replace(f'<script src="{asset}"></script>', f'<script>\n{read(asset)}</script>')
@@ -6191,11 +6545,14 @@ def inline_page(data_js):
 
 
 def cmd_lookup(args):
-    settings = load_settings()
-    if not settings["digikey"]["enabled"]:
+    """supplier.json under the comparison policy; supplier-snapshot.json under the trusted snapshot policy."""
+    det = json.loads(pathlib.Path("review/detect.json").read_text())
+    policies = [("review/supplier.json", load_settings())]
+    if det.get("snapshot_settings"):
+        policies.append(("review/supplier-snapshot.json", det["snapshot_settings"]))
+    policies = [(path, policy) for path, policy in policies if policy["digikey"]["enabled"]]
+    if not policies:
         return
-    with open("review/detect.json", encoding="utf-8") as fh:
-        det = json.load(fh)
     wanted, manufacturers = {}, {}
     for project in det["projects"]:
         objects = project_objects(posixpath.join("head", project["dir"]), project["name"])
@@ -6214,23 +6571,27 @@ def cmd_lookup(args):
                         hints.add(name.strip().lower())
     for key, hints in manufacturers.items():
         wanted[key]["manufacturer"] = next(iter(hints)) if len(hints) == 1 else None
-    cfg = settings["digikey"]
-    supplier = supplier_info(cfg["currency"])
     creds = (os.environ.get("DIGIKEY_CLIENT_ID", ""), os.environ.get("DIGIKEY_CLIENT_SECRET", ""))
-    output = {"supplier": supplier, "results": {}}
-    if not all(creds):
-        supplier["skipped"] = "no credentials (forked pull request or secrets not set)"
-    elif wanted:
-        try:
-            output = digikey_lookup(wanted, creds, settings)
-        except Exception as error:
-            # No response bodies or exception messages: they may contain credentials.
-            supplier["error"] = f"lookup unavailable ({type(error).__name__})"
-    else:
-        supplier["skipped"] = "no valid MPNs"
-    with open("review/supplier.json", "w", encoding="utf-8") as fh:
-        json.dump(output, fh)
-    print(f"DigiKey lookup: {output['supplier']['calls']} calls")
+    outputs = {}
+    for path, policy in policies:
+        key = json.dumps(policy["digikey"], sort_keys=True)  # currency, site and every option: differing policies never share results
+        if key not in outputs:
+            supplier = supplier_info(policy["digikey"]["currency"])
+            output = {"supplier": supplier, "results": {}}
+            if not all(creds):
+                supplier["skipped"] = "no credentials (forked pull request or secrets not set)"
+            elif wanted:
+                try:
+                    output = digikey_lookup(wanted, creds, policy)
+                except Exception as error:
+                    # No response bodies or exception messages: they may contain credentials.
+                    supplier["error"] = f"lookup unavailable ({type(error).__name__})"
+            else:
+                supplier["skipped"] = "no valid MPNs"
+            outputs[key] = output
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(outputs[key], fh)
+        print(f"DigiKey lookup ({path}): {outputs[key]['supplier']['calls']} calls")
 
 
 def merge_supplier(projects, lookup):
@@ -6264,6 +6625,36 @@ def merge_supplier(projects, lookup):
         parts["supplier"] = {**lookup["supplier"], "looked_up": len(looked_up), "not_looked_up": counts}
 
 
+def filtered_settings(settings):
+    """Keep opted-out report data compatible; embedded UI bytes may change."""
+    report_settings = {k: v for k, v in settings.items()
+                       if k != "release" and not ((k in ("3d", "parts", "digikey", "threads", "issues", "waivers", "inventory", "libraries", "pdf", "downloads", "design", "ask") and not v["enabled"]) or (k == "github" and not v["check_runs"]))}
+    if not settings["parts"]["enabled"]:
+        report_settings["bom"] = {"required_fields": settings["bom"]["required_fields"]}
+    if settings["checks"].get("interfaces") == "off":  # opted-out report settings stay identical
+        report_settings["checks"] = {k: v for k, v in settings["checks"].items() if k != "interfaces"}
+        report_settings.pop("interfaces", None)
+    if settings["checks"].get("release") == "off":  # opted-out report settings stay identical
+        report_settings["checks"] = {k: v for k, v in report_settings["checks"].items() if k != "release"}
+    if not fab_enabled(settings):
+        report_settings['checks'] = {k: v for k, v in report_settings['checks'].items() if k != 'fab_limits'}
+        report_settings['fabrication'] = {k: v for k, v in report_settings['fabrication'].items() if k != 'check_limits'}
+    return report_settings
+
+
+def load_supplier(settings, projects, path="review/supplier.json"):
+    """Merge the DigiKey lookup step's file into the parts lists; a missing or unreadable file is recorded, not fatal."""
+    if settings.get("digikey", {}).get("enabled"):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                lookup = json.load(fh)
+            if not isinstance(lookup.get("supplier"), dict) or not isinstance(lookup.get("results"), dict):
+                raise ValueError("invalid supplier file")
+        except (OSError, ValueError, AttributeError):
+            lookup = {"supplier": supplier_info(settings["digikey"]["currency"], error="lookup unavailable (lookup step did not finish)"), "results": {}}
+        merge_supplier(projects, lookup)
+
+
 def cmd_report(args):
     _sheet_warnings.clear()
     _board_warnings.clear()
@@ -6274,19 +6665,7 @@ def cmd_report(args):
     settings = load_settings()
     ask_on = bool(settings.get("ask", {}).get("enabled"))
     builders = {} if ask_on else None
-    # An opted-out report must remain byte-for-byte compatible with reports made before this feature.
-    report_settings = {k: v for k, v in settings.items()
-                       if k != "release" and not ((k in ("3d", "parts", "digikey", "threads", "issues", "waivers", "inventory", "libraries", "pdf", "downloads", "ask") and not v["enabled"]) or (k == "github" and not v["check_runs"]))}
-    if not settings["parts"]["enabled"]:
-        report_settings["bom"] = {"required_fields": settings["bom"]["required_fields"]}
-    if settings["checks"].get("interfaces") == "off":  # opted-out reports stay byte-identical
-        report_settings["checks"] = {k: v for k, v in settings["checks"].items() if k != "interfaces"}
-        report_settings.pop("interfaces", None)
-    if settings["checks"].get("release") == "off":  # opted-out reports stay byte-identical
-        report_settings["checks"] = {k: v for k, v in report_settings["checks"].items() if k != "release"}
-    if not fab_enabled(settings):
-        report_settings['checks'] = {k: v for k, v in report_settings['checks'].items() if k != 'fab_limits'}
-        report_settings['fabrication'] = {k: v for k, v in report_settings['fabrication'].items() if k != 'check_limits'}
+    report_settings = filtered_settings(settings)
     data = {
         "version": 1,
         "repo": env.get("GITHUB_REPOSITORY", ""),
@@ -6309,15 +6688,7 @@ def cmd_report(args):
         change_offset += len(project["changes"])
     if len(bom_boards) >= 2:  # repository-wide BOM, only when there are several projects (Owner decision 2026-10-26)
         data["bom"] = bom_repository(bom_boards, settings["fabrication"]["preset"], settings["fabrication"].get("part_field"))
-    if settings.get("digikey", {}).get("enabled"):
-        try:
-            with open("review/supplier.json", encoding="utf-8") as fh:
-                lookup = json.load(fh)
-            if not isinstance(lookup.get("supplier"), dict) or not isinstance(lookup.get("results"), dict):
-                raise ValueError("invalid supplier file")
-        except (OSError, ValueError, AttributeError):
-            lookup = {"supplier": supplier_info(settings["digikey"]["currency"], error="lookup unavailable (lookup step did not finish)"), "results": {}}
-        merge_supplier(data["projects"], lookup)
+    load_supplier(settings, data["projects"])
     assign_ids(data["projects"])
     if ask_on:
         doc = fit_context(lambda net_cap, pin_cap: {"version": 1, "kind": "kicad-review-design-context", "repo": env.get("GITHUB_REPOSITORY", ""),
@@ -6352,29 +6723,361 @@ def cmd_report(args):
         if ask_on: fh.write(f"context_name={name[:-5]}.context.json\n")
 
 
+DESIGN_DIR = "review/design"
+
+
+def _png_chunk(kind, body):
+    return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body) & 0xFFFFFFFF)
+
+
+def _png_decode(data):
+    """Unfiltered rows of an 8-bit, non-interlaced RGB or RGBA PNG: (width, height, bytes per pixel, rows). Anything else raises ValueError."""
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ValueError("not a PNG")
+    pos, idat, width, height = 8, b"", 0, 0
+    depth = ctype = interlace = comp = filt = None
+    while pos < len(data):
+        if pos + 8 > len(data):
+            raise ValueError("truncated PNG chunk header")
+        length, kind = struct.unpack(">I4s", data[pos:pos + 8])
+        if pos + 12 + length > len(data):
+            raise ValueError("truncated PNG chunk body")
+        body = data[pos + 8:pos + 8 + length]
+        pos += 12 + length
+        if kind == b"IHDR":
+            width, height, depth, ctype, comp, filt, interlace = struct.unpack(">IIBBBBB", body)
+        elif kind == b"IDAT":
+            idat += body
+        elif kind == b"IEND":
+            break
+    if width < 1 or height < 1 or depth != 8 or ctype not in (2, 6) or comp or filt or interlace:
+        raise ValueError("unsupported PNG")
+    bpp = 3 if ctype == 2 else 4
+    stride = width * bpp
+    raw = zlib.decompress(idat)
+    if len(raw) != height * (stride + 1):
+        raise ValueError("PNG size mismatch")
+    rows, prev, p = [], bytearray(stride), 0
+    for _ in range(height):
+        kind = raw[p]
+        line = bytearray(raw[p + 1:p + 1 + stride])
+        p += 1 + stride
+        for i in range(stride):
+            a = line[i - bpp] if i >= bpp else 0
+            b = prev[i]
+            c = prev[i - bpp] if i >= bpp else 0
+            if kind == 1:
+                line[i] = (line[i] + a) & 255
+            elif kind == 2:
+                line[i] = (line[i] + b) & 255
+            elif kind == 3:
+                line[i] = (line[i] + (a + b) // 2) & 255
+            elif kind == 4:
+                pa, pb, pc = abs(b - c), abs(a - c), abs(a + b - 2 * c)
+                line[i] = (line[i] + (a if pa <= pb and pa <= pc else (b if pb <= pc else c))) & 255
+            elif kind != 0:
+                raise ValueError("bad filter")
+        rows.append(bytes(line))
+        prev = line
+    return width, height, bpp, rows
+
+
+def _png_filter(kind, row, prev, bpp):
+    """One PNG filter (0 None, 1 Sub, 2 Up, 3 Average, 4 Paeth) applied to a row; prev is the unfiltered row above."""
+    out = bytearray(len(row))
+    for i, x in enumerate(row):
+        a = row[i - bpp] if i >= bpp else 0
+        b = prev[i]
+        c = prev[i - bpp] if i >= bpp else 0
+        if kind == 1:
+            pred = a
+        elif kind == 2:
+            pred = b
+        elif kind == 3:
+            pred = (a + b) // 2
+        elif kind == 4:
+            p = a + b - c
+            pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+            pred = a if pa <= pb and pa <= pc else b if pb <= pc else c
+        else:
+            pred = 0
+        out[i] = (x - pred) & 0xFF
+    return bytes(out)
+
+
+def _png_rgb(width, height, rows):
+    """8-bit RGB PNG. Each row takes the filter with the smallest sum of absolute signed bytes (the usual heuristic)."""
+    prev, parts = bytes(width * 3), []
+    for row in rows:
+        kind, encoded = min(((k, _png_filter(k, row, prev, 3)) for k in range(5)), key=lambda c: sum(v if v < 128 else 256 - v for v in c[1]))
+        parts.append(bytes([kind]) + encoded)
+        prev = row
+    return (b"\x89PNG\r\n\x1a\n" + _png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + _png_chunk(b"IDAT", zlib.compress(b"".join(parts), 9)) + _png_chunk(b"IEND", b""))
+
+
+def poster_thumbnail(png, width=200, bg=(19, 22, 27)):
+    """Box-averaged RGB thumbnail of a plain 8-bit PNG (the head poster). Pure Python, so it runs in the separate thumbnail job, never in the review job.
+    ponytail: a 1600 x 1000 poster takes seconds of Python; the thumbnail job is separate so it never delays a review."""
+    if width < 1:
+        raise ValueError("invalid thumbnail width")
+    return _thumb_png(_png_decode(png), width, bg)
+
+
+# site/design.js THUMB_PNG_B64_MAX: the review site shows no thumbnail whose base64 is longer, so none is written.
+THUMB_PNG_B64_MAX = 40000
+THUMB_WIDTHS = (200, 160, 128, 100, 80, 64)
+
+
+def bounded_thumbnail(png, bg=(19, 22, 27)):
+    """The widest THUMB_WIDTHS thumbnail whose base64 fits THUMB_PNG_B64_MAX, or None. The poster is decoded once."""
+    decoded = _png_decode(png)
+    for width in THUMB_WIDTHS:
+        thumb = _thumb_png(decoded, width, bg)
+        if len(base64.b64encode(thumb)) <= THUMB_PNG_B64_MAX:
+            return thumb
+    return None
+
+
+def _thumb_png(decoded, width, bg):
+    w, h, bpp, rows = decoded
+    tw = max(1, min(width, w))
+    th = max(1, round(h * tw / w))
+    out = []
+    for ty in range(th):
+        y0, y1 = ty * h // th, max(ty * h // th + 1, (ty + 1) * h // th)
+        line = bytearray()
+        for tx in range(tw):
+            x0, x1 = tx * w // tw, max(tx * w // tw + 1, (tx + 1) * w // tw)
+            acc, n = [0, 0, 0], 0
+            for y in range(y0, y1):
+                for x in range(x0, x1):
+                    o = x * bpp
+                    if bpp == 4:
+                        a = rows[y][o + 3]
+                        acc[0] += (rows[y][o] * a + bg[0] * (255 - a)) // 255
+                        acc[1] += (rows[y][o + 1] * a + bg[1] * (255 - a)) // 255
+                        acc[2] += (rows[y][o + 2] * a + bg[2] * (255 - a)) // 255
+                    else:
+                        acc[0] += rows[y][o]
+                        acc[1] += rows[y][o + 1]
+                        acc[2] += rows[y][o + 2]
+                    n += 1
+            line += bytes(v // n for v in acc)
+        out.append(bytes(line))
+    return _png_rgb(tw, th, out)
+
+
+def thumbnail_entries(plan, src_dir):
+    """This commit's thumbnails, ready to stage: {v, sha, date, projects: {folder key: base64 PNG}}.
+    A poster that is not a plain PNG, or too detailed for the review site's limit, gets a notice and no entry."""
+    staged = {"v": 1, "sha": plan["sha"], "date": plan["committedAt"], "projects": {}}
+    for project in plan["projects"]:
+        key = project["dir"] or "."
+        try:
+            poster = pathlib.Path(src_dir, project["poster"])
+            if not poster.is_file():
+                rel = pathlib.Path(src_dir, project["poster"].removeprefix(f"{DESIGN_DIR}/"))
+                poster = rel if rel.is_file() else pathlib.Path(project["poster"])
+            png = bounded_thumbnail(poster.read_bytes())
+        except (OSError, ValueError, zlib.error, struct.error):
+            print("::notice::" + workflow_command_escape(f"No thumbnail for {key}: its poster is not a plain 8-bit PNG"), file=sys.stderr)
+            continue
+        if png is None:
+            print("::notice::" + workflow_command_escape(f"No thumbnail for {key}: even a {THUMB_WIDTHS[-1]} px preview is over the review site's {THUMB_PNG_B64_MAX}-character limit"), file=sys.stderr)
+            continue
+        staged["projects"][key] = base64.b64encode(png).decode("ascii")
+    return staged
+
+
+def _thumb_time(date):
+    """Sort key for an entry's commit date: aware ISO 8601 times compare exactly; an unreadable date sorts last."""
+    try:
+        when = datetime.datetime.fromisoformat(str(date).replace("Z", "+00:00"))
+    except ValueError:
+        return float("-inf")
+    return (when if when.tzinfo else when.replace(tzinfo=datetime.timezone.utc)).timestamp()
+
+
+def fold_thumbnails(index, staged, cap=50):
+    """Folds staged commits into the index: one entry per sha, newest commit first, at most cap entries per folder.
+    Folding the same staged file twice changes nothing, so a staged file whose delete failed is harmless."""
+    index = index if index.get("v") == 1 and isinstance(index.get("projects"), dict) else {"v": 1, "projects": {}}
+    for item in staged:
+        for key, png in item["projects"].items():
+            entries = [e for e in index["projects"].get(key, []) if e["sha"] != item["sha"]]
+            entries.insert(0, {"sha": item["sha"], "date": item["date"], "png": png})
+            entries.sort(key=lambda e: _thumb_time(e.get("date")), reverse=True)  # stable: same-date entries keep fold order
+            index["projects"][key] = entries[:cap]
+    return index
+
+
+def thumbnail_index(index, plan, src_dir, cap=50):
+    """Adds each project's head poster to the index (thumbnail_entries, then fold_thumbnails)."""
+    return fold_thumbnails(index, [thumbnail_entries(plan, src_dir)], cap)
+
+
+def staged_thumbnails(path):
+    """A staged thumbs file, or None (with a notice) when it is not what thumbnail_entries writes."""
+    try:
+        item = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+        ok = (isinstance(item, dict) and item.get("v") == 1 and re.fullmatch(r"[0-9a-f]{40}", str(item.get("sha", "")))
+              and isinstance(item.get("date"), str) and len(item["date"]) <= 64 and isinstance(item.get("projects"), dict)
+              and all(isinstance(k, str) and 0 < len(k) <= 512 and isinstance(v, str)
+                      and re.fullmatch(r"[A-Za-z0-9+/=]{1,%d}" % THUMB_PNG_B64_MAX, v) for k, v in item["projects"].items()))
+    except (OSError, ValueError):
+        ok = False
+    if not ok:
+        print("::notice::" + workflow_command_escape(f"Skipped staged thumbnails {pathlib.Path(path).name}: not a thumbnails file"), file=sys.stderr)
+        return None
+    return item
+
+
+def _thumb_src_stem(folder):
+    """A file name for one folder's poster that no other folder maps to: UTF-8 bytes outside [A-Za-z0-9.-] become _<hex>.
+    Every escape is "_" plus two hex digits, so "_root" (the folder named root) is never produced by escaping."""
+    if not folder:
+        return "root"
+    if folder == "root":
+        return "_root"
+    return "".join(chr(b) if chr(b).isascii() and (chr(b).isalnum() or chr(b) in ".-") else f"_{b:02x}" for b in folder.encode("utf-8"))
+
+
+def cmd_thumbs(args):
+    """--plan --stage DIR: write this commit's thumbnails to DIR/thumb-<sha>-<run id>.json (a unique name per run).
+    --index --pending DIR: fold every staged file in DIR into the --index JSON file. --index --plan: both at once."""
+    stage, pending = getattr(args, "stage", None), getattr(args, "pending", None)
+    if args.plan and stage:
+        with open(args.plan, encoding="utf-8") as fh:
+            plan = json.load(fh)
+        if not re.fullmatch(r"[0-9a-f]{40}", str(plan.get("sha", ""))):
+            raise ValueError("invalid thumbnail plan")
+        run_id = os.environ.get("GITHUB_RUN_ID", "0")
+        run_id = run_id if re.fullmatch(r"\d{1,20}", run_id) else "0"
+        os.makedirs(stage, exist_ok=True)
+        staged = thumbnail_entries(plan, os.path.dirname(args.plan) or ".")
+        with open(os.path.join(stage, f"thumb-{plan['sha']}-{run_id}.json"), "w", encoding="utf-8") as fh:
+            json.dump(staged, fh, separators=(",", ":"))
+        return
+    if not args.index or not (args.plan or pending):
+        raise SystemExit("thumbs: use --plan with --stage, or --index with --pending (or --plan)")
+    with open(args.index, encoding="utf-8") as fh:
+        index = json.load(fh)
+    if not isinstance(index, dict) or (index and (index.get("v") != 1 or not isinstance(index.get("projects"), dict))):
+        raise ValueError("invalid thumbnail index")
+    if pending:
+        files = sorted(pathlib.Path(pending).glob("thumb-*.json"))
+        index = fold_thumbnails(index, [item for item in map(staged_thumbnails, files) if item])
+    else:
+        with open(args.plan, encoding="utf-8") as fh:
+            plan = json.load(fh)
+        index = thumbnail_index(index, plan, os.path.dirname(args.plan) or ".")
+    with open(args.index, "w", encoding="utf-8") as fh:
+        json.dump(index, fh, separators=(",", ":"))
+
+
+def cmd_snapshot(args):
+    """The design as it is at head: one revision, absolute check counts, built from the renders this run already made."""
+    env = os.environ
+    with open("review/detect.json", encoding="utf-8") as fh:
+        det = json.load(fh)
+    settings = det.get("snapshot_settings")
+
+    def emit(**values):
+        with open(env.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as fh:
+            fh.write("".join(f"{k}={v}\n" for k, v in values.items()))
+    if not settings or not settings["design"]["enabled"]:
+        print("Design snapshots are off ([design] enabled = false).")
+        emit(built="false")
+        return
+    blobs = {}
+    waivers = load_waivers(env.get("WAIVERS_REF")) if settings["waivers"]["enabled"] else None
+    selected = [p for p in det["projects"] if p["status"] != "removed"]  # every index (downloads, context links) follows this order
+    # 06 is Ask-independent: context remains None until 09 fills the optional hook.
+    projects = [build_project(p, blobs, settings, waivers, change_offset=0, single=True) for p in selected]
+    shutil.rmtree("review/design-downloads", ignore_errors=True)  # never review/downloads: that is the comparison's bundle
+    for i, (p, project) in enumerate(zip(selected, projects)):
+        if settings.get("downloads", {}).get("enabled") or settings["checks"].get("release", "off") != "off":
+            downloads = collect_downloads(p, i, det["head"], policy=settings, purpose="snapshot", report="design")
+            if downloads:
+                project["downloads"] = downloads  # absent when empty, as in cmd_report
+    load_supplier(settings, projects, "review/supplier-snapshot.json")
+    assign_ids(projects)
+    snapshot = det.get("snapshot") or {"ref": "", "sha": det["head"], "committedAt": "", "message": ""}
+    report_settings = filtered_settings(settings)
+    report_settings.pop("ask", None)  # 09's optional hook: no Ask on a design page until 09 turns it on
+    data = {"version": 1, "repo": env.get("GITHUB_REPOSITORY", ""), "links": review_links(env, {**det, "base": None}),
+            "base": None, "head": det["head"], "reason": "design snapshot", "mode": "single",
+            "snapshot": snapshot,
+            # The report-family descriptor: index -> the project's position in selected, its stable folder and its name.
+            "report": {"kind": "design", "head": det["head"],
+                       "projects": [{"index": i, "dir": p["dir"], "name": p["name"]} for i, p in enumerate(selected)]},
+            "settings": report_settings, "run_id": env.get("GITHUB_RUN_ID", ""), "projects": projects, "blobs": blobs}
+    html = finalize_report(data, f"{DESIGN_DIR}/assets")  # 01's shared finalizer: asset map, sidecars, offline HTML; no local JSON or inline_page here
+    name = f"kicad-design-{det['head'][:7]}.html"
+    os.makedirs(DESIGN_DIR, exist_ok=True)
+    for file in (name, "design-snapshot.html"):  # the second is the stable name a release carries
+        with open(f"{DESIGN_DIR}/{file}", "w", encoding="utf-8") as fh:
+            fh.write(html)
+    thumb_projects = []
+    for p in selected:
+        src = pathlib.Path("review", project_id(p["dir"]), "head", "poster.png")  # the render folder, as build_project reads it
+        try:
+            raw = src.read_bytes()
+        except OSError:
+            continue
+        if not raw.startswith(b"\x89PNG\r\n\x1a\n"):
+            continue
+        folder = p.get("dir", "")
+        dest = f"{DESIGN_DIR}/thumb-src/{_thumb_src_stem(folder)}.png"
+        os.makedirs(f"{DESIGN_DIR}/thumb-src", exist_ok=True)
+        with open(dest, "wb") as fh:
+            fh.write(raw)
+        thumb_projects.append({"dir": folder, "poster": dest})
+    if thumb_projects:
+        with open(f"{DESIGN_DIR}/thumbnail-plan.json", "w", encoding="utf-8") as fh:
+            json.dump({"sha": snapshot["sha"], "committedAt": snapshot["committedAt"], "projects": thumb_projects}, fh)
+    print(f"{DESIGN_DIR}/{name}: {len(html) / 1e6:.2f} MB, {len(blobs)} embedded drawings")
+    # ask stays false and context_name is never emitted: 09 owns producing kicad-design-<sha7>.context.json and switching it on.
+    emit(built="true", name=name, thumbnails="true" if thumb_projects else "false", ask="false",
+         downloads="true" if any(project.get("downloads") for project in projects) else "false",
+         downloads_name=f"kicad-design-downloads-{det['head'][:7]}")  # the bundle the review site's download route looks up
+
+
 DOWNLOADS_NOT_STORED = "not stored: this run could not upload its download files"
 
 
 def cmd_drop_downloads(args):
-    """The downloads upload failed: keep each download row, but as an error with no link or command."""
+    """A downloads upload failed: keep each download row, but as an error with no link or command.
+    The comparison report by default; with --design, the design snapshot (both of its HTML names), which has its own bundle."""
     def drop(projects):
         for project in projects:
             if project.get("downloads"):
                 project["downloads"] = [{"kind": d["kind"], "label": d["label"], "error": DOWNLOADS_NOT_STORED} for d in project["downloads"]]
-    marker, path = "<script>window.REVIEW_DATA = ", "review/kicad-review.html"
-    with open(path, encoding="utf-8") as fh:
-        html = fh.read()
-    start = html.find(marker)
-    end = html.find("</script>", start) if start >= 0 else -1
-    if end < 0:
-        raise RuntimeError(f"{path} has no window.REVIEW_DATA payload")
-    start += len(marker)
-    data = json.loads(html[start:end].strip().removesuffix(";"))
-    drop(data["projects"])
-    # Same encoding as finalize_report: < stays escaped, so the payload can never close its script.
-    payload = json.dumps(data, separators=(',', ':')).replace('<', '\\u003c')
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(f"{html[:start]}{payload};{html[end:]}")
+
+    def drop_page(path):
+        marker = "<script>window.REVIEW_DATA = "
+        with open(path, encoding="utf-8") as fh:
+            html = fh.read()
+        start = html.find(marker)
+        end = html.find("</script>", start) if start >= 0 else -1
+        if end < 0:
+            raise RuntimeError(f"{path} has no window.REVIEW_DATA payload")
+        start += len(marker)
+        data = json.loads(html[start:end].strip().removesuffix(";"))
+        drop(data["projects"])
+        # Same encoding as finalize_report: < stays escaped, so the payload can never close its script.
+        payload = json.dumps(data, separators=(',', ':')).replace('<', '\\u003c')
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(f"{html[:start]}{payload};{html[end:]}")
+    if getattr(args, "design", False):
+        with open("review/detect.json", encoding="utf-8") as fh:
+            head = json.load(fh)["head"]
+        for file in (f"kicad-design-{head[:7]}.html", "design-snapshot.html"):  # the names cmd_snapshot writes
+            drop_page(f"{DESIGN_DIR}/{file}")
+        print("::warning::" + workflow_command_escape("Design download files were not stored; the design page lists them as unavailable."))
+        return
+    drop_page("review/kicad-review.html")
     with open("review/data.json", encoding="utf-8") as fh:
         side = json.load(fh)
     drop(side["projects"])
@@ -7086,7 +7789,16 @@ def main():
     p.set_defaults(func=cmd_lookup)
     p = sub.add_parser("report", help="self-contained HTML comparison report")
     p.set_defaults(func=cmd_report)
-    p = sub.add_parser("drop-downloads", help="mark the report's download files unavailable after a failed upload")
+    p = sub.add_parser("snapshot", help="self-contained HTML report of the head design alone (needs [design] enabled)")
+    p.set_defaults(func=cmd_snapshot)
+    p = sub.add_parser("thumbs", help="stage this commit's thumbnails (--plan --stage) or fold staged ones into the design-thumbs index (--index --pending)")
+    p.add_argument("--index")
+    p.add_argument("--plan")
+    p.add_argument("--stage")
+    p.add_argument("--pending")
+    p.set_defaults(func=cmd_thumbs)
+    p = sub.add_parser("drop-downloads", help="mark the report's (or, with --design, the design snapshot's) download files unavailable after a failed upload")
+    p.add_argument("--design", action="store_true", help="the design snapshot and its design downloads bundle")
     p.set_defaults(func=cmd_drop_downloads)
     args = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")  # comment text has → and —, whatever the locale

@@ -4,20 +4,25 @@ const D = window.REVIEW_DATA;
 // bench-t2: never repeat the site frame inside its sandboxed report.
 document.body.classList.toggle("report-framed", parent !== window);
 const $ = s => document.querySelector(s);
+const single = () => D.mode === "single";   // a design report: one revision, nothing compared
+document.body.classList.toggle("design-single", single());
 const LIGHT_RIGS3D = ["bench", "lowsun", "photo"];
 const S = { p: 0, v: null, m: "side", x: null, y: null, z: null, s: null, part3d: null, t: "changes", layers: null, hidden3d: [], checks: { check: "", scope: null, error: true, warning: true, waived: false }, part: null, net: null, revision: null };
 S.threads = null; S.threadFilter = { status: "open", severity: "" }; S.placing = false;
-let THREADS_ON = parent !== window && !!D.settings?.threads?.enabled;
+let THREADS_ON = !single() && parent !== window && !!D.settings?.threads?.enabled;   // a design report has no PR to discuss
 let ISSUES_ON = parent !== window && !!D.settings?.issues?.enabled;
 // Ask about this design. The report cannot connect anywhere; the wrapper page relays (site/ask-client.js).
 const ASK = { on: parent !== window && !!D.settings?.ask?.enabled, ready: false, project: null, insight: null, insightError: "", log: [], busy: false, current: null, status: "", remaining: null, draft: "", insightId: null, asked: false };
 let askSeq = 0;
 S.issues = null;
 S.units = "mm"; S.grid = true; S.imageSelection = null;
-const readyMessage = () => ({ kicadReviewReady: true, threads: THREADS_ON, issues: ISSUES_ON, blockMerge: THREADS_ON && !!D.settings?.threads?.block_merge, ask: ASK.on });
+// A design report tells the hosted wrapper its recorded ref, date and subject; the wrapper checks and shows them as text.
+const readyMessage = () => ({ kicadReviewReady: true, threads: !single() && THREADS_ON, issues: ISSUES_ON, blockMerge: !single() && THREADS_ON && !!D.settings?.threads?.block_merge,
+  ask: ASK.on, ...(single() ? { designSnapshot: { ref: D.snapshot?.ref, sha: D.snapshot?.sha, committedAt: D.snapshot?.committedAt, message: D.snapshot?.message } } : {}) });
 const validThread = t => t && t.id !== Object(t.id) && Object(t.id) instanceof String && (t.resolved === true || t.resolved === false) && t.anchor && t.anchor === Object(t.anchor)
   && t.anchor.v === 1 && Number.isFinite(t.anchor.x) && Number.isFinite(t.anchor.y) && Array.isArray(t.comments);
 function acceptThreads(list) {
+  if (single()) return;
   S.threads = list.filter(t => { try { return validThread(t); } catch { return false; } }).slice(0, 500);   // ponytail: 500 threads drawn at most
   if (S.wantThreads) S.t = "threads";
   S.wantThreads = false;
@@ -63,6 +68,7 @@ function handleParentMessage(e, on = THREADS_ON, issuesOn = ISSUES_ON, askOn = A
 }
 addEventListener("message", e => handleParentMessage(e));
 function proposePin(vp, e) {
+  if (single()) return;   // a design report has no PR thread to place; !THREADS_ON omitted so comparison check fixtures can test pin placement standalone (parent === window)
   const p = boardDiff?.point(vp,e), hit = boardDiff?.hits(vp,e)[0];
   const [x, y] = p?.point || toWorld(vp, e);
   const anchor = S.v?.startsWith('sheet:') ? anchorAt(x,y,sideOf(vp))
@@ -101,7 +107,7 @@ function chips(c) {
 }
 function checksVerdict() {
   const all = D.projects.flatMap(p => p.checks);
-  return { failing: all.filter(c => c.status === "fail").length, newErrors: all.reduce((n, c) => n + c.new_errors, 0) };
+  return { failing: all.filter(c => c.status === "fail").length, newErrors: all.reduce((n, c) => n + c.new_errors, 0), errors: all.reduce((n, c) => n + c.errors, 0) };
 }
 function renderLayers() {
   const box = $("#layers");
@@ -113,13 +119,118 @@ function renderLayers() {
   }
   box.innerHTML = "";   // board layers live in the Appearance dock
 }
+function designBar(link) {   // commit, ref, date and subject of the design on show
+  const s = D.snapshot || {}, when = Date.parse(s.committedAt);
+  return `<span class="bench-revision"><span class="bench-label">DESIGN</span> ${link(D.links?.head, String(D.head || "").slice(0, 7))}</span>`
+    + (s.ref ? `<span class="muted" title="Branch or tag">${esc(s.ref)}</span>` : "")
+    + (Number.isFinite(when) ? `<time class="muted" datetime="${esc(s.committedAt)}">${esc(new Date(when).toISOString().slice(0, 10))}</time>` : "")
+    + (s.message ? `<span class="design-message" title="${esc(s.message)}">${esc(s.message)}</span>` : "");
+}
+const designLabel = () => `Design · ${String(D.head || "").slice(0, 7)}`;
+
+// The board still is 02's head poster (`board.poster3d.head`, 1600 x 1000, CSS-scaled to the 8:5 card).
+// designCard is only a placeholder; the image comes from 02's gunzip and poster3d helpers.
+function designCard(p) {
+  const id = p.board?.poster3d?.head;
+  return id ? `<figure class="design-card" data-design-poster="${esc(id)}"><figcaption class="muted">${designLabel()}</figcaption></figure>` : "";
+}
+async function fillDesignCard(p) {   // called by renderNav once the card is in the DOM
+  const id = p.board?.poster3d?.head, card = $("#nav [data-design-poster]");
+  if (!id || !card) return;
+  try {
+    const image = await designPoster(id);   // 02's poster3d("head", id) with no session: HTMLImageElement | null from the page-lifetime cache
+    if (image && card.isConnected && !card.contains(image)) {
+      image.className = "design-poster";
+      image.alt = `${p.name} board, rendered`;
+      card.prepend(image);
+    } else if (!image && card.isConnected) {
+      card.remove();
+    }
+  } catch (err) {
+    console.error("fillDesignCard failed:", err);
+    if (card.isConnected) card.remove();
+  }
+}
+// The still is a page-lifetime image from Review3D.poster3d with no session, so it works in sheet view and survives a viewer closing.
+const designPoster = id => window.Review3D?.poster3d ? window.Review3D.poster3d("head", id) : Promise.resolve(null);
+const pcbDrawBlobUrl = async id => (await window.Review3D?.blobUrl(id, "image/svg+xml")) ?? null;   // 02's shared gunzip + blob-URL cache
+function designPcbDrawCard(p) {
+  const head = p.board?.pcbdraw?.head;
+  if (!head) return "";
+  if (head.note && !head.front) {
+    return `<div class="design-card design-pcbdraw"><p class="muted pcbdraw-note">${esc(head.note)}</p></div>`;
+  }
+  if (!head.front) return "";
+  return `<figure class="design-card design-pcbdraw" data-pcbdraw-front="${esc(head.front)}" ${head.back ? `data-pcbdraw-back="${esc(head.back)}"` : ""}>` +
+    `<div class="pcbdraw-stage"></div>` +
+    `${head.back ? `<div class="pcbdraw-actions"><button type="button" class="pcbdraw-toggle" data-face="back" title="Show back plot">Back</button></div>` : ""}` +
+    `<figcaption class="muted">${esc(p.name)} · PcbDraw</figcaption></figure>`;
+}
+async function fillDesignPcbDrawCard(p) {
+  const card = $("#nav .design-pcbdraw[data-pcbdraw-front]");
+  if (!card) return;
+  const frontId = card.dataset.pcbdrawFront, backId = card.dataset.pcbdrawBack;
+  const stage = card.querySelector(".pcbdraw-stage");
+  if (!stage) return;
+  try {
+    const frontUrl = await pcbDrawBlobUrl(frontId);
+    if (!frontUrl) {
+      if (card.isConnected) card.remove();
+      return;
+    }
+    if (card.isConnected) {
+      let img = stage.querySelector('img[data-face="front"]');
+      if (!img) {
+        img = document.createElement("img");
+        img.className = "design-pcbdraw-plot";
+        img.dataset.face = "front";
+        img.alt = `${p.name} front plot (PcbDraw)`;
+        stage.appendChild(img);
+      }
+      img.src = frontUrl;
+      img.hidden = false;
+    }
+    if (backId) {
+      const backUrl = await pcbDrawBlobUrl(backId);
+      if (backUrl && card.isConnected) {
+        let img = stage.querySelector('img[data-face="back"]');
+        if (!img) {
+          img = document.createElement("img");
+          img.className = "design-pcbdraw-plot";
+          img.dataset.face = "back";
+          img.alt = `${p.name} back plot (PcbDraw)`;
+          img.hidden = true;
+          stage.appendChild(img);
+        }
+        img.src = backUrl;
+      }
+    }
+    const btn = card.querySelector('button[data-face="back"]');
+    if (btn && !stage.querySelector('img[data-face="back"]')) btn.parentElement.remove();   // no back plot decoded: no toggle to an empty card
+    else if (btn) {
+      let currentFace = "front";
+      btn.onclick = () => {
+        currentFace = currentFace === "front" ? "back" : "front";
+        const f = stage.querySelector('img[data-face="front"]');
+        const b = stage.querySelector('img[data-face="back"]');
+        if (f) f.hidden = currentFace !== "front";
+        if (b) b.hidden = currentFace !== "back";
+        btn.textContent = currentFace === "front" ? "Back" : "Front";
+        btn.setAttribute("title", currentFace === "front" ? "Show back plot" : "Show front plot");
+      };
+    }
+  } catch (err) {
+    console.error("fillDesignPcbDrawCard failed:", err);
+    if (card.isConnected) card.remove();
+  }
+}
 function renderHeader() {
   const v = checksVerdict(), short = s => (s || "nothing").slice(0, 7), L = D.links;
   const link = (href, text) => href ? `<a href="${esc(href)}" target="_blank" rel="noopener">${esc(text)}</a>` : esc(text);
   const pr = /\/pull\/(\d+)/.exec(L.review || '');
-  $("#hdr").innerHTML = `<span>${esc(D.repo || 'Repository')}</span><span aria-hidden="true">›</span><span>${pr ? `PR #${pr[1]}` : 'Review'}</span>`;
-  $("#report-state").textContent = v.failing ? `✕ NEEDS WORK · ${v.failing} CHK · ${v.newErrors} NEW ERR` : '✓ CHECKS PASSING';
-  $("#report-review-bar").innerHTML = `<span class="bench-revision"><span class="bench-label">BASE</span> ${link(L.base, short(D.base))}</span><span aria-hidden="true">→</span><span class="bench-revision"><span class="bench-label">HEAD</span> ${link(L.head, short(D.head))}</span>${L.review ? link(L.review, pr ? `PR #${pr[1]} ↗` : 'Compare ↗') : ''}<span class="muted">Run result not recorded</span><details class="bench-menu bench-merge"><summary>MERGE · Unavailable</summary><div class="bench-popover"><ul>${['This review', 'GitHub approval', 'Blocking threads'].map(label => `<li>… ${label}: live data unavailable offline</li>`).join('')}</ul></div></details><details class="bench-menu bench-overflow"><summary aria-label="Review actions">•••</summary><div class="bench-popover">${pr ? link(L.review + '/commits', 'History ↗') : '<button disabled title="No pull request recorded">History</button>'}<button disabled title="Open the online review to create a share link">Share…</button>${L.run ? link(L.run, 'Open run ↗') : '<button disabled title="Run not recorded">Open run</button>'}<button data-act="copy">Copy link</button><label>Go to<input class="goto" aria-label="Go to saved review position" placeholder="Paste a review link"></label><input class="copyfield" aria-label="Link to copy" readonly hidden></div></details>`;
+  $("#hdr").innerHTML = `<span>${esc(D.repo || 'Repository')}</span><span aria-hidden="true">›</span><span>${single() ? 'Design' : pr ? `PR #${pr[1]}` : 'Review'}</span>`;
+  $("#report-state").textContent = v.failing ? (single() ? `${v.failing} CHECKS FAILING · ${v.errors} ERR` : `✕ NEEDS WORK · ${v.failing} CHK · ${v.newErrors} NEW ERR`) : '✓ CHECKS PASSING';
+  $("#report-review-bar").innerHTML = single() ? designBar(link) + `<details class="bench-menu bench-overflow"><summary aria-label="Design actions">Actions</summary><div class="bench-popover"><button data-act="copy">Copy link</button><label>Go to<input class="goto" aria-label="Go to saved design position"></label><input class="copyfield" readonly hidden></div></details>` : `<span class="bench-revision"><span class="bench-label">BASE</span> ${link(L.base, short(D.base))}</span><span aria-hidden="true">→</span><span class="bench-revision"><span class="bench-label">HEAD</span> ${link(L.head, short(D.head))}</span>${L.review ? link(L.review, pr ? `PR #${pr[1]} ↗` : 'Compare ↗') : ''}<span class="muted">Run result not recorded</span><details class="bench-menu bench-merge"><summary>MERGE · Unavailable</summary><div class="bench-popover"><ul>${['This review', 'GitHub approval', 'Blocking threads'].map(label => `<li>… ${label}: live data unavailable offline</li>`).join('')}</ul></div></details><details class="bench-menu bench-overflow"><summary aria-label="Review actions">•••</summary><div class="bench-popover">${pr ? link(L.review + '/commits', 'History ↗') : '<button disabled title="No pull request recorded">History</button>'}<button disabled title="Open the online review to create a share link">Share…</button>${L.run ? link(L.run, 'Open run ↗') : '<button disabled title="Run not recorded">Open run</button>'}<button data-act="copy">Copy link</button><label>Go to<input class="goto" aria-label="Go to saved review position" placeholder="Paste a review link"></label><input class="copyfield" aria-label="Link to copy" readonly hidden></div></details>`;
   $("#report-review-bar [data-act=copy]").onclick = async event => {
     const button = event.currentTarget, value = positionLink();
     button.closest('details').open = true;
@@ -153,7 +264,7 @@ function navigateSheet(direction) {
   if (page) select(`sheet:${page.path}`);
 }
 // bench-t4: the left dock owns navigation and Appearance; t=appearance remains shareable.
-let leftTab = "project", rightTab = "changes";
+let leftTab = "project", rightTab = single() ? "checks" : "changes";
 const projectTools = {q:"", sort:"page", filter:"all"};
 let leftWidth = 262, leftCollapsed = false;
 try {
@@ -196,16 +307,16 @@ function renderNav() {
   const sheetItems = (parent, depth) => kids(parent).map(s => {
     const view = `sheet:${s.path}`, children = sheetItems(s.path, depth + 1);
     if (!matches(s.name, s.status) && !children) return "";
-    return `<li><button data-view="${esc(view)}" data-status="${esc(s.status)}" style="--depth:${depth}" aria-current="${S.v === view}"><span class="name" title="${esc(s.name)} (page ${esc(sheetNumber(s))})">${esc(s.name)} (page ${esc(sheetNumber(s))})</span>${projectChips(counts(p, view))}</button>${children ? `<ul>${children}</ul>` : ""}</li>`;
+    return `<li><button data-view="${esc(view)}" data-status="${esc(s.status)}" style="--depth:${depth}" aria-current="${S.v === view}"><span class="name" title="${esc(s.name)} (page ${esc(sheetNumber(s))})">${esc(s.name)} (page ${esc(sheetNumber(s))})</span>${single() ? "" : projectChips(counts(p, view))}</button>${children ? `<ul>${children}</ul>` : ""}</li>`;
   }).join("");
   $("#nav").innerHTML = `<div class="left-tabs" role="tablist" aria-label="Left dock">${[["project","Project"],["appearance","Appearance"]].map(([id,label]) => `<button type="button" role="tab" id="left-tab-${id}" data-left-tab="${id}" ${id === "appearance" ? 'data-tab="appearance"' : ''} aria-controls="left-body" aria-selected="${leftTab === id}" tabindex="${leftTab === id ? 0 : -1}">${label}</button>`).join("")}<button type="button" class="left-collapse" aria-label="Collapse left dock" title="Collapse left dock">‹</button></div>
     <div id="left-body" role="tabpanel" aria-labelledby="left-tab-${leftTab}">${leftTab === "appearance" ? '<div id="appearance-root"></div><div id="layers" hidden></div>' : `
     <div class="project-tools"><input type="search" id="project-search" aria-label="Search project tree" placeholder="Search project…" value="${esc(projectTools.q)}"><div><select id="project-sort" aria-label="Sort project tree"><option value="page" ${projectTools.sort === "page" ? "selected" : ""}>Page order</option><option value="name" ${projectTools.sort === "name" ? "selected" : ""}>Name A–Z</option></select><select id="project-filter" aria-label="Filter project tree">${[["all","All items"],["changed","Changed"],["added","Added"],["removed","Removed"],["modified","Modified"]].map(([v,label]) => `<option value="${v}" ${projectTools.filter === v ? "selected" : ""}>${label}</option>`).join("")}</select></div></div>
-    <h3>Project</h3><label class="projsel"><span class="sr-only">Project</span><select id="proj" aria-label="Project" title="${esc(p.name)}">${D.projects.map((q,i) => `<option value="${i}" ${i === S.p ? "selected" : ""}>${esc(q.name)} (${esc(q.status)})</option>`).join("")}</select></label><div class="project-name" title="${esc(p.name)}">${esc(p.name)}</div>
+    <h3>Project</h3><label class="projsel"><span class="sr-only">Project</span><select id="proj" aria-label="Project" title="${esc(p.name)}">${D.projects.map((q,i) => `<option value="${i}" ${i === S.p ? "selected" : ""}>${esc(q.name)}${single() ? "" : ` (${esc(q.status)})`}</option>`).join("")}</select></label><div class="project-name" title="${esc(p.name)}">${esc(p.name)}</div>
     <h3>Schematic sheets</h3><ul class="tree" aria-label="Schematic hierarchy">${sheetItems(null,0) || '<li class="muted">No matching sheets</li>'}</ul>
-    <h3>Board</h3><ul class="tree">${boardAvailable(p) && matches(p.name + ".kicad_pcb", p.board.status || "unchanged") ? `<li><button data-view="board" data-status="${esc(p.board.status || "unchanged")}" aria-current="${S.v === "board"}"><span class="name" title="${esc(p.name)}.kicad_pcb">${esc(p.name)}.kicad_pcb</span>${projectChips(counts(p,"board"))}</button><div class="project-meta" data-board-summary>${projectBoardSummary()}</div></li>` : '<li class="muted">No matching board</li>'}
+    <h3>Board</h3><ul class="tree">${boardAvailable(p) && matches(p.name + ".kicad_pcb", p.board.status || "unchanged") ? `<li><button data-view="board" data-status="${esc(p.board.status || "unchanged")}" aria-current="${S.v === "board"}"><span class="name" title="${esc(p.name)}.kicad_pcb">${esc(p.name)}.kicad_pcb</span>${single() ? "" : projectChips(counts(p,"board"))}</button><div class="project-meta" data-board-summary>${projectBoardSummary()}</div></li>` : '<li class="muted">No matching board</li>'}
     ${modelAvailable(p) && matches("3D model",p.board.status || "unchanged") ? `<li><button data-view="3d" aria-current="${S.v === "3d"}"><span class="name" title="${esc(p.name)} — 3D model">3D model</span></button></li>` : ""}</ul>
-    <h3>Libraries</h3><ul class="tree">${p.libraries?.map((c,i) => matches(c.item + " " + c.file,c.status) ? `<li><button data-view="lib:${i}" data-status="${esc(c.status)}" aria-current="${S.v === `lib:${i}`}"><span class="name" title="${esc(c.file)}">${esc(c.kind === "symbol" ? "Symbol" : "Footprint")} ${esc(c.item)}</span></button></li>` : "").join("") || '<li class="muted">No library changes</li>'}</ul><div id="layers"></div>`}</div>
+    ${single() ? "" : `<h3>Libraries</h3><ul class="tree">${p.libraries?.map((c,i) => matches(c.item + " " + c.file,c.status) ? `<li><button data-view="lib:${i}" data-status="${esc(c.status)}" aria-current="${S.v === `lib:${i}`}"><span class="name" title="${esc(c.file)}">${esc(c.kind === "symbol" ? "Symbol" : "Footprint")} ${esc(c.item)}</span></button></li>` : "").join("") || '<li class="muted">No library changes</li>'}</ul>`}<div id="layers"></div>`}</div>
     <div class="left-splitter" role="separator" tabindex="0" aria-label="Resize left dock" aria-orientation="vertical" aria-valuemin="220" aria-valuemax="520" aria-valuenow="${leftWidth}"></div>`;
   for (const tab of $("#nav").querySelectorAll("[data-left-tab]")) {
     tab.onclick = () => { leftTab = tab.dataset.leftTab; S.t = leftTab === "appearance" ? "appearance" : rightTab; renderNav(); renderPanel(); saveHash(); $(`#left-tab-${leftTab}`).focus(); };
@@ -222,6 +333,12 @@ function renderNav() {
     const summary = $("[data-board-summary]"), geometry = p.board.geometry?.head || p.board.geometry?.base;
     if (summary && geometry) loadBoardScene(geometry).then(scene => { if (scene && summary.isConnected && proj() === p) summary.textContent = projectBoardSummary(scene); }).catch(() => {});
   }
+  if (single() && leftTab === "project") {   // no library changes to list; the board still sits under the project name
+    $("#nav").querySelectorAll("h3").forEach(h => { if (h.textContent === "Libraries") { h.nextElementSibling.remove(); h.remove(); } });
+    $("#nav .project-name")?.insertAdjacentHTML("afterend", designCard(p) + designPcbDrawCard(p));
+    fillDesignCard(p).catch(console.error);
+    fillDesignPcbDrawCard(p).catch(console.error);
+  }
   const grip = $("#nav .left-splitter");
   const resize = width => { leftWidth=Math.max(220,Math.min(520,width)); syncLeftDock(); grip.setAttribute("aria-valuenow",leftWidth); persistLeftDock(); };
   grip.onkeydown = e => { if (["ArrowLeft","ArrowRight","Home","End"].includes(e.key)) { e.preventDefault(); resize(e.key === "Home" ? 220 : e.key === "End" ? 520 : leftWidth + (e.key === "ArrowLeft" ? -10 : 10)); } };
@@ -229,7 +346,7 @@ function renderNav() {
   syncLeftDock();
 }
 function firstChangedView(p) {
-  const s = p.sheets.find(s => s.status !== "unchanged");
+  const s = single() ? p.sheets[0] : p.sheets.find(s => s.status !== "unchanged");
   return s ? `sheet:${s.path}` : boardAvailable(p) ? "board" : p.libraries?.length ? "lib:0" : p.sheets[0] ? `sheet:${p.sheets[0].path}` : "board";
 }
 function resolveIdentity(st, p) {
@@ -276,11 +393,11 @@ function modeFor(view, m) { return view === "3d" && m === "wipe" ? "side" : m; }
 function valid(st) {   // drop anything that does not exist in this report
   const pi = Number.isInteger(st.p) && D.projects[st.p] ? st.p : 0, out = { p: pi }, p = D.projects[pi];
   if ((st.v === "board" && boardAvailable(p)) || (st.v === '3d' && modelAvailable(p)) || p.sheets.some(s => `sheet:${s.path}` === st.v) || (/^lib:\d+$/.test(st.v) && !!p.libraries?.[+st.v.slice(4)])) out.v = st.v;
-  if (Object.hasOwn(MODES, st.m ?? "")) out.m = modeFor(out.v, st.m);
+  if (!single() && Object.hasOwn(MODES, st.m ?? "")) out.m = modeFor(out.v, st.m);
   out.revision = ["base", "head"].includes(st.revision) ? st.revision : "head";
   for (const k of ["x", "y", "z"]) if (Number.isFinite(st[k]) && (k !== "z" || st[k] > 0)) out[k] = st[k];
   if (p.changes.some(r => r.id === st.s) || p.checks.some(c => c.violations.some(v => v.id === st.s))) out.s = st.s;
-  if (st.t === "checks" || st.t === "changes" || st.t === "threads" || st.t === "parts" && p.parts || st.t === "appearance" || st.t === "ask" && ASK.on) out.t = st.t;
+  if (st.t === "checks" || !single() && (st.t === "changes" || st.t === "threads") || st.t === "parts" && p.parts || st.t === "appearance" || st.t === "ask" && ASK.on) out.t = st.t;
   if (st.layers) {   // [] = the reviewer turned every layer off; unknown names only = default layers, not an empty board
     const ls = st.layers.filter(n => p.board.layers.some(l => l.name === n));
     if (!st.layers.length || ls.length) out.layers = ls;
@@ -300,7 +417,7 @@ function applyState(st) {
   const v = valid(st);
   if(v.p!==S.p || (v.v ?? firstChangedView(D.projects[v.p]))!==S.v)clearImageSelection();
   if (v.t === "appearance") { leftTab = "appearance"; leftCollapsed = false; }
-  Object.assign(S, { p: v.p, v: v.v ?? firstChangedView(D.projects[v.p]), m: v.m ?? S.m, s: v.s ?? null, part3d: null, io: null, ig: null, t: v.t ?? S.t,
+  Object.assign(S, { p: v.p, v: v.v ?? firstChangedView(D.projects[v.p]), m: single() ? "side" : v.m ?? S.m, s: v.s ?? null, part3d: null, io: null, ig: null, t: v.t ?? (single() ? "checks" : S.t),
                      revision: v.revision ?? "head", layers: v.layers ?? null, hidden3d: v.hidden3d ?? [], assembled3d: v.assembled3d ?? true, lighting3d: v.lighting3d ?? window.ThreeStudio.normalizeLighting(window.ThreeStudio.PRESETS.bench), camera3d: v.camera3d ?? null, x: v.x ?? null, y: v.y ?? null, z: v.z ?? null,
                      part: v.part ?? null, net: v.net ?? null });
   Appearance.configure([], viewerIdFor(proj()));
@@ -897,6 +1014,7 @@ function schematicDrawReady(sheet) {
 
 let gen = 0;
 async function draw() {
+  window.reviewViewReady = null;   // 2D readiness for measurements; 3D uses Review3D.state.firstFrame
   activeBoardGate?.cancel(); activeBoardGate = null;
   delete $("#stage").dataset.boardReady; delete $("#stage").dataset.boardBackend;
   disposeAssets();
@@ -922,7 +1040,7 @@ async function draw() {
     target.setAttribute('aria-busy', 'false');
     const drawingStatus = target.dataset.boardReady === String(my) ? boardView.note || 'Ready' :
       mounts.failed || mounts.expected > 0 ? 'Drawing unavailable' :
-        view ? 'No visible board artwork' : 'This drawing is unavailable in both revisions.';
+        view ? 'No visible board artwork' : `This drawing is unavailable${single() ? "" : " in both revisions"}.`;
     statusText('.status-message', target.querySelector('.image-error')?.textContent || drawingStatus);
   };
   $("#stage").setAttribute("aria-busy", "true");
@@ -961,7 +1079,7 @@ async function draw() {
   else boardView.useGL = !!scenes && boardView.failed !== S.p;
   if (boardView.useGL) {
     appearanceSchematics.clear();
-    if (boardDiff && boardDiff.project === S.p && boardDiff.mode === S.m && boardDiff.scenes.base === scenes[0] && boardDiff.scenes.head === scenes[1]) {
+    if (boardDiff && boardDiff.project === S.p && boardDiff.mode === S.m && boardDiff.single === single() && boardDiff.scenes.base === scenes[0] && boardDiff.scenes.head === scenes[1]) {
       const connected = $("#stage");
       boardGate(connected); noChangeNotice(connected);
       if (!placed()) fit(); else apply();
@@ -974,11 +1092,11 @@ async function draw() {
     try {
       const project = S.p;
       let mounted;
-      mounted = BoardDiff.mount({stage,scenes:{base:scenes[0],head:scenes[1]},changes:proj().changes,state:S,appearance:glAppearance,onLost:()=>{
+      mounted = BoardDiff.mount({stage,scenes:{base:scenes[0],head:scenes[1]},changes:proj().changes,state:S,appearance:glAppearance,single:single() ? designLabel() : false,onLost:()=>{
         if (boardDiff === mounted && S.p === project) boardFallback("WebGL unavailable — showing SVG");
       },attachPanZoom});
       boardDiff = mounted;
-      boardDiff.project = project; boardDiff.mode = S.m; boardDiff.scenes = {base:scenes[0],head:scenes[1]};
+      boardDiff.project = project; boardDiff.mode = S.m; boardDiff.single = single(); boardDiff.scenes = {base:scenes[0],head:scenes[1]};
       boardView.panes = boardDiff.panes; boardView.renderers = boardDiff.panes.map(p=>p.renderer);
       for (const {renderer, canvas, scenes:present} of boardDiff.panes)
         trackAppearanceBoard(renderer, canvas, Object.values(present).some(Boolean));
@@ -997,7 +1115,7 @@ async function draw() {
   }
   if (!boardView.useGL) disposeBoardRenderers();
   if (S.v === 'board') boardGate(stage);
-  if (!view) stage.innerHTML = `<p class="empty">This drawing is unavailable in both revisions.</p>`;
+  if (!view) stage.innerHTML = `<p class="empty">This drawing is unavailable${single() ? "" : " in both revisions"}.</p>`;
   else try { await MODES[S.m](stage, view); }
   catch (error) {
     if (!(error instanceof AssetUnavailableError)) throw error;
@@ -1045,6 +1163,7 @@ async function draw() {
   completeReviewDraw(ticket, stage, S.m);
 }
 function noChangeNotice(stage) {
+  if (single()) return;   // nothing is compared, so "no changes" says nothing
   const text = S.v === "board" ? (!proj().board.changed && "No layout changes") :
     proj().sheets.find(s => `sheet:${s.path}` === S.v)?.status === "unchanged" && "No schematic changes on this sheet";
   if (!text || stage.querySelector('.no-change-notice')) return;
@@ -1112,8 +1231,8 @@ async function drawSideGL(stage, view) {
 }
 async function drawSide(stage, view) {
   if (boardView.useGL && await drawSideGL(stage, view)) return;
-  viewport(stage, "Base", view.kind).appendChild(await stack("base", view));
-  viewport(stage, "Head", view.kind).appendChild(await stack("head", view));
+  if (!single()) viewport(stage, "Base", view.kind).appendChild(await stack("base", view));
+  viewport(stage, single() ? esc(designLabel()) : "Head", view.kind).appendChild(await stack("head", view));
 }
 var MODES = { side: drawSide };
 
@@ -1244,6 +1363,7 @@ function updateStatus() {
   coords?.classList.toggle("off-canvas",!current); coords?.toggleAttribute("data-sch-coordinates",sheet);
   const ids = changeCardIds(), at = ids.indexOf(S.s);
   statusText("[data-change]",`${at < 0 ? 0 : at+1}/${ids.length}`);
+  if (single()) $("[data-change]").parentElement.hidden = true;   // no change stepper in a design report
   statusText("[data-zoom]",placed() ? `${(S.z / PX * 100).toFixed(0)}%` : "off canvas");
   statusText("[data-units]",units);
   if ($("#status-units").value !== units) $("#status-units").value = units;
@@ -1255,7 +1375,7 @@ function updateStatus() {
   if (swatch.dataset.color !== swatchColor) { swatch.style.background = swatchColor; swatch.dataset.color = swatchColor; }
   const selected = S.imageSelection || proj()?.changes.find(c=>c.id===S.s) || allViolations().find(c=>c.id===S.s);
   statusText("[data-selection]",selected ? selected.ref || selected.reference || selected.kind || selected.id : "Nothing selected");
-  statusText("[data-view-mode]",({side:"Side",overlay:"Overlay",wipe:"Wipe",blend:"Blend",semantic:"Delta"})[S.m] || S.m);
+  statusText("[data-view-mode]", single() ? "Design" : ({side:"Side",overlay:"Overlay",wipe:"Wipe",blend:"Blend",semantic:"Delta"})[S.m] || S.m);
 
 }
 function updateCoordinates(vp, event) {
@@ -1614,7 +1734,7 @@ function renderImageSearch() {
   $('#image-search-label').textContent=board?'Net search':ok?rows.length+' component'+(rows.length===1?'':'s'):'Components';
   const graph=board?currentImageGraph(imageSearchState.side):null;
   const partial=graph&&(Object.values(graph.truncated).some(Boolean)||Object.values(graph.unsupported||{}).some(n=>n>0));
-  const missing=['base','head'].some(side=>sideSelect.options[side==='base'?0:1].disabled);
+  const missing=!single()&&['base','head'].some(side=>sideSelect.options[side==='base'?0:1].disabled);
   $('#image-search-note').textContent=!ok?'Inspection unavailable for this report. Artwork and review lists remain available.':
     imageSearchState.note|| (partial?'Partial inspection: some geometry is unavailable.':missing?'Inspection available for '+imageSearchState.side+' only.':'');
   const facts=$('#image-board-facts');facts.hidden=!graph;
@@ -1792,6 +1912,33 @@ function afterDraw(view) {
   mountImageSearch();
   void renderElectricalPins();
   renderFallbackCopper();
+  // Stamp readiness two frames later, only if this draw still owns the stage and the selected view.
+  const readyGeneration = gen, readyProject = S.p, readyView = S.v;
+  const checkReady = (retries = 30) => {
+    if (readyGeneration !== gen || readyProject !== S.p || readyView !== S.v || !view) return;
+    const stage = $("#stage");
+    if (!stage) return;
+    const elements = [...stage.querySelectorAll("canvas,svg,img")].filter(el => el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0);
+    const pendingImages = elements.filter(el => el.tagName === "IMG" && (!el.complete || !el.naturalWidth));
+    if (!elements.length || pendingImages.length) {
+      if (retries > 0) {
+        let retried = false;
+        const retry = () => {
+          if (retried) return;
+          retried = true;
+          requestAnimationFrame(() => checkReady(retries - 1));
+        };
+        for (const img of pendingImages) {
+          img.addEventListener("load", retry, { once: true });
+          img.addEventListener("error", retry, { once: true });
+        }
+        if (!pendingImages.length) requestAnimationFrame(retry);
+      }
+      return;
+    }
+    window.reviewViewReady = {project:S.p, dir:proj().dir, view:S.v, renderer:boardView.useGL ? "board-gl" : "svg"};
+  };
+  requestAnimationFrame(() => requestAnimationFrame(() => checkReady()));
 }
 function drawPins() {
   // Refresh pins in place: replacing the drawing can swallow an in-flight right-click.
@@ -2272,21 +2419,21 @@ function renderChecks() {
     return (checks.length ? checks : [undefined]).map(check => ({ name, check, setting: D.settings?.checks?.[name] }));
   });
   const ran = configured.filter(r => r.check && r.setting !== "off").map(r => r.check);
-  const all = ran.flatMap(c => c.violations.map(v => ({ ...v, check: c })));
+  const all = ran.flatMap(c => c.violations.map(v => ({ ...v, check: c, new: !single() && v.new })));   // a design report has nothing new or fixed
   const totalNew = all.filter(v => v.new && !v.waived).length;
-  const scope = state.scope ?? (totalNew ? "new" : "all");
+  const scope = single() ? "all" : state.scope ?? (totalNew ? "new" : "all");
   const checked = state.check && byKey.has(state.check) ? state.check : "";
   const summary = configured.map(({ name, check, setting }) => {
     const key = check ? checkKey(check) : name;
     if (!check || setting === "off" || check.status === "not_run") return `<button class="check check-not-run" data-check-summary="${esc(encodeURIComponent(key))}" aria-pressed="false">
       <span class="check-heading"><span class="check-status">— not run</span><span class="check-title">${esc(check ? checkTitle(check) : titles[name] || name)}</span></span>
       <span class="check-reason">${esc(check?.reason || "turned off in kicad-review.toml")}</span></button>`;
-    const baselineOnly = D.settings?.fail_on === "new" && check.errors > 0 && check.new_errors === 0;
+    const baselineOnly = !single() && D.settings?.fail_on === "new" && check.errors > 0 && check.new_errors === 0;
     const status = check.status === "fail" ? "✕ failing" : check.status === "warn" ? "! warnings" : "✓ passing";
-    const newer = check.new_errors + check.new_warnings;
+    const newer = single() ? 0 : check.new_errors + check.new_warnings;
     return `<button class="check check-${esc(check.status)}" data-check-summary="${esc(encodeURIComponent(key))}" aria-pressed="${checked === key}">
       <span class="check-heading"><span class="check-status">${status}</span><span class="check-title">${esc(checkTitle(check))} <small>${esc(check.level === "informational" ? "info" : "required")}</small></span>${baselineOnly ? '<span class="check-status-detail">· no new errors</span>' : ""}</span>
-      <span class="check-counts">${check.errors} errors · ${check.warnings} warnings${check.waived ? ` · ${check.waived} waived` : ""}${newer ? ` <b class="check-new">+${newer} new</b>` : ""}${check.fixed ? ` <b class="check-fixed">${check.fixed} fixed</b>` : ""}</span></button>`;
+      <span class="check-counts">${check.errors} errors · ${check.warnings} warnings${check.waived ? ` · ${check.waived} waived` : ""}${newer ? ` <b class="check-new">+${newer} new</b>` : ""}${!single() && check.fixed ? ` <b class="check-fixed">${check.fixed} fixed</b>` : ""}</span></button>`;
   }).join("");
   let shown = all.filter(v => (!checked || checkKey(v.check) === checked) && (scope === "all" || v.new) && state[v.severity] && (!v.waived || state.waived) && (!state.q || JSON.stringify([v.type, v.description, v.items]).toLowerCase().includes(state.q.toLowerCase())));
   const totalShown = shown.length;
@@ -2311,7 +2458,7 @@ function renderChecks() {
     }).join("")}${vs.length > 200 ? `<p class="muted check-more">+${vs.length - 200} more</p>` : ""}</details>`;
   }).join("");
   return `${dockListTools("checks", state)}<div class="checks-summary">${summary}</div>${ran.filter(c => c.name === 'fab_limits').map(fabLedger).join('')}<div class="filters checks-filters">
-    <button class="check-chip" data-check-scope="new" aria-pressed="${scope === "new"}">New in this change ${totalNew}</button>
+    ${single() ? "" : `<button class="check-chip" data-check-scope="new" aria-pressed="${scope === "new"}">New in this change ${totalNew}</button>`}
     <button class="check-chip" data-check-scope="all" aria-pressed="${scope === "all"}">All ${all.length}</button>
     <button class="check-chip" data-check-severity="error" aria-pressed="${state.error}">Errors ${all.filter(v => v.severity === "error").length}</button>
     <button class="check-chip" data-check-severity="warning" aria-pressed="${state.warning}">Warnings ${all.filter(v => v.severity === "warning").length}</button>
@@ -2344,11 +2491,11 @@ function coverageHtml(parts) {
   const c = parts.coverage; if (!c) return "";
   return `<div class="bom-coverage" role="group" tabindex="0" aria-label="BOM coverage"><b>BOM</b>${Object.keys(c.head).map(f => {
     const [n, t] = c.head[f], d = c.base?.[f] ? n - c.base[f][0] : 0, pct = t ? Math.round(100 * n / t) : 100;
-    return `<span class="coverage-item${/^(lcsc|mpn|order ready)$/i.test(f) ? " primary" : ""}${n < t ? ' short' : ''}" title="${esc(f)}: ${n} / ${t} (${pct}%) · change from base ${d > 0 ? '+' : ''}${d}"><span class="sr-only">${n < t ? 'incomplete: ' : ''}</span>${esc(f)} <b>${pct}%</b><span class="sr-only"> ${n} / ${t} ${d > 0 ? '+' : ''}${d}</span></span>`;
+    return `<span class="coverage-item${/^(lcsc|mpn|order ready)$/i.test(f) ? " primary" : ""}${n < t ? ' short' : ''}" title="${esc(f)}: ${n} / ${t} (${pct}%)${single() ? "" : ` · change from base ${d > 0 ? '+' : ''}${d}`}"><span class="sr-only">${n < t ? 'incomplete: ' : ''}</span>${esc(f)} <b>${pct}%</b><span class="sr-only"> ${n} / ${t}${single() ? "" : ` ${d > 0 ? '+' : ''}${d}`}</span></span>`;
   }).join("")}</div>`;
 }
 function fieldChangesHtml(parts) {
-  const fc = parts.field_changes || [];
+  const fc = single() ? [] : parts.field_changes || [];
   return (fc.length ? `<table class="field-changes"><caption>Field changes</caption><thead><tr><th>Refs</th><th>Field</th><th>Base</th><th>Head</th></tr></thead><tbody>${fc.map(r =>
     `<tr><td>${esc(r.refs.join(", "))}</td><td>${esc(r.field)}</td><td>${esc(r.before ?? "—")}</td><td>${esc(r.after ?? "—")}</td></tr>`).join("")}</tbody></table>` : "")
     + (parts.dnp_mismatch?.length ? `<p class="dnp-mismatch">⚠ DNP differs between schematic and board: ${esc(parts.dnp_mismatch.join(", "))}</p>` : "");
@@ -2423,11 +2570,12 @@ function renderParts() {
   return (parts.summary ? `<div class="filters parts-view" role="group" aria-label="Parts view">${[["problems", "Problems"], ["bom", "BOM"]].map(([k, label]) => `<button type="button" class="check-chip" data-parts-view="${k}" aria-pressed="${(k === "bom") === !!bom}">${label}</button>`).join("")}</div>` : "") + (bom ? renderBomWithBoards() : renderPartsProblems(parts));
 }
 function renderPartsProblems(parts) {
-  const age = partsAge(parts.supplier), f = S.partsFilter;
-  const changes = l => parts.changes.filter(r => r.action !== "removed" && r.refs.some(ref => l.refs.includes(ref)));
+  const age = partsAge(parts.supplier), f = S.partsFilter, partChanges = single() ? [] : parts.changes;
+  if (single()) f.changed = false;   // a stale "Only changed" from a comparison link would hide the whole BOM
+  const changes = l => partChanges.filter(r => r.action !== "removed" && r.refs.some(ref => l.refs.includes(ref)));
   const rows = parts.lines.map(l => ({ line: l, changes: changes(l) }));
   // Removed lines are not in the head BOM; keep them visible for change review.
-  for (const r of parts.changes.filter(r => r.action === "removed")) rows.push({ line: { ...r.before, refs: r.refs }, changes: [r] });
+  for (const r of partChanges.filter(r => r.action === "removed")) rows.push({ line: { ...r.before, refs: r.refs }, changes: [r] });
   const shown = rows.filter(r => (!f.q || partsSearchText(r.line).includes(f.q.toLowerCase())) && (!f.problems || blocking(r.line)) && (!f.changed || r.changes.length))
     .sort((a, b) => f.sort === "reference" ? a.line.refs[0].localeCompare(b.line.refs[0], undefined, {numeric:true}) : Number(blocking(b.line)) - Number(blocking(a.line)));
   const counts = parts.supplier?.not_looked_up || {};
@@ -2437,8 +2585,8 @@ function renderPartsProblems(parts) {
     ${parts.supplier?.fetched_at ? '<p class="parts-attribution parts-age">Stock and price from DigiKey</p>' : ""}
     ${parts.supplier?.error ? `<p class="parts-lookup-error parts-age">DigiKey lookup unavailable: ${esc(parts.supplier.error)}</p>` : ""}
     ${notLookedUp ? `<p class="parts-not-looked-up parts-age">${notLookedUp}.</p>` : ""}
-    <div class="filters checks-filters">${[["problems", "Only problems"], ["changed", "Only changed"]].map(([k, label]) => `<button class="check-chip" data-parts-filter="${k}" aria-pressed="${f[k]}">${label}</button>`).join("")}</div>
-    <div class="parts-scroll"><table class="parts-table"><thead><tr>${["Δ", "Refs", "Value / MPN", "LCSC", "DigiKey", "PCBWay", "Datasheet"].map(h => `<th scope="col">${h}</th>`).join("")}</tr></thead><tbody>${shown.map(({ line: l, changes: cs }) => {
+    <div class="filters checks-filters">${[["problems", "Only problems"], ...(single() ? [] : [["changed", "Only changed"]])].map(([k, label]) => `<button class="check-chip" data-parts-filter="${k}" aria-pressed="${f[k]}">${label}</button>`).join("")}</div>
+    <div class="parts-scroll"><table class="parts-table"><thead><tr>${[...(single() ? [] : ["Δ"]), "Refs", "Value / MPN", "LCSC", "DigiKey", "PCBWay", "Datasheet"].map(h => `<th scope="col">${h}</th>`).join("")}</tr></thead><tbody>${shown.map(({ line: l, changes: cs }) => {
       // A change row names only the refs it moved; the line's other refs did not change.
       const moved = [...new Set(cs.flatMap(r => r.refs))], refs = f.changed ? moved : l.refs;
       const changeText = field => {
@@ -2462,7 +2610,7 @@ function renderPartsProblems(parts) {
       const stockText = product ? `<a href="${esc(product)}" rel="noopener noreferrer" target="_blank">${esc(stock)}</a>` : esc(stock);
       const stockHtml = stockText + (!parts.supplier?.skipped && supplier?.product_status ? `<small class="parts-footprint">${esc(supplier.product_status)}</small>` : "");
       const url = l.datasheet, sheet = /^https?:\/\//i.test(url || "") ? `<a href="${esc(url)}" rel="noopener noreferrer" target="_blank">pdf</a>` : "—";
-      return `<tr class="parts-row${blocking(l) ? " problem" : ""}${cs.length ? " changed" : ""}${supplier?.status === "unavailable" ? " unavailable" : ""}"><td title="${esc(cs.map(r => r.action).join(", "))}">${blocking(l) ? "⚠" : ""}${cs.map(r => ({added: "+", removed: "−", swapped: "~", value: "~", footprint: "~", mpn: "~"})[r.action] || "").join("")}</td><td class="parts-refs" title="${esc(refs.join(", "))}">${referenceRanges(refs) === refs.join(", ") ? refs.map(r => moved.includes(r) ? `<strong>${esc(r)}</strong>` : esc(r)).join(", ") : esc(referenceRanges(refs))}</td><td>${changeText("value")}${l.mpn || cs.some(r => r.before && r.after && r.before.mpn !== r.after.mpn) ? `<span class="parts-mpn"> ${changeText("mpn")}</span>` : ""}${cs.some(r => r.before && r.after && r.before.footprint !== r.after.footprint) ? `<small class="parts-footprint">footprint ${changeText("footprint")}</small>` : ""}${problems.length ? `<small class="parts-problems">${l.problems.map((p, i) => `<span class="problem-tag" tabindex="0" title="${esc(problems[i])}">${p.includes("lcsc") ? "LCSC" : p.includes("mpn") ? "MPN" : p === "placeholder" ? "VALUE" : p === "unit_identity_conflict" ? "UNITS" : "STOCK"}</span>`).join(" ")}</small>` : ""}</td><td>${changeText("lcsc")}</td><td class="parts-stock${age.stale ? " stale" : ""}">${stockHtml}</td><td title="${l.mpn ? "MPN supplied for PCBWay" : "MPN missing"}">${l.mpn ? "✔" : "—"}</td><td>${sheet}</td></tr>`;
+      return `<tr class="parts-row${blocking(l) ? " problem" : ""}${cs.length ? " changed" : ""}${supplier?.status === "unavailable" ? " unavailable" : ""}">${single() ? "" : `<td title="${esc(cs.map(r => r.action).join(", "))}">${blocking(l) ? "⚠" : ""}${cs.map(r => ({added: "+", removed: "−", swapped: "~", value: "~", footprint: "~", mpn: "~"})[r.action] || "").join("")}</td>`}<td class="parts-refs" title="${esc(refs.join(", "))}">${referenceRanges(refs) === refs.join(", ") ? refs.map(r => moved.includes(r) ? `<strong>${esc(r)}</strong>` : esc(r)).join(", ") : esc(referenceRanges(refs))}</td><td>${changeText("value")}${l.mpn || cs.some(r => r.before && r.after && r.before.mpn !== r.after.mpn) ? `<span class="parts-mpn"> ${changeText("mpn")}</span>` : ""}${cs.some(r => r.before && r.after && r.before.footprint !== r.after.footprint) ? `<small class="parts-footprint">footprint ${changeText("footprint")}</small>` : ""}${problems.length ? `<small class="parts-problems">${l.problems.map((p, i) => `<span class="problem-tag" tabindex="0" title="${esc(problems[i])}">${p.includes("lcsc") ? "LCSC" : p.includes("mpn") ? "MPN" : p === "placeholder" ? "VALUE" : p === "unit_identity_conflict" ? "UNITS" : "STOCK"}</span>`).join(" ")}</small>` : ""}</td><td>${changeText("lcsc")}</td><td class="parts-stock${age.stale ? " stale" : ""}">${stockHtml}</td><td title="${l.mpn ? "MPN supplied for PCBWay" : "MPN missing"}">${l.mpn ? "✔" : "—"}</td><td>${sheet}</td></tr>`;
     }).join("")}</tbody></table>${shown.length ? "" : '<p class="muted">No parts match these filters.</p>'}</div>${fieldChangesHtml(parts)}`;
 }
 function renderThreads() {
@@ -2526,8 +2674,6 @@ async function askGo(kind, name, preferredSide = "head") {
   const i = symbol >= 0 ? symbol : objects.findIndex(match);
   if (i >= 0) await goToObject(i); // Desktop object navigation preserves the object's revision before drawing.
 }
-// A comparison report falls back to Changes; a single-design page (06's body.design-single) has no Changes tab, so it falls back to Checks.
-const fallbackTab = () => document.body.classList.contains("design-single") ? "checks" : "changes";
 // Shared focus: askGo keeps its own entry point for Ask links, and 10's focusIdentity (spec 10, Task 13) implements the same whole-net highlight from project.identity. Whichever of 09 or 10 merges second consumes the other's function; the symbol fallback above is never presented as a whole-net highlight.
 
 function askReset() { if (ASK.project !== proj().dir) Object.assign(ASK, { project: proj().dir, insight: null, insightId: null, asked: false, insightError: "", log: [], busy: false, current: null, status: "", draft: "", remaining: null }); }
@@ -2636,19 +2782,21 @@ function referenceRanges(refs) {
 }
 function dockListTools(name, state) {
   const options = (values, current) => values.map(([v, label]) => `<option value="${v}" ${v === (current || "") ? "selected" : ""}>${label}</option>`).join("");
-  return `<div class="dock-list-tools"><input class="${name === "changes" ? "q" : ""}" type="search" ${name === "changes" ? 'maxlength="200" ' : ""}data-list-search="${name}" aria-label="Search ${name}" placeholder="Search ${name}…" value="${esc(state.q || "")}"><select data-list-sort="${name}" aria-label="Sort ${name}">${options(name === "checks" ? [["", "New / severity"], ["rule", "Rule name"]] : [["", "Review order"], ["reference", "Reference"], ...(name === "changes" ? [["kind", "Kind"]] : [])], state.sort)}</select>${name === "parts" ? "" : `<select data-list-group="${name}" aria-label="Group ${name}">${options(name === "checks" ? [["", "Group: rule"], ["check", "Group: check"], ["severity", "Group: severity"]] : [...(S.filter.all ? [["", "No groups"]] : [["", "Auto (channel if reported)"], ["none", "No groups"]]), ["kind", "Group: kind"], ["action", "Group: action"]], state.group)}</select>`}</div>`;
+  return `<div class="dock-list-tools"><input class="${name === "changes" ? "q" : ""}" type="search" ${name === "changes" ? 'maxlength="200" ' : ""}data-list-search="${name}" aria-label="Search ${name}" placeholder="Search ${name}…" value="${esc(state.q || "")}"><select data-list-sort="${name}" aria-label="Sort ${name}">${options(name === "checks" ? [["", single() ? "Severity" : "New / severity"], ["rule", "Rule name"]] : [["", "Review order"], ["reference", "Reference"], ...(name === "changes" ? [["kind", "Kind"]] : [])], state.sort)}</select>${name === "parts" ? "" : `<select data-list-group="${name}" aria-label="Group ${name}">${options(name === "checks" ? [["", "Group: rule"], ["check", "Group: check"], ["severity", "Group: severity"]] : [...(S.filter.all ? [["", "No groups"]] : [["", "Auto (channel if reported)"], ["none", "No groups"]]), ["kind", "Group: kind"], ["action", "Group: action"]], state.group)}</select>`}</div>`;
 }
 function renderPanel() {
   appearanceUI?.cancelPendingImports(); // preserve late-import invalidation without tearing down left controls
   const active = document.activeElement, key = ["data-tab", "data-inv", "data-action", "data-check-summary", "data-check-scope", "data-check-severity", "data-check-waived", "data-waive", "data-parts-filter", "data-parts-view", "data-bom-cat", "data-bom-sort", "data-bom-board", "data-bom-download", "data-thread-status", "data-thread", "data-issue-for", "data-issue"].find(k => active?.closest("#panel") && !active.matches(".card") && active.hasAttribute(k)), focus = key ? `[${key}="${CSS.escape(active.getAttribute(key))}"]` : active?.matches("#panel select.kind") ? "select.kind" : active?.matches("#panel select.thread-severity") ? "select.thread-severity" : active?.matches("#panel .show-all") ? ".show-all" : null;
-  const p = proj(), f = S.filter;
-  if (S.t === "parts" && !p.parts) S.t = "changes";
+  const p = proj(), f = S.filter, fallback = single() ? "checks" : "changes";
+  if (single() && (S.t === "changes" || S.t === "threads")) S.t = "checks";
+  if (single() && (rightTab === "changes" || rightTab === "threads")) rightTab = "checks";
+  if (S.t === "parts" && !p.parts) S.t = fallback;
   if (S.t === "appearance" && leftTab !== "appearance") renderNav();
-  if (S.t === "threads" && !S.threads && !S.issues) { S.wantThreads = true; S.t = "changes"; }
-  if (S.t === "ask" && !(ASK.on && ASK.ready)) S.t = fallbackTab();
+  if (S.t === "threads" && !S.threads && !S.issues) { S.wantThreads = true; S.t = fallback; }
+  if (S.t === "ask" && !(ASK.on && ASK.ready)) S.t = fallback;
   if (S.t !== "appearance") rightTab = S.t;
-  if (rightTab === "parts" && !p.parts || rightTab === "threads" && !S.threads && !S.issues) rightTab = "changes";
-  if (rightTab === "ask" && !(ASK.on && ASK.ready)) rightTab = fallbackTab();
+  if (rightTab === "parts" && !p.parts || rightTab === "threads" && !S.threads && !S.issues) rightTab = fallback;
+  if (rightTab === "ask" && !(ASK.on && ASK.ready)) rightTab = fallback;
   const panelTab = rightTab;
   const kinds = [...new Set(p.changes.map(r => r.kind))];
   const c = { added: 0, removed: 0, modified: 0 }; p.changes.forEach(r => c[r.action]++);
@@ -2656,7 +2804,7 @@ function renderPanel() {
   const partsExtra = p.parts ? ` ${p.parts.lines.length}${partsProblemCount(p.parts) ? ` · ${partsProblemCount(p.parts)} ⚠` : ""}` : "";
   const threadsExtra = S.threads || S.issues ? ` ${(S.threads || []).filter(t => !t.resolved && t.anchor.project === p.dir).length}` : "";
   const summary = electricalSummaryHtml();
-  $("#panel").innerHTML = `<div class="dock-actions"><span>REVIEW</span><button type="button" data-panel-wide title="${S.panelWide ? "Narrow the dock to 360 px" : "Widen the dock to 700 px"}" aria-pressed="${!!S.panelWide}">${tbIcon("expand")}<span>${S.panelWide ? "Narrow" : "Widen"}</span></button>${["parts", "checks"].includes(panelTab) ? `<button type="button" data-panel-table aria-pressed="${!!S.panelTable}" title="Full-width table view">${S.panelTable ? "Close table" : "Table view"}</button>` : ""}<button type="button" data-panel-close aria-label="Collapse right dock" title="Collapse right dock">×</button></div><div id="panel-tabs" role="tablist" aria-label="Inspector">${tab("changes", "Changes", true, ` ${p.changes.length}`)}${tab("checks", "Checks", true)}${tab("parts", "Parts", !!p.parts, partsExtra)}${tab("threads", "Threads", !!(S.threads || S.issues), threadsExtra)}${ASK.on ? tab("ask", "Ask", ASK.ready) : ""}</div><div id="panel-body" role="tabpanel" aria-labelledby="tab-${panelTab}">` +
+  $("#panel").innerHTML = `<div class="dock-actions"><span>REVIEW</span><button type="button" data-panel-wide title="${S.panelWide ? "Narrow the dock to 360 px" : "Widen the dock to 700 px"}" aria-pressed="${!!S.panelWide}">${tbIcon("expand")}<span>${S.panelWide ? "Narrow" : "Widen"}</span></button>${["parts", "checks"].includes(panelTab) ? `<button type="button" data-panel-table aria-pressed="${!!S.panelTable}" title="Full-width table view">${S.panelTable ? "Close table" : "Table view"}</button>` : ""}<button type="button" data-panel-close aria-label="Collapse right dock" title="Collapse right dock">×</button></div><div id="panel-tabs" role="tablist" aria-label="Inspector">${single() ? "" : tab("changes", "Changes", true, ` ${p.changes.length}`)}${tab("checks", "Checks", true)}${tab("parts", "Parts", !!p.parts, partsExtra)}${single() ? "" : tab("threads", "Threads", !!(S.threads || S.issues), threadsExtra)}${ASK.on ? tab("ask", "Ask", ASK.ready) : ""}</div><div id="panel-body" role="tabpanel" aria-labelledby="tab-${panelTab}">` +
     (panelTab === "ask" ? renderAsk() : panelTab === "threads" ? renderThreads() : panelTab === "parts" ? renderParts() : panelTab === "checks" ? renderChecks() : `
     ${String(S.v).startsWith("lib:") && p.libraries?.[+S.v.slice(4)] ? libInfoHtml(p.libraries[+S.v.slice(4)]) : ""}
     ${dockListTools("changes", f)}
@@ -2855,7 +3003,7 @@ function canvasMenu(vp,e){
   showBenchMenu([
     {label:'Zoom to here',run:()=>setT({x:point[0],y:point[1],z:S.z*1.3})},
     {label:'Copy coordinates',run:()=>{const units=board?a.units:S.units,div=units==='mil'?.0254:units==='in'?25.4:1;benchCopy(`X ${(point[0]/div).toFixed(3)} Y ${(point[1]/div).toFixed(3)} ${units}`);}},
-    {label:'Comment here',disabled:!THREADS_ON,run:()=>proposePin(vp,e)},
+    {label:'Comment here',disabled:single() || !THREADS_ON,run:()=>proposePin(vp,e)},
     {label:'Select object under cursor',run:()=>pickAt(vp,e)},
     {label:`Hide layer${layerAvailable?' · '+layer:''}`,disabled:!layerAvailable,run:()=>Appearance.patch({layers:{[layer]:{visible:false}}})},
     {label:'Show only this layer',disabled:!layerAvailable,run:()=>Appearance.patch({layers:Object.fromEntries(Object.keys(a.layers).map(name=>[name,{visible:name===layer}]))})}
@@ -2945,7 +3093,7 @@ document.addEventListener("keydown", e => {
   if (e.key === "j" || e.key === "ArrowDown") { e.preventDefault(); step(1); }
   else if (e.key === "k" || e.key === "ArrowUp") { e.preventDefault(); step(-1); }
   else if (e.key === "b" && S.v === '3d' && S.m === "blend") toggleBlend3D();
-  else if (e.key === "c" && THREADS_ON && S.v && S.v !== "3d") { S.placing = !S.placing; document.body.classList.toggle("placing", S.placing); }
+  else if (e.key === "c" && !single() && THREADS_ON && S.v && S.v !== "3d") { S.placing = !S.placing; document.body.classList.toggle("placing", S.placing); }
   else if (e.key === "f") fit();
   else if (e.key === "Escape" && S.v === "3d") {   // never rebuild the 3D session for Escape
     if (S.s == null && !S.part3d && !S.placing && !window.Review3D?.state?.selected?.length) return;
@@ -3008,8 +3156,8 @@ async function raster(side, view, W, H) {
     if (!t) continue;
     const url = URL.createObjectURL(new Blob([t], { type: "image/svg+xml" }));
     const img = new Image();
-    img.src = url;
-    try { await img.decode(); ctx.drawImage(img, 0, 0, W, H); } catch (_) {}
+    // load, not decode(): Chrome's decode() can reject a valid SVG under load, which silently dropped a layer.
+    try { await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; img.src = url; }); ctx.drawImage(img, 0, 0, W, H); } catch (_) {}
     URL.revokeObjectURL(url);
   }
   return ctx.getImageData(0, 0, W, H).data;
@@ -3097,14 +3245,18 @@ function inspectorProperties() {
     flatten(base, full(change.before), "part."); flatten(head, full(change.after), "part.");
   }
   flatten(base, selected.before); flatten(head, selected.after);
-  for (const [key, a, b] of selected.changes || []) { base[key] = a; head[key] = b; }
-  if (selected.action === "added" || selected.added) for (const k of Object.keys(base)) delete base[k];
-  if (selected.action === "removed" || selected.side === "base") for (const k of Object.keys(head)) delete head[k];
+  if (!single()) for (const [key, a, b] of selected.changes || []) { base[key] = a; head[key] = b; }
+  if (!single() && (selected.action === "added" || selected.added)) for (const k of Object.keys(base)) delete base[k];
+  if (!single() && (selected.action === "removed" || selected.side === "base")) for (const k of Object.keys(head)) delete head[k];
   // Position components get their own measured readouts; retain all other source fields.
   for (const target of [base, head]) if (Array.isArray(target.pos)) {
     target["X (mm)"] = target.pos[0]; target["Y (mm)"] = target.pos[1];
     if (target.pos.length > 2) target["Rotation (°)"] = target.pos[2];
     delete target.pos;
+  }
+  if (single()) {   // one revision: current values only, no change bookkeeping
+    for (const key of ["action", "added", "new", "pos_before", "before", "changes"]) delete head[key];
+    return {selected, base:Object.create(null), head};
   }
   return {selected, base, head};
 }
@@ -3117,18 +3269,18 @@ function renderInspector() {
   const html = (v, text) => flat(v) && v.length > 1 && v.every(x => x === String(x)) ? `<ul class="insp-list">${v.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : esc(text);
   const groups = Array.from({length:4}, () => ({main:[], geometry:[]}));
   const order = ["ref", "value", "Value", "kind", "footprint", "Footprint", "uuid", "X (mm)", "Y (mm)", "Rotation (°)", "position", "layer", "layers"];
-  const keys = data ? [...new Set([...Object.keys(data.base), ...Object.keys(data.head)])] : [];
+  const keys = data ? single() ? Object.keys(data.head) : [...new Set([...Object.keys(data.base), ...Object.keys(data.head)])] : [];
   keys.sort((a,b) => (order.includes(a) ? order.indexOf(a) : 100) - (order.includes(b) ? order.indexOf(b) : 100));
   if (data) for (const key of keys) {
     const k = key.toLowerCase(), leaf = k.split(".").at(-1);
     const group = /^(x \(mm\)|y \(mm\)|rotation|position|pos|box|layer|layers|angle|where|sheet|board|locked)/.test(leaf) ? 1
       : /net|pad|pin|clearance|drill|width|size|electrical|items|severity|description|check/.test(leaf) ? 2
       : /^(ref|refs|value|kind|type|uuid|id|footprint|changeuuid|changeids)$/.test(leaf) ? 0 : 3;
-    const a = value(data.base[key]), b = value(data.head[key]), changed = a !== b;
+    const a = value(data.base[key]), b = value(data.head[key]), changed = !single() && a !== b;
     const label = ({ref:"Reference", value:"Value", kind:"Type", footprint:"Footprint", uuid:"UUID"})[key] || key;
     groups[group][key.startsWith("geometry") ? "geometry" : "main"].push(`<dt>${esc(label).replace(/\./g, ".<wbr>")}</dt><dd>${changed ? `<del>${html(data.base[key], a)}</del> <span class="insp-arrow" aria-label="to">→</span> <ins>${html(data.head[key], b)}</ins>` : html(data.head[key], b)}</dd>`);
   }
-  dock.innerHTML = `<header class="insp-head"><span class="insp-label">Inspector</span><strong>${esc(title)}</strong>${data?.selected.action ? `<span class="badge ${esc(data.selected.action)}">${esc(data.selected.action)}</span>` : ""}<span class="insp-ticks"></span><button type="button" id="insp-toggle" aria-label="${inspectorClosed ? "Expand" : "Collapse"} inspector" aria-controls="insp-body" aria-expanded="${!inspectorClosed}" title="${inspectorClosed ? "Expand" : "Collapse"} inspector">${inspectorClosed ? "▴" : "▾"}</button></header><div id="insp-body" ${inspectorClosed ? "hidden" : ""}>${data ? groups.map((rows, i) => `<section class="insp-module"><h4>${["Identity", "Placement · base → head", "Electrical", "Fields & flags"][i]}</h4><dl>${rows.main.join("") || `<dt class="muted">${rows.geometry.length ? "See geometry" : "Not in report"}</dt>`}</dl>${rows.geometry.length ? `<details class="insp-geometry"><summary>Geometry · ${rows.geometry.length} properties</summary><dl>${rows.geometry.join("")}</dl></details>` : ""}</section>`).join("") : '<p class="insp-empty">Select an object, change or check finding to inspect its properties.<br><span class="muted">Base → head · only data present in this report is shown.</span></p>'}</div>`;
+  dock.innerHTML = `<header class="insp-head"><span class="insp-label">Inspector</span><strong>${esc(title)}</strong>${!single() && data?.selected.action ? `<span class="badge ${esc(data.selected.action)}">${esc(data.selected.action)}</span>` : ""}<span class="insp-ticks"></span><button type="button" id="insp-toggle" aria-label="${inspectorClosed ? "Expand" : "Collapse"} inspector" aria-controls="insp-body" aria-expanded="${!inspectorClosed}" title="${inspectorClosed ? "Expand" : "Collapse"} inspector">${inspectorClosed ? "▴" : "▾"}</button></header><div id="insp-body" ${inspectorClosed ? "hidden" : ""}>${data ? groups.map((rows, i) => `<section class="insp-module"><h4>${["Identity", single() ? "Placement · current (mm)" : "Placement · base → head", "Electrical", "Fields & flags"][i]}</h4><dl>${rows.main.join("") || `<dt class="muted">${rows.geometry.length ? "See geometry" : "Not in report"}</dt>`}</dl>${rows.geometry.length ? `<details class="insp-geometry"><summary>Geometry · ${rows.geometry.length} properties</summary><dl>${rows.geometry.join("")}</dl></details>` : ""}</section>`).join("") : `<p class="insp-empty">Select an object, change or check finding to inspect its properties.<br><span class="muted">${single() ? "Head only" : "Base → head"} · only data present in this report is shown.</span></p>`}</div>`;
   if(S.part3d) {
     const p=S.part3d,body=$("#insp-body"),box=p.box.map(n=>round3(n*1000));
     body.dataset.part3dInspector='';body.replaceChildren();
