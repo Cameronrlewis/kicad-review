@@ -6897,7 +6897,8 @@ CHECKS.push(['bench polish inspector shows nets as a list', 'v=board', `
 CHECKS.push(['vf-sch-speed schematic pan is cheap', '', `
   const sheet=proj().sheets.find(s=>s.svg); if(!sheet) return 'skip';
   S.v='sheet:'+sheet.path; S.m='side'; S.grid=true; await draw(); fit();
-  const raf=()=>new Promise(requestAnimationFrame), vp=document.querySelector('#stage .vp.sheet'), r=vp.getBoundingClientRect();
+  // A headless tab can stop handing out animation frames; cap each wait so the check reports stalls instead of hanging.
+  let stalls=0; const raf=()=>new Promise(r=>{const id=setTimeout(()=>{stalls++;r()},100); requestAnimationFrame(()=>{clearTimeout(id);r()})}), vp=document.querySelector('#stage .vp.sheet'), r=vp.getBoundingClientRect();
   const ev=(type,i)=>vp.dispatchEvent(new PointerEvent(type,{pointerId:7,button:0,buttons:type==='pointerup'?0:1,clientX:r.x+r.width/2+(i||0)*3,clientY:r.y+r.height/2+(i||0),bubbles:true}));
   // 1. unchanged HUD text must not be rewritten
   const hud=new MutationObserver(()=>{}); hud.observe(document.querySelector('#statusbar'),{childList:true,characterData:true,subtree:true}); hud.observe(document.querySelector('#zoombar'),{childList:true,characterData:true,subtree:true});
@@ -6917,7 +6918,8 @@ CHECKS.push(['vf-sch-speed schematic pan is cheap', '', `
   if(/--cursor/.test(vp.style.cssText)) return 'pointer position written to SVG ancestor as CSS variable: '+vp.style.cssText;
   frames.sort((a,b)=>a-b); const fps=1000*frames.length/frames.reduce((a,b)=>a+b), p95=frames[Math.floor(frames.length*.95)];
   const gl=document.createElement('canvas').getContext('webgl'), ext=gl&&gl.getExtension('WEBGL_debug_renderer_info'), soft=!ext||/swiftshader|llvmpipe|software/i.test(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL));
-  console.log('BOARD_PROOF '+JSON.stringify({task:'vf-sch-speed',fps:+fps.toFixed(1),p95:+p95.toFixed(1),software:soft,elements:document.querySelectorAll('#stage *').length}));
+  console.log('BOARD_PROOF '+JSON.stringify({task:'vf-sch-speed',fps:+fps.toFixed(1),p95:+p95.toFixed(1),software:soft,stalls,elements:document.querySelectorAll('#stage *').length}));
+  if(!soft&&stalls) return stalls+' of 61 animation frames stalled; fps not measurable';
   if(!soft&&fps<50) return 'pan '+fps.toFixed(1)+' fps';
   return true;
 `]);

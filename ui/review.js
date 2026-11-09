@@ -425,6 +425,7 @@ function applyState(st) {
   if (S.layers && S.v === "board") Appearance.patch({layers: Object.fromEntries(proj().board.layers.map(l => [canon(l.name), {visible: S.layers.includes(l.name)}]))});   // the link's l= wins over stored eyes
   if (S.x == null || S.y == null || S.z == null) S.x = S.y = S.z = null;
   const hasPos = S.z != null;
+  if (hasPos) autoFit = false; // An explicit address owns the camera, including across a queued resize fit.
   renderModes();
   renderNav();
   renderPanel();
