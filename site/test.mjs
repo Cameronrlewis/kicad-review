@@ -8054,6 +8054,8 @@ test('MCP six tools preserve provenance and never write GitHub',async()=>{
   assert.deepEqual(nonObjectErr, { error: { code: 'UNAVAILABLE', message: 'Data unavailable; retry later' } });
 });
 
+// The consent hand-back page's target: its meta refresh URL, HTML-unescaped.
+const handBackUrl = async (response) => (await response.clone().text()).match(/<meta http-equiv="refresh" content="0;url=([^"]+)">/)?.[1].replaceAll('&amp;', '&') ?? null;
 test('MCP consent needs same-origin nonce',async()=>{
   const now=Date.now();
   const valid={auth:{redirectUri:'https://client.example/cb',state:'state'},login:'cam',nonce:'n',exp:now+600000};
@@ -8069,9 +8071,9 @@ test('MCP consent needs same-origin nonce',async()=>{
     const req=new Request('https://site.example/authorize',{method:'POST',headers:{Origin:kind==='evil-origin'?'https://evil.example':'https://site.example',Cookie:'mc='+(kind==='mismatched-cookie'?'other':'sealed'),'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({pending,decision:kind==='denied'?'deny':'allow'})});
     const result=await consentRoute(req,env,deps);
     assert.equal(grants,0,kind);
-    assert.equal(result.status,kind==='denied'?302:403,kind);
-    if(kind==='denied')assert.equal(new URL(result.headers.get('Location')).searchParams.get('error'),'access_denied');
-    assert.ok(!/access_token|[?&]code=/.test(result.headers.get('Location')||''),kind);
+    assert.equal(result.status,kind==='denied'?200:403,kind);
+    if(kind==='denied')assert.equal(new URL(await handBackUrl(result)).searchParams.get('error'),'access_denied');
+    assert.ok(!/access_token|[?&]code=/.test(kind==='denied'?await handBackUrl(result):''),kind);
     assert.doesNotMatch(await result.text(),/access_token|usable/);
   }
 });
@@ -8150,8 +8152,7 @@ test('MCP consent renders consent page on GET and completes authorization on POS
   assert.equal(getRes.status, 200);
   // no-referrer would make browsers send Origin: null on the consent POST, which the origin check rejects.
   assert.equal(getRes.headers.get('Referrer-Policy'), 'same-origin');
-  // The post-submit redirect to the client is governed by form-action, so the registered redirect origin is allowed, nothing wider.
-  assert.match(getRes.headers.get('Content-Security-Policy'), /form-action 'self' https:\/\/client\.example;/);
+  assert.match(getRes.headers.get('Content-Security-Policy'), /form-action 'self';/, 'form-action stays self-only');
   assert.match(getRes.headers.get('Content-Type') || '', /text\/html/);
   assert.match(getRes.headers.get('Set-Cookie') || '', /mc=pending-cookie-token; Path=\/authorize; HttpOnly; SameSite=Lax; Max-Age=600; Secure/);
   assert.equal(sealedPending.login, 'cam');
@@ -8176,8 +8177,11 @@ test('MCP consent renders consent page on GET and completes authorization on POS
     body: new URLSearchParams({ pending: 'pending-cookie-token', decision: 'allow' }),
   });
   const postRes = await consentRoute(postReq, env, deps);
-  assert.equal(postRes.status, 302);
-  assert.equal(postRes.headers.get('Location'), 'https://client.example/cb?code=auth-code-ok&state=oauth-state-1');
+  // A hand-back page, not a 302: CSP form-action would block a redirect to a loopback callback.
+  assert.equal(postRes.status, 200);
+  const handBack = await postRes.clone().text();
+  assert.match(handBack, /<meta http-equiv="refresh" content="0;url=https:\/\/client\.example\/cb\?code=auth-code-ok&amp;state=oauth-state-1">/);
+  assert.match(handBack, /<a href="https:\/\/client\.example\/cb\?code=auth-code-ok&amp;state=oauth-state-1">Continue<\/a>/);
   assert.match(postRes.headers.get('Set-Cookie') || '', /mc=; Path=\/authorize; HttpOnly; SameSite=Lax; Max-Age=0; Secure/);
   assert.deepEqual(completedParams, {
     request: { clientId: 'client-123', redirectUri: 'https://client.example/cb', scope: ['read:design'], state: 'oauth-state-1' },
@@ -8346,7 +8350,7 @@ test('MCP OAuth binding and replay matrix',async(t)=>{
     const approved=await send('/authorize',{method:'POST',headers:{Origin:'https://site.example',Cookie:`s=${consent.session||signed}; mc=${consent.cookie??postedCookie}`,'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({pending:consent.pending??postedPending,decision:consent.decision||'allow'})});
     if(consent.expired)t.mock.timers.reset();
     if(Object.keys(consent).length)return {screen:approved};
-    assert.equal(approved.status,302);return {code:new URL(approved.headers.get('Location')).searchParams.get('code')};
+    assert.equal(approved.status,200);return {code:new URL(await handBackUrl(approved)).searchParams.get('code')};
   };
   const token=(code,changes={})=>send('/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'authorization_code',client_id:client.client_id,redirect_uri:'https://client.example/cb',code_verifier:verifier,resource:'https://site.example/mcp',code,...changes})});
   for(const changes of [{redirect_uri:'https://evil.example/cb'},{client_id:other.client_id},{code_verifier:''},{code_verifier:'B'.repeat(64)},{resource:'https://evil.example/mcp'}]){
@@ -8358,8 +8362,8 @@ test('MCP OAuth binding and replay matrix',async(t)=>{
   for(const consent of [{pending:''},{pending:'forged'},{cookie:'mismatch'},{missingNonce:true},{expired:true},{session:await signedIn({u:'other',t:'other-token'})},{decision:'deny'}]){
     const before=JSON.stringify([...local.OAUTH_KV.data]);
     const {screen}=await makeCode({},consent);
-    assert.equal(screen.status,consent.decision==='deny'?302:403);
-    const loc=screen.headers.get('Location');assert.ok(!loc||!new URL(loc).searchParams.has('code'));
+    assert.equal(screen.status,consent.decision==='deny'?200:403);
+    const loc=screen.status===200?await handBackUrl(screen):null;assert.ok(!loc||!new URL(loc).searchParams.has('code'));
     assert.equal(JSON.stringify([...local.OAUTH_KV.data]),before,'rejected consent issues no grant/code');
     assert.doesNotMatch(await screen.text(),/access_token|refresh_token/);
     const probe=await token('not-issued');assert.ok(probe.status>=400);

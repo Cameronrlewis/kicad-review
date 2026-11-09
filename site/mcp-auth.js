@@ -4,6 +4,13 @@ import { readBounded } from './mcp-data.js';
 // Browser consent for MCP OAuth: account-bound, same-origin, nonce-sealed pending state.
 const json = (body, status = 200, headers = {}) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'private, no-store', ...headers } });
 const cookieValue = (request, name) => String(request.headers.get('Cookie') || '').split(/;\s*/).find(v => v.startsWith(name + '='))?.slice(name.length + 1) || '';
+// The hand-back to the client is a page, not a 302: CSP form-action also governs redirects after a form POST,
+// and loopback callbacks such as http://[::1]:<port> cannot be listed there. Meta refresh and links are navigations it does not cover.
+const handBack = (location, head) => {
+  head.set('Content-Type', 'text/html; charset=utf-8');
+  const e = escapeHtml(location);
+  return new Response(`<!doctype html><meta name="viewport" content="width=device-width"><meta http-equiv="refresh" content="0;url=${e}"><title>Returning to your AI assistant</title><main><h1>Returning to your AI assistant</h1><p><a href="${e}">Continue</a> if nothing happens.</p></main>`, { status: 200, headers: head });
+};
 const pendingCookie = (value, secure) => `mc=${value}; Path=/authorize; HttpOnly; SameSite=Lax; Max-Age=${value ? 600 : 0}${secure ? '; Secure' : ''}`;
 
 export async function consentRoute(request, env, { session, open, seal }) {
@@ -23,10 +30,6 @@ export async function consentRoute(request, env, { session, open, seal }) {
     if (!client || !client.redirectUris?.includes(auth.redirectUri) || auth.scope.length !== 1 || auth.scope[0] !== 'read:design' || url.searchParams.get('resource') !== url.origin + '/mcp') return json({ error: 'Invalid client, redirect, scope, or resource' }, 400);
     const pending = await seal({ auth, login: active.login, nonce: crypto.randomUUID(), exp: Date.now() + 600000 }, env);
     const head = new Headers({ ...headers, 'Content-Type': 'text/html; charset=utf-8' });
-    // form-action also governs the redirect after the form POST, so the client's registered redirect target is allowed too;
-    // otherwise the browser blocks the hand-back to the client (e.g. http://localhost:<port>) and a second click finds the consent used.
-    const target = new URL(auth.redirectUri), source = /^https?:$/.test(target.protocol) ? target.origin : target.protocol;
-    if (/^[a-z][a-z0-9+.-]*:(\/\/[^\s;,']+)?$/i.test(source)) head.set('Content-Security-Policy', headers['Content-Security-Policy'].replace("form-action 'self'", `form-action 'self' ${source}`));
     head.append('Set-Cookie', pendingCookie(pending, url.protocol === 'https:'));
     if (active.setCookie) head.append('Set-Cookie', active.setCookie);
     const e = escapeHtml;
@@ -46,7 +49,7 @@ export async function consentRoute(request, env, { session, open, seal }) {
     const back = new URL(saved.auth.redirectUri); back.searchParams.set('error', 'access_denied');
     if (saved.auth.state) back.searchParams.set('state', saved.auth.state);
     if (saved.auth.issuer) back.searchParams.set('iss', saved.auth.issuer);
-    head.set('Location', back.href); return new Response(null, { status: 302, headers: head });
+    return handBack(back.href, head);
   }
   const currentCookie = active.setCookie?.split(';', 1)[0].slice(2) || cookieValue(request, 's');
   const site = await open(currentCookie, env);
@@ -54,7 +57,7 @@ export async function consentRoute(request, env, { session, open, seal }) {
   const credential = await seal({ t: site.t, u: site.u, e: Math.min(site.e, Date.now() + 3600000) }, env);
   const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({ request: saved.auth, userId: active.login,
     metadata: { label: active.login + ' read-only design access' }, scope: ['read:design'], props: { credential } });
-  head.set('Location', redirectTo); return new Response(null, { status: 302, headers: head });
+  return handBack(redirectTo, head);
 }
 
 // OAuth policy around the provider: no refresh grants, no refresh tokens, RFC 9728 discovery on both paths.
