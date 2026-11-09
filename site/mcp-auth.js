@@ -8,7 +8,8 @@ const pendingCookie = (value, secure) => `mc=${value}; Path=/authorize; HttpOnly
 
 export async function consentRoute(request, env, { session, open, seal }) {
   const url = new URL(request.url); if (url.pathname !== '/authorize') return null;
-  const headers = { 'Cache-Control': 'private, no-store', 'Content-Security-Policy': "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'", 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' };
+  const headers = { 'Cache-Control': 'private, no-store', 'Content-Security-Policy': "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'", 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'same-origin' };
+  // same-origin, not no-referrer: under no-referrer browsers send Origin: null on the consent form POST, which the origin check below rejects.
   const active = await session(request, env);
   if (!active) {
     if (request.method !== 'GET') return json({ error: 'Sign in again' }, 401);

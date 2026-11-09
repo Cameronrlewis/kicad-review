@@ -8148,6 +8148,8 @@ test('MCP consent renders consent page on GET and completes authorization on POS
   const getReq = new Request('https://site.example/authorize?response_type=code&code_challenge_method=S256&code_challenge=' + 'a'.repeat(43) + '&resource=https://site.example/mcp');
   const getRes = await consentRoute(getReq, env, deps);
   assert.equal(getRes.status, 200);
+  // no-referrer would make browsers send Origin: null on the consent POST, which the origin check rejects.
+  assert.equal(getRes.headers.get('Referrer-Policy'), 'same-origin');
   assert.match(getRes.headers.get('Content-Type') || '', /text\/html/);
   assert.match(getRes.headers.get('Set-Cookie') || '', /mc=pending-cookie-token; Path=\/authorize; HttpOnly; SameSite=Lax; Max-Age=600; Secure/);
   assert.equal(sealedPending.login, 'cam');
