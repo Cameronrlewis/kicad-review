@@ -28,4 +28,8 @@ permissions:
 jobs:
   review:
     uses: Cameronrlewis/kicad-review/.github/workflows/review.yml@v1
-    secrets: inherit   # only needed for optional DigiKey lookup; passes DIGIKEY_CLIENT_ID/SECRET
+    # Only for the optional DigiKey lookup. Name the two secrets rather than `secrets: inherit`,
+    # which would hand every secret in this repository to the shared workflow.
+    secrets:
+      DIGIKEY_CLIENT_ID: ${{ secrets.DIGIKEY_CLIENT_ID }}
+      DIGIKEY_CLIENT_SECRET: ${{ secrets.DIGIKEY_CLIENT_SECRET }}

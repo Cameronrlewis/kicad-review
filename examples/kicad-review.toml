@@ -34,7 +34,7 @@ enabled = false
 [release]
 review = false
 
-# Optional stock and price by MPN. Requires parts.enabled and caller secrets: inherit.
+# Optional stock and price by MPN. Requires parts.enabled and the caller passing DIGIKEY_CLIENT_ID and DIGIKEY_CLIENT_SECRET.
 # Set DIGIKEY_CLIENT_ID and DIGIKEY_CLIENT_SECRET as repository Actions secrets.
 # Keep it off in public repositories; DigiKey data is for permitted internal use only.
 # [digikey]
