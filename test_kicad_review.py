@@ -3135,7 +3135,7 @@ assert [p["parts"]["supplier"]["looked_up"] for p in project_counts] == [1, 1], 
 
 # Setup docs cover opt-in, credentials, terms and the conservative manufacturer rule.
 readme = pathlib.Path(kicad_review.__file__).with_name("README.md").read_text()
-for wording in ("### DigiKey stock and price (optional)", "DIGIKEY_CLIENT_ID", "DIGIKEY_CLIENT_SECRET", "secrets: inherit", "MPNs only",
+for wording in ("### DigiKey stock and price (optional)", "DIGIKEY_CLIENT_ID", "DIGIKEY_CLIENT_SECRET", "Avoid `secrets: inherit`", "MPNs only",
                 "120 per minute", "1000 per day", "case-insensitive prefix", "Keep it off in public repositories", "only in the run's report",
                 "digikey.enabled", "digikey.site", "digikey.currency", "digikey.max_lookups"):
     assert wording in readme, wording

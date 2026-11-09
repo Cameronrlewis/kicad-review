@@ -186,7 +186,7 @@ The Parts tab has two views, **Problems** (above) and **BOM**. The BOM view read
 
 1. Sign in at [developer.digikey.com](https://developer.digikey.com/). Create or join an Organization, then open **Organizations → Operations → Production Apps → Create Production App**. If the form requires a callback URL, use `https://localhost`; this client-credentials flow never uses it.
 2. Subscribe the app to **Product Information V4**. Copy its Client ID and Client Secret into repository Actions secrets named `DIGIKEY_CLIENT_ID` and `DIGIKEY_CLIENT_SECRET`. Each repository uses its own credentials; never commit or paste them into a workflow's `run:` script.
-3. Add `secrets: inherit` to the caller's `review:` job, as in [`examples/kicad-review.yml`](examples/kicad-review.yml). Existing callers without secrets remain supported. Credentials are passed as environment variables only to the separate lookup step, not to the render, report or comment steps.
+3. Pass the two secrets by name in the caller's `review:` job (`secrets:` with `DIGIKEY_CLIENT_ID` and `DIGIKEY_CLIENT_SECRET`), as in [`examples/kicad-review.yml`](examples/kicad-review.yml). Avoid `secrets: inherit`: it hands every secret in your repository to the shared workflow. Existing callers without secrets remain supported. Credentials are passed as environment variables only to the separate lookup step, not to the render, report or comment steps.
 4. Enable both features in the repository-root `kicad-review.toml`:
 
    ```toml
