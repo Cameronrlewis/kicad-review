@@ -143,7 +143,8 @@ const restorePart = (part, propertyDefaults) => {
   }
   if (part.properties && typeof part.properties === 'object') {
     out.properties = { ...propertyDefaults, ...part.properties };
-    for (const [k, f] of Object.entries(echoed && typeof echoed === 'object' ? echoed : {})) if (IDENTITY_ECHO.includes(f)) out.properties[k] = part[f];
+    // defineProperty keeps a property literally named __proto__ as an own key instead of calling the prototype setter.
+    for (const [k, f] of Object.entries(echoed && typeof echoed === 'object' ? echoed : {})) if (IDENTITY_ECHO.includes(f)) Object.defineProperty(out.properties, k, { value: part[f], writable: true, enumerable: true, configurable: true });
   }
   return out;
 };

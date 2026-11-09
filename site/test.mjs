@@ -7715,6 +7715,14 @@ test('MCP restores a producer compact context to its full shape before any tool 
   const deps = { gh: async () => new Response(JSON.stringify(artifactsFixture())), loadContext: async () => ({ doc: { ...structuredClone(compact), repo: 'Cameronrlewis/repo', head: SHA }, key: 'd' }) };
   assert.deepEqual((await selectContext(mcpAccessFixture(), SHA, deps)).doc.projects, expanded.projects);
 });
+
+test('expandContext keeps an echoed property literally named __proto__ as an own property', () => {
+  const doc = JSON.parse('{"compact":1,"version":1,"kind":"kicad-review-design-context","projects":[{"dir":"P","revisions":{"head":{"parts":[{"ref":"R1","value":"1k","properties":{},"properties_echoed":{"__proto__":"value"}}],"nets":[]},"base":null}}]}');
+  const props = expandContext(doc).projects[0].revisions.head.parts[0].properties;
+  assert.ok(Object.hasOwn(props, '__proto__'), 'own key, not the prototype setter');
+  assert.equal(Object.getOwnPropertyDescriptor(props, '__proto__').value, '1k');
+  assert.equal(Object.getPrototypeOf(props), Object.prototype);
+});
 test('MCP producer truncated fixture reports unknown total and incomplete search fields', () => {
   const fixturePath = new URL('./fixtures/producer-truncated-context.json', import.meta.url);
   const doc = JSON.parse(readFileSync(fixturePath, 'utf8'));
