@@ -7700,6 +7700,16 @@ test('MCP find_parts searchFieldsComplete reflects properties, truncation, and i
   res = designParts('find_parts', { query: '10k' }, loaded, 'https://site.example');
   assert.equal(res.searchFieldsComplete, false);
 });
+import { expandContext } from './mcp-data.js';
+test('MCP restores a producer compact context to its full shape before any tool reads it', async () => {
+  const { compact, expanded } = JSON.parse(readFileSync(new URL('./fixtures/producer-compact-context.json', import.meta.url), 'utf8'));
+  assert.equal(compact.compact, 1);
+  assert.deepEqual(expandContext(compact), expanded);
+  const plain = mcpDoc();
+  assert.equal(expandContext(plain), plain, 'a full context is used as is');
+  const deps = { gh: async () => new Response(JSON.stringify(artifactsFixture())), loadContext: async () => ({ doc: { ...structuredClone(compact), repo: 'Cameronrlewis/repo', head: SHA }, key: 'd' }) };
+  assert.deepEqual((await selectContext(mcpAccessFixture(), SHA, deps)).doc.projects, expanded.projects);
+});
 test('MCP producer truncated fixture reports unknown total and incomplete search fields', () => {
   const fixturePath = new URL('./fixtures/producer-truncated-context.json', import.meta.url);
   const doc = JSON.parse(readFileSync(fixturePath, 'utf8'));

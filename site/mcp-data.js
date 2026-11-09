@@ -113,8 +113,9 @@ export async function selectContext(access, sha, deps, accept = async () => true
         || (p.revisions.head === null && p.status !== 'removed'))) continue;
       if (new TextEncoder().encode(JSON.stringify(doc)).length > 200000)
         throw new McpError('CONTEXT_TOO_LARGE', 'MCP context exceeds 200,000 bytes; Ask still accepts legacy contexts up to 400,000 bytes');
-      if (!await accept(doc, artifact)) continue;
-      return { doc, artifact, reportId: String(artifact.id) };
+      const full = expandContext(doc);
+      if (!await accept(full, artifact)) continue;
+      return { doc: full, artifact, reportId: String(artifact.id) };
     }
     if (rows.length < 100 || number * 100 >= Number(body?.total_count)) { exhausted = true; break; }
   }
@@ -123,6 +124,49 @@ export async function selectContext(access, sha, deps, accept = async () => true
   error.canRender = !!access.repository.permissions?.push;
   if (error.canRender) error.renderPath = '/r/' + access.repository.full_name.split('/').map(encodeURIComponent).join('/') + '/commits';
   throw error;
+}
+
+// A compact context (compact: 1, written by kicad_review.py compact_context) restored to the full shape the tools read:
+// list and property defaults, base items marked same_as_head, and BOM fields and properties that repeat the part's own fields.
+// parts[].neighbors is not restored; parts[].nets carries the same connectivity. Any other context is returned unchanged.
+const IDENTITY_ECHO = ['value', 'footprint', 'ref', 'datasheet', 'mpn', 'lcsc'];
+const restorePart = (part, propertyDefaults) => {
+  const { properties_echoed: echoed, ...out } = part;
+  if (part.bom && typeof part.bom === 'object') {
+    const bom = { ...part.bom };
+    for (const k of IDENTITY_ECHO) if (!Object.hasOwn(bom, k) && Object.hasOwn(part, k)) bom[k] = part[k];
+    // Same canonical key as kicad_review.py bom_key.
+    if (!Object.hasOwn(bom, 'key')) bom.key = JSON.stringify([bom.value, bom.footprint, bom.lcsc || '', bom.mpn || '', bom.category, bom.manufacturer, bom.datasheet]);
+    out.bom = bom;
+  }
+  if (part.properties && typeof part.properties === 'object') {
+    out.properties = { ...propertyDefaults, ...part.properties };
+    for (const [k, f] of Object.entries(echoed && typeof echoed === 'object' ? echoed : {})) if (IDENTITY_ECHO.includes(f)) out.properties[k] = part[f];
+  }
+  return out;
+};
+const expandRevision = (rev, head) => {
+  if (!rev || typeof rev !== 'object') return rev;
+  const { parts_defaults: partDefaults, nets_defaults: netDefaults, properties_defaults: propertyDefaults, ...out } = rev;
+  for (const [key, ident, defaults] of [['parts', 'ref', partDefaults], ['nets', 'id', netDefaults]]) {
+    if (!Array.isArray(rev[key])) continue;
+    const same = new Map((head?.[key] || []).map((x) => [x?.[ident], x]));
+    out[key] = rev[key].map((x) => {
+      if (x?.same_as_head) return same.get(x[ident]) ?? x;
+      const item = { ...defaults, ...x };
+      return key === 'parts' ? restorePart(item, propertyDefaults) : item;
+    });
+  }
+  return out;
+};
+export function expandContext(doc) {
+  if (doc?.compact !== 1 || !Array.isArray(doc.projects)) return doc;
+  const { compact, ...rest } = doc;
+  return { ...rest, projects: doc.projects.map((p) => {
+    if (!p?.revisions || typeof p.revisions !== 'object') return p;
+    const head = expandRevision(p.revisions.head);
+    return { ...p, revisions: { ...p.revisions, head, ...(Object.hasOwn(p.revisions, 'base') ? { base: expandRevision(p.revisions.base, head) } : {}) } };
+  }) };
 }
 
 // Head-only selection for design-fact tools. Omitted project is valid only for a one-project context unless allProjects.

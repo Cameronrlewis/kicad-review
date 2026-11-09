@@ -10225,6 +10225,97 @@ with open(fixture_path, "r", encoding="utf-8") as fh:
 assert committed_doc == wdoc, f"{fixture_path} drift; run REGENERATE_FIXTURES=1 python3 test_kicad_review.py"
 clean_part = list(kr.context_parts({"/uuid-3": objs["/uuid-3"]}).values())
 assert kr.fit_context(lambda nc, pc: {"version": 1, "projects": [{"revisions": {"head": {"parts": clean_part, "nets": []}}}]})["truncated"] is False
+# A realistic design fits: about 300 parts and 200 nets per revision across two projects, the base nearly equal to the head.
+# The full form is over the ceiling; the compact form keeps every ref, value, footprint, uuid, net and part-to-net membership.
+def synthetic_side(t, tag, changed):
+    objs_, comps, nets_ = {}, {}, {f"N{k}": [] for k in range(99)}
+    nets_["GND"] = []
+    for i in range(150):
+        kind = "U" if i % 10 == 0 else "R" if i % 2 else "C"
+        ref, sheet = f"{kind}{i}", "/" if i < 75 else "/sub/"
+        value = {"U": "MCU-QFN32", "R": "10k", "C": "100nF"}[kind] + ("-B" if i in changed else "")
+        fp = {"U": "Package_DFN_QFN:QFN-32-1EP_5x5mm_P0.5mm", "R": "Resistor_SMD:R_0402_1005Metric", "C": "Capacitor_SMD:C_0402_1005Metric"}[kind]
+        objs_[f"{sheet}{i:08d}-0000-4000-8000-{tag * 12}"] = {"kind": "symbol", "ref": ref, "where": {"sheet": sheet}, "pos": [i, i, 0], "props": {
+            "reference": ref, "Value": value, "Footprint": fp, "Datasheet": f"https://example.com/datasheets/{kind}-{value}.pdf",
+            "Description": f"Synthetic {value} part in {fp.split(':')[1]}", "symbol": f"Device:{kind}", "position": f"({i}.00, {i}.00)",
+            "unit": "1", "mirror": None, "dnp": "no", "in_bom": "yes", "on_board": "yes", "MPN": f"MPN-{value}", "LCSC": f"C{1000 + i}"}}
+        comps[ref] = (value, fp, f"Device:{kind}")
+        for pin in range(1, 33 if kind == "U" else 3):
+            nets_["GND" if kind != "U" and pin == 2 else f"N{(i + pin) % 99}"].append((ref, str(pin), "", "passive"))
+    os.makedirs(t, exist_ok=True)
+    write(t, {"netlist.net": netlist(comps, nets_)})
+    return objs_
+with tempfile.TemporaryDirectory() as t:
+    sides_ = {(tag, side): synthetic_side(f"{t}/{tag}/{side}", tag, changed) for tag in "AB" for side, changed in (("base", {3, 4}), ("head", {4, 7}))}
+    sheets_ = [{"path": "/", "name": "Root", "file": "P.kicad_sch", "parent": None, "page": "1"}, {"path": "/sub/", "name": "Sub", "file": "sub.kicad_sch", "parent": "/", "page": "2"}]
+    def synthetic(net_cap, pin_cap):
+        projects = []
+        for tag in "AB":
+            revisions = {}
+            for side in ("base", "head"):
+                rev = kr.side_context(f"{t}/{tag}/{side}", sides_[tag, side], net_cap, pin_cap)
+                rev.update(revision=("a" if side == "base" else "b") * 40, sheets=sheets_, board=None)
+                kr.enrich_context(rev, sides_[tag, side], sheets_)
+                revisions[side] = rev
+            projects.append({"name": tag, "dir": tag, "status": "modified", "revisions": revisions, "changes": kr.context_changes([]),
+                             "checks": kr.complete_context_checks([], check_settings, True, True)})
+        return {"version": 1, "kind": "kicad-review-design-context", "repo": "o/r", "base": "a" * 40, "head": "b" * 40, "reason": "push", "projects": projects}
+    raw = synthetic(*kr.CONTEXT_STAGES[0])
+    for side in ("base", "head"):
+        assert sum(len(p["revisions"][side]["parts"]) for p in raw["projects"]) == 300 and sum(len(p["revisions"][side]["nets"]) for p in raw["projects"]) == 200
+    assert kr.context_bytes(raw) > 2 * kr.CONTEXT_LIMIT, "the full form alone would disable Ask"
+    fitted = kr.fit_context(synthetic)
+    assert "disabled_reason" not in fitted and fitted["compact"] == 1 and kr.context_bytes(fitted) <= kr.CONTEXT_LIMIT, kr.context_bytes(fitted)
+    def expand(doc):  # mirrors site/mcp-data.js expandContext
+        doc = copy.deepcopy(doc); del doc["compact"]
+        for p in doc["projects"]:
+            revs = p["revisions"]
+            for side in ("head", "base"):
+                rev, heads = revs[side], {key: {x[i]: x for x in revs["head"][key]} for key, i in (("parts", "ref"), ("nets", "id"))}
+                pd, nd, prd = (rev.pop(k, {}) for k in ("parts_defaults", "nets_defaults", "properties_defaults"))
+                rev["nets"] = [heads["nets"][x["id"]] if x.get("same_as_head") else {**nd, **x} for x in rev["nets"]]
+                parts = []
+                for x in rev["parts"]:
+                    if x.get("same_as_head"):
+                        parts.append(heads["parts"][x["ref"]]); continue
+                    x = {**pd, **x}; echoed = x.pop("properties_echoed")
+                    x["properties"] = {**prd, **x["properties"], **{k: x[f] for k, f in echoed.items()}}
+                    x["bom"] = {**{k: x[k] for k in kr.IDENTITY_ECHO if k in x}, **x["bom"]}
+                    x["bom"].setdefault("key", kr.bom_key(x["bom"]))
+                    parts.append(x)
+                rev["parts"] = parts
+        return doc
+    no_neighbors = copy.deepcopy(raw)
+    for p in no_neighbors["projects"]:
+        for rev in p["revisions"].values():
+            for part in rev["parts"]: del part["neighbors"]
+    compact_raw = kr.compact_context(raw)
+    assert expand(compact_raw) == no_neighbors, "compaction is lossless apart from neighbors, which parts[].nets repeats"
+    for p in compact_raw["projects"]:
+        assert [x["ref"] for x in p["revisions"]["base"]["parts"] if not x.get("same_as_head")] == ["R3", "R7"], "only parts that differ from the head are sent twice"
+        assert all(x.get("same_as_head") for x in p["revisions"]["base"]["nets"]), "unchanged nets are sent once"
+        assert all({"ref", "value", "footprint", "uuid", "nets"} <= set(x) for x in p["revisions"]["head"]["parts"]), "identity and connectivity stay on every part"
+# The site's expandContext must turn the producer's compact form back into the full one (without neighbors).
+compact_base = {**objs, "/uuid-3": {**objs["/uuid-3"], "props": {**objs["/uuid-3"]["props"], "Value": "22k"}}}
+with tempfile.TemporaryDirectory() as t:
+    write(t, {"netlist.net": nt})
+    revs = {}
+    for side, side_objs in (("base", compact_base), ("head", objs)):
+        revs[side] = kr.side_context(t, side_objs, net_cap=15, pin_cap=2)
+        kr.enrich_context(revs[side], side_objs, [{"path": "/pwr/", "name": "Power", "page": "2"}, {"path": "/", "name": "Root", "page": "1"}])
+    full = {"version": 1, "kind": "kicad-review-design-context", "repo": "o/r", "base": "a" * 40, "head": "b" * 40, "reason": "push", "truncated": True,
+            "projects": [{"name": "P", "dir": "P", "status": "modified", "revisions": revs}]}
+    compact = kr.compact_context(full)
+    assert compact["projects"][0]["revisions"]["base"]["parts"][1] == {"ref": "U1", "same_as_head": True} and "parts_defaults" in compact["projects"][0]["revisions"]["head"]
+    expanded = copy.deepcopy(full)
+    for rev in expanded["projects"][0]["revisions"].values():
+        for part in rev["parts"]: del part["neighbors"]
+compact_path = pathlib.Path(__file__).parent / "site" / "fixtures" / "producer-compact-context.json"
+if os.environ.get("REGENERATE_FIXTURES") == "1":
+    with open(compact_path, "w", encoding="utf-8") as fh:
+        json.dump({"compact": compact, "expanded": expanded}, fh, separators=(",", ":"), ensure_ascii=False)
+with open(compact_path, "r", encoding="utf-8") as fh:
+    assert json.load(fh) == {"compact": compact, "expanded": expanded}, f"{compact_path} drift; run REGENERATE_FIXTURES=1 python3 test_kicad_review.py"
 # Wiring status decides net-change availability; a missing summary is unavailable, while zero complete rows are available.
 assert kr.net_change_support(None) == {"available": False, "complete": False}
 assert kr.net_change_support({}) == {"available": False, "complete": False}
