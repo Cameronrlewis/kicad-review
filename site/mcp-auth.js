@@ -4,6 +4,13 @@ import { readBounded } from './mcp-data.js';
 // Browser consent for MCP OAuth: account-bound, same-origin, nonce-sealed pending state.
 const json = (body, status = 200, headers = {}) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'private, no-store', ...headers } });
 const cookieValue = (request, name) => String(request.headers.get('Cookie') || '').split(/;\s*/).find(v => v.startsWith(name + '='))?.slice(name.length + 1) || '';
+// The hand-back to the client is a page, not a 302: CSP form-action also governs redirects after a form POST,
+// and loopback callbacks such as http://[::1]:<port> cannot be listed there. Meta refresh and links are navigations it does not cover.
+const handBack = (location, head) => {
+  head.set('Content-Type', 'text/html; charset=utf-8');
+  const e = escapeHtml(location);
+  return new Response(`<!doctype html><meta name="viewport" content="width=device-width"><meta http-equiv="refresh" content="0;url=${e}"><title>Returning to your AI assistant</title><main><h1>Returning to your AI assistant</h1><p><a href="${e}">Continue</a> if nothing happens.</p></main>`, { status: 200, headers: head });
+};
 const pendingCookie = (value, secure) => `mc=${value}; Path=/authorize; HttpOnly; SameSite=Lax; Max-Age=${value ? 600 : 0}${secure ? '; Secure' : ''}`;
 
 export async function consentRoute(request, env, { session, open, seal }) {
@@ -42,7 +49,7 @@ export async function consentRoute(request, env, { session, open, seal }) {
     const back = new URL(saved.auth.redirectUri); back.searchParams.set('error', 'access_denied');
     if (saved.auth.state) back.searchParams.set('state', saved.auth.state);
     if (saved.auth.issuer) back.searchParams.set('iss', saved.auth.issuer);
-    head.set('Location', back.href); return new Response(null, { status: 302, headers: head });
+    return handBack(back.href, head);
   }
   const currentCookie = active.setCookie?.split(';', 1)[0].slice(2) || cookieValue(request, 's');
   const site = await open(currentCookie, env);
@@ -50,7 +57,7 @@ export async function consentRoute(request, env, { session, open, seal }) {
   const credential = await seal({ t: site.t, u: site.u, e: Math.min(site.e, Date.now() + 3600000) }, env);
   const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({ request: saved.auth, userId: active.login,
     metadata: { label: active.login + ' read-only design access' }, scope: ['read:design'], props: { credential } });
-  head.set('Location', redirectTo); return new Response(null, { status: 302, headers: head });
+  return handBack(redirectTo, head);
 }
 
 // OAuth policy around the provider: no refresh grants, no refresh tokens, RFC 9728 discovery on both paths.
