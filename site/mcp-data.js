@@ -127,16 +127,18 @@ export async function selectContext(access, sha, deps, accept = async () => true
 }
 
 // A compact context (compact: 1, written by kicad_review.py compact_context) restored to the full shape the tools read:
-// list and property defaults, base items marked same_as_head, and BOM fields and properties that repeat the part's own fields.
+// list and property defaults, base items marked same_as_head, and the BOM fields and properties that bom_echoed and
+// properties_echoed name. Defaults hold only fields every listed item had, so nothing is added to an item that lacked it.
 // parts[].neighbors is not restored; parts[].nets carries the same connectivity. Any other context is returned unchanged.
 const IDENTITY_ECHO = ['value', 'footprint', 'ref', 'datasheet', 'mpn', 'lcsc'];
 const restorePart = (part, propertyDefaults) => {
-  const { properties_echoed: echoed, ...out } = part;
-  if (part.bom && typeof part.bom === 'object') {
+  const { properties_echoed: echoed, bom_echoed: bomEchoed, ...out } = part;
+  // Only the BOM fields bom_echoed names are restored: from the part's identity fields, and key last from the restored record.
+  if (part.bom && typeof part.bom === 'object' && Array.isArray(bomEchoed)) {
     const bom = { ...part.bom };
-    for (const k of IDENTITY_ECHO) if (!Object.hasOwn(bom, k) && Object.hasOwn(part, k)) bom[k] = part[k];
+    for (const k of bomEchoed) if (IDENTITY_ECHO.includes(k) && Object.hasOwn(part, k)) bom[k] = part[k];
     // Same canonical key as kicad_review.py bom_key.
-    if (!Object.hasOwn(bom, 'key')) bom.key = JSON.stringify([bom.value, bom.footprint, bom.lcsc || '', bom.mpn || '', bom.category, bom.manufacturer, bom.datasheet]);
+    if (bomEchoed.includes('key')) bom.key = JSON.stringify([bom.value, bom.footprint, bom.lcsc || '', bom.mpn || '', bom.category, bom.manufacturer, bom.datasheet]);
     out.bom = bom;
   }
   if (part.properties && typeof part.properties === 'object') {

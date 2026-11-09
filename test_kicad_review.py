@@ -10271,19 +10271,24 @@ with tempfile.TemporaryDirectory() as t:
         for p in doc["projects"]:
             revs = p["revisions"]
             for side in ("head", "base"):
-                rev, heads = revs[side], {key: {x[i]: x for x in revs["head"][key]} for key, i in (("parts", "ref"), ("nets", "id"))}
+                rev = revs.get(side)
+                if not rev: continue
+                heads = {key: {x[i]: x for x in (revs.get("head") or {}).get(key, [])} for key, i in (("parts", "ref"), ("nets", "id"))}
                 pd, nd, prd = (rev.pop(k, {}) for k in ("parts_defaults", "nets_defaults", "properties_defaults"))
-                rev["nets"] = [heads["nets"][x["id"]] if x.get("same_as_head") else {**nd, **x} for x in rev["nets"]]
+                if "nets" in rev:
+                    rev["nets"] = [heads["nets"][x["id"]] if x.get("same_as_head") else {**nd, **x} for x in rev["nets"]]
                 parts = []
-                for x in rev["parts"]:
+                for x in rev.get("parts", []):
                     if x.get("same_as_head"):
                         parts.append(heads["parts"][x["ref"]]); continue
-                    x = {**pd, **x}; echoed = x.pop("properties_echoed")
-                    x["properties"] = {**prd, **x["properties"], **{k: x[f] for k, f in echoed.items()}}
-                    x["bom"] = {**{k: x[k] for k in kr.IDENTITY_ECHO if k in x}, **x["bom"]}
-                    x["bom"].setdefault("key", kr.bom_key(x["bom"]))
+                    x = {**pd, **x}; echoed = x.pop("properties_echoed", {}); bom_echoed = x.pop("bom_echoed", None)
+                    if isinstance(x.get("properties"), dict):
+                        x["properties"] = {**prd, **x["properties"], **{k: x[f] for k, f in echoed.items()}}
+                    if isinstance(x.get("bom"), dict) and bom_echoed is not None:
+                        x["bom"] = {**x["bom"], **{k: x[k] for k in bom_echoed if k != "key"}}
+                        if "key" in bom_echoed: x["bom"]["key"] = kr.bom_key(x["bom"])
                     parts.append(x)
-                rev["parts"] = parts
+                if "parts" in rev: rev["parts"] = parts
         return doc
     no_neighbors = copy.deepcopy(raw)
     for p in no_neighbors["projects"]:
@@ -10303,13 +10308,26 @@ with tempfile.TemporaryDirectory() as t:
     for side, side_objs in (("base", compact_base), ("head", objs)):
         revs[side] = kr.side_context(t, side_objs, net_cap=15, pin_cap=2)
         kr.enrich_context(revs[side], side_objs, [{"path": "/pwr/", "name": "Power", "page": "2"}, {"path": "/", "name": "Root", "page": "1"}])
+    # Exactness edge cases: a BOM record with only `included`, a key that is not bom_key of its record, a part lacking a
+    # field the others share, and null values: expansion restores what was removed and never adds a field an item lacked.
+    edge_parts = [{"ref": "A1", "value": "1k", "bom": {"included": True}, "page_reason": None, "dnp": False},
+                  {"ref": "A2", "value": "2k", "bom": {"included": True, "value": "2k", "key": "not-a-bom-key"}, "page_reason": None, "dnp": False},
+                  {"ref": "A3", "value": "3k", "bom": {"included": False, "ref": "A3", "value": "3k"}, "page_reason": None}]
+    edge_parts[2]["bom"]["key"] = kr.bom_key(edge_parts[2]["bom"])
     full = {"version": 1, "kind": "kicad-review-design-context", "repo": "o/r", "base": "a" * 40, "head": "b" * 40, "reason": "push", "truncated": True,
-            "projects": [{"name": "P", "dir": "P", "status": "modified", "revisions": revs}]}
+            "projects": [{"name": "P", "dir": "P", "status": "modified", "revisions": revs},
+                         {"name": "E", "dir": "E", "status": "added", "revisions": {"base": None, "head": {
+                             "parts": edge_parts, "nets": [{"id": "N1", "pages": None}, {"id": "N2", "pages": None}]}}}]}
     compact = kr.compact_context(full)
     assert compact["projects"][0]["revisions"]["base"]["parts"][1] == {"ref": "U1", "same_as_head": True} and "parts_defaults" in compact["projects"][0]["revisions"]["head"]
+    edge = compact["projects"][1]["revisions"]["head"]
+    assert edge["parts_defaults"] == {"page_reason": None} and edge["nets_defaults"] == {"pages": None}, "a field one part lacks is never a default"
+    assert [(x["bom"], x["bom_echoed"]) for x in edge["parts"]] == [({"included": True}, []), ({"included": True, "key": "not-a-bom-key"}, ["value"]),
+                                                                    ({"included": False}, ["ref", "value", "key"])]
     expanded = copy.deepcopy(full)
     for rev in expanded["projects"][0]["revisions"].values():
         for part in rev["parts"]: del part["neighbors"]
+    assert expand(compact) == expanded, "the compact fixture expands to the full context"
 compact_path = pathlib.Path(__file__).parent / "site" / "fixtures" / "producer-compact-context.json"
 if os.environ.get("REGENERATE_FIXTURES") == "1":
     with open(compact_path, "w", encoding="utf-8") as fh:

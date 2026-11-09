@@ -7705,6 +7705,11 @@ test('MCP restores a producer compact context to its full shape before any tool 
   const { compact, expanded } = JSON.parse(readFileSync(new URL('./fixtures/producer-compact-context.json', import.meta.url), 'utf8'));
   assert.equal(compact.compact, 1);
   assert.deepEqual(expandContext(compact), expanded);
+  // Only fields the producer names as removed come back: no invented BOM fields or key, no default on a part that lacked it, nulls stay null.
+  const edge = expandContext(compact).projects.find(p => p.dir === 'E').revisions.head;
+  assert.deepEqual(edge.parts.map(x => x.bom), [{ included: true }, { included: true, value: '2k', key: 'not-a-bom-key' }, expanded.projects[1].revisions.head.parts[2].bom]);
+  assert.equal(Object.hasOwn(edge.parts[2], 'dnp'), false);
+  assert.deepEqual(edge.parts.map(x => x.page_reason), [null, null, null]);
   const plain = mcpDoc();
   assert.equal(expandContext(plain), plain, 'a full context is used as is');
   const deps = { gh: async () => new Response(JSON.stringify(artifactsFixture())), loadContext: async () => ({ doc: { ...structuredClone(compact), repo: 'Cameronrlewis/repo', head: SHA }, key: 'd' }) };

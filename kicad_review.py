@@ -5770,7 +5770,7 @@ IDENTITY_ECHO = ("value", "footprint", "ref", "datasheet", "mpn", "lcsc")  # par
 COMPACT_DEFAULTS = {  # per-item fields that most parts or nets share; identity, connectivity and cut counts always stay on the item
     "parts": ("source", "schematic_available", "schematic_reason", "connectivity_available", "connectivity_reason", "units", "dnp",
               "sheet", "sheet_name", "page", "page_reason", "properties_truncated", "properties_omitted", "properties_clipped",
-              "incomplete_fields", "properties_echoed"),
+              "incomplete_fields", "properties_echoed", "bom_echoed"),
     "nets": ("labels_unavailable", "hierarchical_labels", "global_labels", "local_labels", "sheet_paths", "pages")}
 
 
@@ -5790,12 +5790,15 @@ def hoist(items, fields):
 
 
 def compact_part(part):
-    """The part without neighbors (any part sharing a net in its nets), without BOM fields equal to its own, and without
-    properties equal to one of its own identity fields; properties_echoed maps each such property to that field."""
+    """The part without neighbors (any part sharing a net in its nets), without BOM fields equal to its own identity fields
+    or a BOM key equal to bom_key of the record (bom_echoed names exactly those), and without properties equal to one of
+    its own identity fields (properties_echoed maps each such property to that field)."""
     out = {k: v for k, v in part.items() if k != "neighbors"}
     b = part.get("bom")
     if isinstance(b, dict):
-        out["bom"] = {k: v for k, v in b.items() if not (k in IDENTITY_ECHO and k in part and same(v, part[k])) and not (k == "key" and v == bom_key(b))}
+        echoed = [k for k, v in b.items() if (k in IDENTITY_ECHO and k in part and same(v, part[k])) or (k == "key" and v == bom_key(b))]
+        out["bom"] = {k: v for k, v in b.items() if k not in echoed}
+        out["bom_echoed"] = echoed
     props = part.get("properties")
     if isinstance(props, dict):
         echoed = {}
