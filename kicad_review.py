@@ -3614,7 +3614,7 @@ def export_downloads(p, src, out, settings, head, *, policy=None, purpose="compa
         except (OSError, UnicodeError):
             revision = None
         if revision != head:
-            raise ValueError("snapshot GLB revision must match the requested full SHA (Task 9A gate)")
+            raise ValueError("snapshot GLB revision must match the requested full SHA before downloads are exported")
     shutil.rmtree(dl, ignore_errors=True)
     os.makedirs(dl, exist_ok=True)
     stem = f"{safe_name(name)}-{head[:7]}"
@@ -4137,8 +4137,13 @@ def bom_identity(obj):
     return {"included": reason is None, "excludedReason": reason, "ref": ref, "value": value, "footprint": footprint,
             "lcsc": lcsc, "mpn": mpn, "manufacturer": manufacturer,
             "datasheet": datasheet, "category": category,
-            # ensure_ascii=False, compact separators. 10 uses this key as received from 09 and never recomputes it.
-            "key": json.dumps([value, footprint, lcsc or "", mpn or "", category, manufacturer, datasheet], ensure_ascii=False, separators=(",", ":"))}
+            # This canonical compact key is shared unchanged by context and BOM consumers.
+            "key": bom_key({"value": value, "footprint": footprint, "lcsc": lcsc, "mpn": mpn, "category": category, "manufacturer": manufacturer, "datasheet": datasheet})}
+
+
+def bom_key(b):
+    return json.dumps([b.get("value"), b.get("footprint"), b.get("lcsc") or "", b.get("mpn") or "", b.get("category"), b.get("manufacturer"), b.get("datasheet")],
+                      ensure_ascii=False, separators=(",", ":"))
 
 
 def parts_lines(objs):
@@ -5761,13 +5766,97 @@ def marked(node):
     return False
 
 
+IDENTITY_ECHO = ("value", "footprint", "ref", "datasheet", "mpn", "lcsc")  # part fields a BOM field or a property often repeats
+COMPACT_DEFAULTS = {  # per-item fields that most parts or nets share; identity, connectivity and cut counts always stay on the item
+    "parts": ("source", "schematic_available", "schematic_reason", "connectivity_available", "connectivity_reason", "units", "dnp",
+              "sheet", "sheet_name", "page", "page_reason", "properties_truncated", "properties_omitted", "properties_clipped",
+              "incomplete_fields", "properties_echoed", "bom_echoed"),
+    "nets": ("labels_unavailable", "hierarchical_labels", "global_labels", "local_labels", "sheet_paths", "pages")}
+
+
+def same(a, b):
+    return json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
+
+
+def hoist(items, fields):
+    """(defaults, items): each of `fields` that every item has, and whose most common value at least two items share, is
+    stated once in defaults and kept on an item only where it differs."""
+    defaults = {}
+    for f in fields:
+        if items and all(f in x for x in items):
+            value, n = Counter(json.dumps(x[f], sort_keys=True) for x in items).most_common(1)[0]
+            if n > 1: defaults[f] = json.loads(value)
+    return defaults, [{k: v for k, v in x.items() if k not in defaults or not same(v, defaults[k])} for x in items]
+
+
+def compact_part(part):
+    """The part without neighbors (any part sharing a net in its nets), without BOM fields equal to its own identity fields
+    or a BOM key equal to bom_key of the record (bom_echoed names exactly those), and without properties equal to one of
+    its own identity fields (properties_echoed maps each such property to that field)."""
+    out = {k: v for k, v in part.items() if k != "neighbors"}
+    b = part.get("bom")
+    if isinstance(b, dict):
+        echoed = [k for k, v in b.items() if (k in IDENTITY_ECHO and k in part and same(v, part[k])) or (k == "key" and v == bom_key(b))]
+        out["bom"] = {k: v for k, v in b.items() if k not in echoed}
+        out["bom_echoed"] = echoed
+    props = part.get("properties")
+    if isinstance(props, dict):
+        echoed = {}
+        for k, v in props.items():
+            f = next((f for f in IDENTITY_ECHO if isinstance(part.get(f), str) and part[f] and v == part[f]), None)
+            if f: echoed[k] = f
+        out["properties"] = {k: v for k, v in props.items() if k not in echoed}
+        out["properties_echoed"] = echoed
+    return out
+
+
+def compact_context(doc):
+    """The same context in fewer bytes, marked compact: 1; site/mcp-data.js expandContext restores the full shape. Per revision:
+    a base part or net equal to the head one with the same ref or id becomes {ref or id, same_as_head: true}; other parts are
+    compact_part; each COMPACT_DEFAULTS field moves to parts_defaults or nets_defaults, and each property every part has to
+    properties_defaults, with its most common value, staying on an item only where it differs. A document with no part or
+    net lists is returned unchanged."""
+    projects, changed = [], False
+    for p in doc.get("projects", []):
+        raw = p.get("revisions") or {}
+        revs = dict(raw)
+        for side, rev in raw.items():
+            if not isinstance(rev, dict): continue
+            rev = dict(rev)
+            for key, ident in (("parts", "ref"), ("nets", "id")):
+                items = rev.get(key)
+                if not isinstance(items, list): continue
+                changed = True
+                if side == "base":
+                    head = {x.get(ident): x for x in (raw.get("head") or {}).get(key) or []}
+                    items = [{ident: x[ident], "same_as_head": True} if x.get(ident) is not None and x[ident] in head and same(x, head[x[ident]]) else x for x in items]
+                full = [x for x in items if not x.get("same_as_head")]
+                if key == "parts":
+                    full = [compact_part(x) for x in full]
+                    if full and all(isinstance(x.get("properties"), dict) for x in full):
+                        common = [k for k in full[0]["properties"] if all(k in x["properties"] for x in full)]
+                        props_defaults, props = hoist([x["properties"] for x in full], common)
+                        full = [{**x, "properties": pr} for x, pr in zip(full, props)]
+                        if props_defaults: rev["properties_defaults"] = props_defaults
+                defaults, full = hoist(full, COMPACT_DEFAULTS[key])
+                if defaults: rev[f"{key}_defaults"] = defaults
+                rest = iter(full)
+                rev[key] = [x if x.get("same_as_head") else next(rest) for x in items]
+            revs[side] = rev
+        projects.append({**p, "revisions": revs} if raw else p)
+    return {**doc, "projects": projects, "compact": 1} if changed else doc
+
+
 def fit_context(build, limit=CONTEXT_LIMIT):
-    """Supported-size ceiling: complete non-pin collections must fit after the five pin stages. `truncated` is true after any stage cut, or when any producer mark is set (`marked`)."""
+    """Supported-size ceiling: the full context when it fits, else its lossless compact form (compact_context) through the
+    five pin stages; complete non-pin collections must fit. `truncated` is true after any stage cut, or when any producer
+    mark is set (`marked`)."""
     for stage, (net_cap, pin_cap) in enumerate(CONTEXT_STAGES):
         doc = build(net_cap, pin_cap)
-        doc["truncated"] = stage > 0 or marked(doc)
-        if context_bytes(doc) <= limit: return doc
-    # ponytail: no partial-project answers. Above 200,000 UTF-8 bytes after pin reduction, Ask is disabled for this run.
+        for candidate in ((doc, compact_context(doc)) if stage == 0 else (compact_context(doc),)):
+            candidate["truncated"] = stage > 0 or marked(candidate)
+            if context_bytes(candidate) <= limit: return candidate
+    # ponytail: no partial-project answers. Above 200,000 UTF-8 bytes after compaction and pin reduction, Ask is disabled for this run.
     totals = {"projects": len(doc.get("projects", [])), "parts": 0, "nets": 0, "changes": 0}
     for p in doc.get("projects", []):
         totals["changes"] += p.get("changes", {}).get("total", 0)
@@ -5775,7 +5864,7 @@ def fit_context(build, limit=CONTEXT_LIMIT):
             if rev:
                 for key in ("parts", "nets"): totals[key] += len(rev.get(key, []))
     disabled = {"version": 1, "kind": "kicad-review-design-context", "projects": [], "truncated": True,
-                "disabled_reason": "Design exceeds the 200,000-byte Ask ceiling after pin reduction. Select fewer projects in a new review; no model request was sent.",
+                "disabled_reason": "Design exceeds the 200,000-byte Ask ceiling after compaction and pin reduction. Select fewer projects in a new review; no model request was sent.",
                 "omitted": totals}
     if context_bytes(disabled) > limit: raise ValueError("context limit cannot hold disabled envelope")
     return disabled
@@ -6981,10 +7070,11 @@ def cmd_snapshot(args):
         emit(built="false")
         return
     blobs = {}
+    ask_on = bool(settings.get("ask", {}).get("enabled"))
+    builders = {} if ask_on else None
     waivers = load_waivers(env.get("WAIVERS_REF")) if settings["waivers"]["enabled"] else None
     selected = [p for p in det["projects"] if p["status"] != "removed"]  # every index (downloads, context links) follows this order
-    # 06 is Ask-independent: context remains None until 09 fills the optional hook.
-    projects = [build_project(p, blobs, settings, waivers, change_offset=0, single=True) for p in selected]
+    projects = [build_project(p, blobs, settings, waivers, change_offset=0, single=True, context=builders) for p in selected]
     shutil.rmtree("review/design-downloads", ignore_errors=True)  # never review/downloads: that is the comparison's bundle
     for i, (p, project) in enumerate(zip(selected, projects)):
         if settings.get("downloads", {}).get("enabled") or settings["checks"].get("release", "off") != "off":
@@ -6995,7 +7085,6 @@ def cmd_snapshot(args):
     assign_ids(projects)
     snapshot = det.get("snapshot") or {"ref": "", "sha": det["head"], "committedAt": "", "message": ""}
     report_settings = filtered_settings(settings)
-    report_settings.pop("ask", None)  # design-page report settings omit the optional Ask hook
     data = {"version": 1, "repo": env.get("GITHUB_REPOSITORY", ""), "links": review_links(env, {**det, "base": None}),
             "base": None, "head": det["head"], "reason": "design snapshot", "mode": "single",
             "snapshot": snapshot,
@@ -7006,6 +7095,13 @@ def cmd_snapshot(args):
     html = finalize_report(data, f"{DESIGN_DIR}/assets")  # shared finalizer: asset map, sidecars, offline HTML; no local JSON or inline_page here
     name = f"kicad-design-{det['head'][:7]}.html"
     os.makedirs(DESIGN_DIR, exist_ok=True)
+    if ask_on:
+        doc = fit_context(lambda net_cap, pin_cap: {"version": 1, "kind": "kicad-review-design-context",
+                                                      "repo": env.get("GITHUB_REPOSITORY", ""), "base": None,
+                                                      "head": det["head"], "reason": "design snapshot", "mode": "single",
+                                                      "projects": [b(net_cap, pin_cap) for b in builders.values()]})
+        with open(f"{DESIGN_DIR}/{name[:-5]}.context.json", "w", encoding="utf-8") as fh:
+            json.dump(doc, fh, separators=(",", ":"), ensure_ascii=False)
     for file in (name, "design-snapshot.html"):  # the second is the stable name a release carries
         with open(f"{DESIGN_DIR}/{file}", "w", encoding="utf-8") as fh:
             fh.write(html)
@@ -7028,10 +7124,13 @@ def cmd_snapshot(args):
         with open(f"{DESIGN_DIR}/thumbnail-plan.json", "w", encoding="utf-8") as fh:
             json.dump({"sha": snapshot["sha"], "committedAt": snapshot["committedAt"], "projects": thumb_projects}, fh)
     print(f"{DESIGN_DIR}/{name}: {len(html) / 1e6:.2f} MB, {len(blobs)} embedded drawings")
-    # ask stays false and context_name is never emitted: 09 owns producing kicad-design-<sha7>.context.json and switching it on.
-    emit(built="true", name=name, thumbnails="true" if thumb_projects else "false", ask="false",
-         downloads="true" if any(project.get("downloads") for project in projects) else "false",
-         downloads_name=f"kicad-design-downloads-{det['head'][:7]}")  # the bundle the review site's download route looks up
+    outputs = {"built": "true", "name": name, "thumbnails": "true" if thumb_projects else "false",
+               "ask": "true" if ask_on else "false",
+               "downloads": "true" if any(project.get("downloads") for project in projects) else "false",
+               "downloads_name": f"kicad-design-downloads-{det['head'][:7]}"}
+    if ask_on:
+        outputs["context_name"] = f"{name[:-5]}.context.json"
+    emit(**outputs)  # the downloads bundle and context artifact use the snapshot report's name family
 
 
 DOWNLOADS_NOT_STORED = "not stored: this run could not upload its download files"

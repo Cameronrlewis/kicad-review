@@ -192,7 +192,7 @@ assert len(profiles) == 12, "FAB-01 twelve exact profiles"
 assert profiles["jlcpcb-2l"]["values"]["holeToHoleViaMm"] == .2
 assert profiles["pcbway-std"]["values"]["drillPlatedMaxMm"] == 6
 assert all(p["checkedOn"] >= "2026-10-24" and p["source"].startswith("https://")
-           for p in profiles.values()), "FAB-01 dated provenance (Task 8 may later move the three sign-off profiles to a newer date)"
+           for p in profiles.values()), "FAB-01 profiles carry dated source provenance"
 # FAB-08: refresh only the three sign-off profiles from current vendor pages.
 FRESH_VENDOR_PROFILES = ('jlcpcb-2l', 'jlcpcb-multilayer', 'pcbway-std')
 FRESH_VENDOR_SOURCES = {'https://jlcpcb.com/capabilities/pcb-capabilities',
@@ -781,7 +781,7 @@ scaffolding_js = js
 for guard in allowed_typeof:
     assert js.count(guard) == 1, f"allowlisted guard must occur exactly once: {guard}"
     scaffolding_js = scaffolding_js.replace(guard, "")
-assert "typeof " not in scaffolding_js and "const KEYS" not in js and "markersFor(view);" not in js and "Task 5" not in js, "leftover scaffolding"
+assert "typeof " not in scaffolding_js and "const KEYS" not in js and "markersFor(view);" not in js and "Task 5" not in js, "temporary implementation scaffolding remains"
 assert "docs/superpowers" not in js and "docs/superpowers" not in readme, "plan paths stay out of shipped assets"
 assert "window.REVIEW_DATA" in readme, "README documents regenerating the sample"
 print("ok")
@@ -9682,52 +9682,44 @@ with tempfile.TemporaryDirectory() as td:
         except SystemExit as exc:
             assert 'Fab limits output missing for Four (base)' in str(exc)
 
-# These helpers are owned by 06/09 and do not exist on main 335db72.
-# Standalone 04 runs the producer assertions above; the combined gate must not silently skip.
-if os.environ.get('FAB_CROSS_SPEC') == '1':
-    assert hasattr(kr, 'absolute_checks'), 'FAB integration requires merged spec 06'
-    assert hasattr(kr, 'complete_context_checks'), 'FAB integration requires merged spec 09'
+for original in (fab_failed, fab_unsupported, fab_absent):
+    current = copy.deepcopy(original)
+    kr.absolute_checks([current])
+    expected = copy.deepcopy(original)
+    expected.update(new_errors=0, new_warnings=0)
+    if 'fixed' in expected:
+        expected['fixed'] = 0
+    for v in expected['violations']:
+        v['new'] = False
+    assert json.loads(json.dumps(current)) == expected, 'FAB snapshot: only comparison fields may change'
+assert fab_failed['new_errors'] == 1 and fab_failed['violations'][0]['new'] is True
 
-if hasattr(kr, 'absolute_checks'):
-    for original in (fab_failed, fab_unsupported, fab_absent):
-        current = copy.deepcopy(original)
-        kr.absolute_checks([current])
-        expected = copy.deepcopy(original)
-        expected.update(new_errors=0, new_warnings=0)
-        if 'fixed' in expected:
-            expected['fixed'] = 0
-        for v in expected['violations']:
-            v['new'] = False
-        assert json.loads(json.dumps(current)) == expected, 'FAB snapshot: only comparison fields may change'
-    assert fab_failed['new_errors'] == 1 and fab_failed['violations'][0]['new'] is True
-
-if hasattr(kr, 'complete_context_checks'):  # own settings copy: the waiver checks below reuse cfg
-    ctx_cfg = copy.deepcopy(kr.DEFAULT_SETTINGS)
-    ctx_cfg['fabrication']['check_limits'] = True
-    ctx_cfg['checks']['fab_limits'] = 'required'
-    ledger_keys = ('vendor','profile','checkedOn','assumedCopperOz','checked','unchecked','unsupported',
-                   'coverageWarnings','baselineAvailable','fixed')
-    for original in (fab_failed, fab_unsupported, fab_absent):
-        contexts = kr.complete_context_checks([copy.deepcopy(original)], ctx_cfg, True,
-                                               original['status'] != 'not_run')
-        matches = [c for c in contexts if c['name'] == 'fab_limits']
-        assert len(matches) == 1, 'FAB context: supplied check lost or duplicated'
-        current = matches[0]
-        assert current['status'] == original['status'] and current['reason'] == original.get('reason')
-        assert (current['errors'], current['warnings']) == (original['errors'], original['warnings'])
-        assert current['confidence'] == 'deterministic' and current['evidence_source'] == kr.FAB_EVIDENCE_SOURCE
-        assert {k:current[k] for k in ledger_keys if k in original} == {k:original[k] for k in ledger_keys if k in original}, 'FAB context: coverage ledger lost'
-        assert len(current['findings']) == len(original['violations'])
-        assert all(v['confidence'] == 'deterministic' and v['evidence_source'] == kr.FAB_EVIDENCE_SOURCE
-                   for v in current['findings'])
-    contexts = kr.complete_context_checks(list(copy.deepcopy(produced_fabs).values()), ctx_cfg, True, True)
-    assert sorted(c['vendor'] for c in contexts if c['name']=='fab_limits') == ['jlcpcb','pcbway'], 'FAB context: retain both vendors'
-    for opt_in, level in ((False,'required'), (True,'off')):
-        ctx_cfg['fabrication']['check_limits'] = opt_in
-        ctx_cfg['checks']['fab_limits'] = level
-        assert kr.fab_checks({'name':'Disabled'}, ctx_cfg, 'unused') == []
-        contexts = kr.complete_context_checks([], ctx_cfg, True, True)
-        assert not any(c['name'] == 'fab_limits' for c in contexts), 'FAB context: disabled check synthesized'
+ctx_cfg = copy.deepcopy(kr.DEFAULT_SETTINGS)  # own settings copy: the waiver checks below reuse cfg
+ctx_cfg['fabrication']['check_limits'] = True
+ctx_cfg['checks']['fab_limits'] = 'required'
+ledger_keys = ('vendor','profile','checkedOn','assumedCopperOz','checked','unchecked','unsupported',
+               'coverageWarnings','baselineAvailable','fixed')
+for original in (fab_failed, fab_unsupported, fab_absent):
+    contexts = kr.complete_context_checks([copy.deepcopy(original)], ctx_cfg, True,
+                                           original['status'] != 'not_run')
+    matches = [c for c in contexts if c['name'] == 'fab_limits']
+    assert len(matches) == 1, 'FAB context: supplied check lost or duplicated'
+    current = matches[0]
+    assert current['status'] == original['status'] and current['reason'] == original.get('reason')
+    assert (current['errors'], current['warnings']) == (original['errors'], original['warnings'])
+    assert current['confidence'] == 'deterministic' and current['evidence_source'] == kr.FAB_EVIDENCE_SOURCE
+    assert {k:current[k] for k in ledger_keys if k in original} == {k:original[k] for k in ledger_keys if k in original}, 'FAB context: coverage ledger lost'
+    assert len(current['findings']) == len(original['violations'])
+    assert all(v['confidence'] == 'deterministic' and v['evidence_source'] == kr.FAB_EVIDENCE_SOURCE
+               for v in current['findings'])
+contexts = kr.complete_context_checks(list(copy.deepcopy(produced_fabs).values()), ctx_cfg, True, True)
+assert sorted(c['vendor'] for c in contexts if c['name']=='fab_limits') == ['jlcpcb','pcbway'], 'FAB context: retain both vendors'
+for opt_in, level in ((False,'required'), (True,'off')):
+    ctx_cfg['fabrication']['check_limits'] = opt_in
+    ctx_cfg['checks']['fab_limits'] = level
+    assert kr.fab_checks({'name':'Disabled'}, ctx_cfg, 'unused') == []
+    contexts = kr.complete_context_checks([], ctx_cfg, True, True)
+    assert not any(c['name'] == 'fab_limits' for c in contexts), 'FAB context: disabled check synthesized'
 
 entries,bad = kr.parse_waivers('''
 [[waiver]]
@@ -9993,19 +9985,10 @@ assert len(lp["properties"]["Note"]) == 200 and lp["properties"]["Note"] == "n" 
 assert parts["R1"]["properties_truncated"] is False and parts["R1"]["incomplete_fields"] == [] and parts["R1"]["value"] == "10k"
 assert kr.context_parts({"/uuid-3": long_part})["R1"]["mpn"] is None, "absent identity stays null, not an empty string"
 # Shared BOM cases: every part's bom uses bom_identity, with the same included flags, excludedReason, line keys, and quantities.
-# The shared BOM fixture is byte-identical to the producer fixture and is required. parts_lines may not be available
-# (only bom_identity may be available), so line keys and quantities are asserted through Ask's parts[].bom records,
-# grouped the way MCP consumes them. The parts_lines leg is skipped only while the compatibility block stands in
-# kicad_review.py; once parts_lines is implemented, the leg is required without name-based guessing.
-bom_handoff = "# ---- 08 handoff: bom_identity" in pathlib.Path(kr.__file__).read_text(encoding="utf-8")
+# The shared BOM fixture is byte-identical to the producer fixture and is required. Line keys and quantities are
+# asserted through both Ask's parts[].bom records and the grouped lines MCP consumes.
 bom_cases = json.load(open(pathlib.Path(__file__).parent / "ui" / "fixtures" / "bom-cases.json", encoding="utf-8"))
 assert bom_cases, "shared BOM cases must not be empty"
-if bom_handoff:  # the skip is allowed only while parts_lines is a stand-in; a partial implementation fails here
-    kr_src = pathlib.Path(kr.__file__).read_text(encoding="utf-8")
-    assert kr_src.count("\ndef bom_identity(") == 1, "08's bom_identity is merged: delete the 08 handoff block"
-    assert callable(getattr(kr, "parts_lines", None)), "kicad_review.parts_lines is missing or renamed: update the 08 handoff guard"
-    assert not any("category" in l or "refsCompressed" in l for case in bom_cases for l in kr.parts_lines(case["objects"])), \
-        "08's parts_lines is merged: delete the 08 handoff block so the shared parts_lines leg runs"
 for case in bom_cases:
     for oid, object_ in case["objects"].items():
         b = kr.bom_identity(object_)
@@ -10017,9 +10000,8 @@ for case in bom_cases:
         if rec["bom"]["included"]:
             ctx_lines.setdefault(rec["bom"]["key"], {"refs": [], "mpn": rec["bom"]["mpn"]})["refs"].append(rec["bom"]["ref"])
     assert sorted((k, l["refs"], len(l["refs"]), l["mpn"]) for k, l in ctx_lines.items()) == expect, case["name"]
-    if not bom_handoff:  # bom_identity and parts_lines are available together
-        lines = sorted(kr.parts_lines(case["objects"]), key=lambda line: line["key"])
-        assert [(l["key"], l["refs"], len(l["refs"]), l["mpn"]) for l in lines] == expect, case["name"]
+    lines = sorted(kr.parts_lines(case["objects"]), key=lambda line: line["key"])
+    assert [(l["key"], l["refs"], len(l["refs"]), l["mpn"]) for l in lines] == expect, case["name"]
 # Forward indexes describe the same pins in netlist order; only single-pin unconnected- nets are unconnected; pin functions are never cut silently.
 fwd = netlist({"U1": ("MCU", "LQFP", "MCU:M"), "R1": ("10k", "R_0402", "Device:R")},
               {"A": [("R1", "2", "", "passive")], "B": [("U1", "1", "", "passive"), ("R1", "1", "", "passive")],
@@ -10036,9 +10018,6 @@ with tempfile.TemporaryDirectory() as t:
     cut_fn = next(v for v in fu1["pins"] if v["pin"] == "4")
     assert cut_fn["fn"] == "f" * 60 and cut_fn["fn_truncated"] is True, cut_fn
     assert all("fn_truncated" not in v for v in fu1["pins"] if v["pin"] != "4")
-if bom_handoff:
-    print(f"pending 08 merge: 08 handoff block in place, parts_lines leg of {len(bom_cases)} shared BOM cases not asserted "
-          "(bom_identity eligibility and context_parts keys/quantities asserted)")
 placed = {"/bom-u1": {"kind": "symbol", "ref": "R1", "where": {"sheet": "/"}, "props": {"reference": "R1", "Value": "10k", "Footprint": "R_0402", "dnp": "yes"}}}
 assert kr.context_parts(placed)["R1"]["bom"] == kr.bom_identity(placed["/bom-u1"]) and kr.context_parts(placed)["R1"]["bom"]["excludedReason"] == "dnp"
 print("ok ask parts and nets")
@@ -10189,13 +10168,13 @@ fab = {**checks[0], "name": "fab_limits", "vendor": "jlcpcb", "title": "Fab limi
        "checked": ["track width"], "unchecked": [f"limit {i}" for i in range(20)], "unsupported": None,
        "coverageWarnings": ["F.Cu: copper thickness unknown"], "baselineAvailable": False, "fixed": 0, "violations": []}
 # Verify the module's exact FAB_EVIDENCE_SOURCE when available, or use the same fallback in the test fixture.
-FAB_EVIDENCE_SOURCE_04 = ('kicad-cli pcb drc; isolated board-only and vendor DRC passes per revision; '
-                          'vendor-only findings paired between head and base by multiset identity; '
-                          'fab_limits.json dated profile; coverage limited to checked limits '
-                          '(see unchecked, unsupported and coverageWarnings)')
+EXPECTED_FAB_EVIDENCE_SOURCE = ('kicad-cli pcb drc; isolated board-only and vendor DRC passes per revision; '
+                                'vendor-only findings paired between head and base by multiset identity; '
+                                'fab_limits.json dated profile; coverage limited to checked limits '
+                                '(see unchecked, unsupported and coverageWarnings)')
 if hasattr(kr, "FAB_EVIDENCE_SOURCE"):
-    assert kr.FAB_EVIDENCE_SOURCE == FAB_EVIDENCE_SOURCE_04, "04's FAB_EVIDENCE_SOURCE matches expected value"
-fab_source = getattr(kr, "FAB_EVIDENCE_SOURCE", FAB_EVIDENCE_SOURCE_04)
+    assert kr.FAB_EVIDENCE_SOURCE == EXPECTED_FAB_EVIDENCE_SOURCE, "FAB_EVIDENCE_SOURCE matches the documented evidence pipeline"
+fab_source = getattr(kr, "FAB_EVIDENCE_SOURCE", EXPECTED_FAB_EVIDENCE_SOURCE)
 # Two same-name fab sections retain their identities through projection and completion, even with no board.
 fab_sections = [{**fab, "vendor": vendor, "profile": profile,
                  "confidence": "deterministic", "evidence_source": fab_source}
@@ -10246,6 +10225,115 @@ with open(fixture_path, "r", encoding="utf-8") as fh:
 assert committed_doc == wdoc, f"{fixture_path} drift; run REGENERATE_FIXTURES=1 python3 test_kicad_review.py"
 clean_part = list(kr.context_parts({"/uuid-3": objs["/uuid-3"]}).values())
 assert kr.fit_context(lambda nc, pc: {"version": 1, "projects": [{"revisions": {"head": {"parts": clean_part, "nets": []}}}]})["truncated"] is False
+# A realistic design fits: about 300 parts and 200 nets per revision across two projects, the base nearly equal to the head.
+# The full form is over the ceiling; the compact form keeps every ref, value, footprint, uuid, net and part-to-net membership.
+def synthetic_side(t, tag, changed):
+    objs_, comps, nets_ = {}, {}, {f"N{k}": [] for k in range(99)}
+    nets_["GND"] = []
+    for i in range(150):
+        kind = "U" if i % 10 == 0 else "R" if i % 2 else "C"
+        ref, sheet = f"{kind}{i}", "/" if i < 75 else "/sub/"
+        value = {"U": "MCU-QFN32", "R": "10k", "C": "100nF"}[kind] + ("-B" if i in changed else "")
+        fp = {"U": "Package_DFN_QFN:QFN-32-1EP_5x5mm_P0.5mm", "R": "Resistor_SMD:R_0402_1005Metric", "C": "Capacitor_SMD:C_0402_1005Metric"}[kind]
+        objs_[f"{sheet}{i:08d}-0000-4000-8000-{tag * 12}"] = {"kind": "symbol", "ref": ref, "where": {"sheet": sheet}, "pos": [i, i, 0], "props": {
+            "reference": ref, "Value": value, "Footprint": fp, "Datasheet": f"https://example.com/datasheets/{kind}-{value}.pdf",
+            "Description": f"Synthetic {value} part in {fp.split(':')[1]}", "symbol": f"Device:{kind}", "position": f"({i}.00, {i}.00)",
+            "unit": "1", "mirror": None, "dnp": "no", "in_bom": "yes", "on_board": "yes", "MPN": f"MPN-{value}", "LCSC": f"C{1000 + i}"}}
+        comps[ref] = (value, fp, f"Device:{kind}")
+        for pin in range(1, 33 if kind == "U" else 3):
+            nets_["GND" if kind != "U" and pin == 2 else f"N{(i + pin) % 99}"].append((ref, str(pin), "", "passive"))
+    os.makedirs(t, exist_ok=True)
+    write(t, {"netlist.net": netlist(comps, nets_)})
+    return objs_
+with tempfile.TemporaryDirectory() as t:
+    sides_ = {(tag, side): synthetic_side(f"{t}/{tag}/{side}", tag, changed) for tag in "AB" for side, changed in (("base", {3, 4}), ("head", {4, 7}))}
+    sheets_ = [{"path": "/", "name": "Root", "file": "P.kicad_sch", "parent": None, "page": "1"}, {"path": "/sub/", "name": "Sub", "file": "sub.kicad_sch", "parent": "/", "page": "2"}]
+    def synthetic(net_cap, pin_cap):
+        projects = []
+        for tag in "AB":
+            revisions = {}
+            for side in ("base", "head"):
+                rev = kr.side_context(f"{t}/{tag}/{side}", sides_[tag, side], net_cap, pin_cap)
+                rev.update(revision=("a" if side == "base" else "b") * 40, sheets=sheets_, board=None)
+                kr.enrich_context(rev, sides_[tag, side], sheets_)
+                revisions[side] = rev
+            projects.append({"name": tag, "dir": tag, "status": "modified", "revisions": revisions, "changes": kr.context_changes([]),
+                             "checks": kr.complete_context_checks([], check_settings, True, True)})
+        return {"version": 1, "kind": "kicad-review-design-context", "repo": "o/r", "base": "a" * 40, "head": "b" * 40, "reason": "push", "projects": projects}
+    raw = synthetic(*kr.CONTEXT_STAGES[0])
+    for side in ("base", "head"):
+        assert sum(len(p["revisions"][side]["parts"]) for p in raw["projects"]) == 300 and sum(len(p["revisions"][side]["nets"]) for p in raw["projects"]) == 200
+    assert kr.context_bytes(raw) > 2 * kr.CONTEXT_LIMIT, "the full form alone would disable Ask"
+    fitted = kr.fit_context(synthetic)
+    assert "disabled_reason" not in fitted and fitted["compact"] == 1 and kr.context_bytes(fitted) <= kr.CONTEXT_LIMIT, kr.context_bytes(fitted)
+    def expand(doc):  # mirrors site/mcp-data.js expandContext
+        doc = copy.deepcopy(doc); del doc["compact"]
+        for p in doc["projects"]:
+            revs = p["revisions"]
+            for side in ("head", "base"):
+                rev = revs.get(side)
+                if not rev: continue
+                heads = {key: {x[i]: x for x in (revs.get("head") or {}).get(key, [])} for key, i in (("parts", "ref"), ("nets", "id"))}
+                pd, nd, prd = (rev.pop(k, {}) for k in ("parts_defaults", "nets_defaults", "properties_defaults"))
+                if "nets" in rev:
+                    rev["nets"] = [heads["nets"][x["id"]] if x.get("same_as_head") else {**nd, **x} for x in rev["nets"]]
+                parts = []
+                for x in rev.get("parts", []):
+                    if x.get("same_as_head"):
+                        parts.append(heads["parts"][x["ref"]]); continue
+                    x = {**pd, **x}; echoed = x.pop("properties_echoed", {}); bom_echoed = x.pop("bom_echoed", None)
+                    if isinstance(x.get("properties"), dict):
+                        x["properties"] = {**prd, **x["properties"], **{k: x[f] for k, f in echoed.items()}}
+                    if isinstance(x.get("bom"), dict) and bom_echoed is not None:
+                        x["bom"] = {**x["bom"], **{k: x[k] for k in bom_echoed if k != "key"}}
+                        if "key" in bom_echoed: x["bom"]["key"] = kr.bom_key(x["bom"])
+                    parts.append(x)
+                if "parts" in rev: rev["parts"] = parts
+        return doc
+    no_neighbors = copy.deepcopy(raw)
+    for p in no_neighbors["projects"]:
+        for rev in p["revisions"].values():
+            for part in rev["parts"]: del part["neighbors"]
+    compact_raw = kr.compact_context(raw)
+    assert expand(compact_raw) == no_neighbors, "compaction is lossless apart from neighbors, which parts[].nets repeats"
+    for p in compact_raw["projects"]:
+        assert [x["ref"] for x in p["revisions"]["base"]["parts"] if not x.get("same_as_head")] == ["R3", "R7"], "only parts that differ from the head are sent twice"
+        assert all(x.get("same_as_head") for x in p["revisions"]["base"]["nets"]), "unchanged nets are sent once"
+        assert all({"ref", "value", "footprint", "uuid", "nets"} <= set(x) for x in p["revisions"]["head"]["parts"]), "identity and connectivity stay on every part"
+# The site's expandContext must turn the producer's compact form back into the full one (without neighbors).
+compact_base = {**objs, "/uuid-3": {**objs["/uuid-3"], "props": {**objs["/uuid-3"]["props"], "Value": "22k"}}}
+with tempfile.TemporaryDirectory() as t:
+    write(t, {"netlist.net": nt})
+    revs = {}
+    for side, side_objs in (("base", compact_base), ("head", objs)):
+        revs[side] = kr.side_context(t, side_objs, net_cap=15, pin_cap=2)
+        kr.enrich_context(revs[side], side_objs, [{"path": "/pwr/", "name": "Power", "page": "2"}, {"path": "/", "name": "Root", "page": "1"}])
+    # Exactness edge cases: a BOM record with only `included`, a key that is not bom_key of its record, a part lacking a
+    # field the others share, and null values: expansion restores what was removed and never adds a field an item lacked.
+    edge_parts = [{"ref": "A1", "value": "1k", "bom": {"included": True}, "page_reason": None, "dnp": False},
+                  {"ref": "A2", "value": "2k", "bom": {"included": True, "value": "2k", "key": "not-a-bom-key"}, "page_reason": None, "dnp": False},
+                  {"ref": "A3", "value": "3k", "bom": {"included": False, "ref": "A3", "value": "3k"}, "page_reason": None}]
+    edge_parts[2]["bom"]["key"] = kr.bom_key(edge_parts[2]["bom"])
+    full = {"version": 1, "kind": "kicad-review-design-context", "repo": "o/r", "base": "a" * 40, "head": "b" * 40, "reason": "push", "truncated": True,
+            "projects": [{"name": "P", "dir": "P", "status": "modified", "revisions": revs},
+                         {"name": "E", "dir": "E", "status": "added", "revisions": {"base": None, "head": {
+                             "parts": edge_parts, "nets": [{"id": "N1", "pages": None}, {"id": "N2", "pages": None}]}}}]}
+    compact = kr.compact_context(full)
+    assert compact["projects"][0]["revisions"]["base"]["parts"][1] == {"ref": "U1", "same_as_head": True} and "parts_defaults" in compact["projects"][0]["revisions"]["head"]
+    edge = compact["projects"][1]["revisions"]["head"]
+    assert edge["parts_defaults"] == {"page_reason": None} and edge["nets_defaults"] == {"pages": None}, "a field one part lacks is never a default"
+    assert [(x["bom"], x["bom_echoed"]) for x in edge["parts"]] == [({"included": True}, []), ({"included": True, "key": "not-a-bom-key"}, ["value"]),
+                                                                    ({"included": False}, ["ref", "value", "key"])]
+    expanded = copy.deepcopy(full)
+    for rev in expanded["projects"][0]["revisions"].values():
+        for part in rev["parts"]: del part["neighbors"]
+    assert expand(compact) == expanded, "the compact fixture expands to the full context"
+compact_path = pathlib.Path(__file__).parent / "site" / "fixtures" / "producer-compact-context.json"
+if os.environ.get("REGENERATE_FIXTURES") == "1":
+    with open(compact_path, "w", encoding="utf-8") as fh:
+        json.dump({"compact": compact, "expanded": expanded}, fh, separators=(",", ":"), ensure_ascii=False)
+with open(compact_path, "r", encoding="utf-8") as fh:
+    assert json.load(fh) == {"compact": compact, "expanded": expanded}, f"{compact_path} drift; run REGENERATE_FIXTURES=1 python3 test_kicad_review.py"
 # Wiring status decides net-change availability; a missing summary is unavailable, while zero complete rows are available.
 assert kr.net_change_support(None) == {"available": False, "complete": False}
 assert kr.net_change_support({}) == {"available": False, "complete": False}
@@ -10333,29 +10421,14 @@ copy_step = copy_step[:copy_step.index("- name: Screenshots of changed drawings"
 assert copy_step.count("if: steps.report.outputs.ask == 'true'") == 2 and copy_step.count("continue-on-error: true") == 2, copy_step
 assert "archive: false" in copy_step and "retention-days: 90" in copy_step
 assert wf.index("- name: Upload report") < wf.index("- name: Copy design context") < wf.index("- name: Screenshots of changed drawings")
-# 06 must be merged first. Its inert Ask-guarded hook is required once 06 merges.
-# The snapshot producer is tested with Ask both on and off.
-snapshot_merged = (
-    hasattr(kr, "cmd_snapshot")
-    or "design" in getattr(kr, "DEFAULT_SETTINGS", {})
-    or any(line.strip().startswith("- name:") and "snapshot" in line.lower() for line in wf.splitlines())
-)
-if snapshot_merged:
-    assert "- name: Upload design snapshot context" in wf, "merge 06 before 09 snapshot integration"
-    snap = wf[wf.index("- name: Upload design snapshot context"):]
-    snap = snap[:snap.index("\n      - name:", 1)] if "\n      - name:" in snap[1:] else snap
-    assert "steps.snapshot.outputs.context_name" in snap and "archive: false" in snap and "steps.snapshot.outputs.ask == 'true'" in snap, snap
-    assert "continue-on-error: true" in snap and "path: review/design/${{ steps.snapshot.outputs.context_name }}" in snap, snap
-    assert "retention-days: ${{ vars.KICAD_REVIEW_SNAPSHOT_DAYS || 90 }}" in snap, snap
-    assert "retention-days: 90" not in snap, "snapshot context follows the repository snapshot retention variable, not comparison-report retention"
-else:
-    # Snapshot support is unavailable. Guard against partial integration or renaming:
-    # fail if any snapshot producer lands without the context upload hook.
-    assert not hasattr(kr, "cmd_snapshot"), "06's cmd_snapshot is merged: Upload design snapshot context hook must be present in review.yml"
-    assert "design" not in getattr(kr, "DEFAULT_SETTINGS", {}), "06's design settings are merged: Upload design snapshot context hook must be present in review.yml"
-    assert not any(line.strip().startswith("- name:") and "snapshot" in line.lower() for line in wf.splitlines()), \
-        "06 snapshot workflow steps are present: Upload design snapshot context hook must be present in review.yml"
-    print("pending 06 merge: 06's Upload design snapshot context hook not in review.yml (plan-context.md:60; flip to unconditional assert once 06 merges)")
+# Snapshot context upload is guarded by the producer's Ask output and uses snapshot retention.
+assert "- name: Upload design snapshot context" in wf
+snap = wf[wf.index("- name: Upload design snapshot context"):]
+snap = snap[:snap.index("\n      - name:", 1)] if "\n      - name:" in snap[1:] else snap
+assert "steps.snapshot.outputs.context_name" in snap and "archive: false" in snap and "steps.snapshot.outputs.ask == 'true'" in snap, snap
+assert "continue-on-error: true" in snap and "path: review/design/${{ steps.snapshot.outputs.context_name }}" in snap, snap
+assert "retention-days: ${{ vars.KICAD_REVIEW_SNAPSHOT_DAYS || 90 }}" in snap, snap
+assert "retention-days: 90" not in snap, "snapshot context follows the repository snapshot retention variable, not comparison-report retention"
 print("ok ask context upload step")
 
 
@@ -10472,7 +10545,7 @@ with tempfile.TemporaryDirectory() as t:
     assert failed["global_labels"] is None and "bus membership" in failed["labels_unavailable"]
     pathlib.Path(t, "labels.json.error").unlink(); pathlib.Path(t, "labels.json").unlink()
     legacy = next(n for n in kr.side_context(t, objs)["nets"] if n["id"] == "12")
-    assert legacy["hierarchical_labels"] is None and legacy["labels_unavailable"], "no producer output: Task 3's fail-closed fallback"
+    assert legacy["hierarchical_labels"] is None and legacy["labels_unavailable"], "missing producer output uses the fail-closed fallback"
     # Malformed labels.json: non-dict root, unparseable JSON, or malformed nets shape fails closed.
     write(t, {"labels.json": "{"})
     bad_json = next(n for n in kr.side_context(t, objs)["nets"] if n["id"] == "12")
@@ -10995,10 +11068,10 @@ try:
     entries = dl_export({"name": "P", "dir": ""}, src, f"{t}/out", dl_settings, "b" * 40)
     stem, dl = "P-bbbbbbb", f"{t}/out/downloads"
     assert [e["kind"] for e in entries] == ["fab", "pdf", "step", "glb"] and all(e["error"] is None for e in entries), entries
-    assert [c[0][3] for c in dl_calls] == ["gerbers", "drill", "pos", "bom", "pdf", "step"], "the GLB is copied from 02's raw product, never exported here"
+    assert [c[0][3] for c in dl_calls] == ["gerbers", "drill", "pos", "bom", "pdf", "step"], "the GLB is copied from the raw render product, never exported here"
     assert [e["file"] for e in entries] == [f"fab-{stem}.zip", f"{stem}-schematic.pdf", f"{stem}-board.step", f"{stem}-board.glb"]
     assert next(c for c in dl_calls if c[0][3] == "step") == (["kicad-cli", "pcb", "export", "step", "--subst-models", "-f", "-o", f"{dl}/{stem}-board.step", f"{src}/P.kicad_pcb"], 120)
-    assert pathlib.Path(dl, f"{stem}-board.glb").read_bytes() == b"glTF-raw", "download GLB must be 02's raw bytes, unchanged"
+    assert pathlib.Path(dl, f"{stem}-board.glb").read_bytes() == b"glTF-raw", "download GLB must preserve the raw render bytes"
     assert next(c[0] for c in dl_calls if c[0][3] == "pdf") == ["kicad-cli", "sch", "export", "pdf", "-o", f"{dl}/{stem}-schematic.pdf", f"{src}/P.kicad_sch"]
     with zipfile.ZipFile(f"{dl}/fab-{stem}.zip") as z:
         assert sorted(z.namelist()) == ["P-review-jlcpcb-bom.csv", "P-review-jlcpcb-gerbers.zip", "P-review-jlcpcb-positions.csv"]
@@ -11761,7 +11834,7 @@ with tempfile.TemporaryDirectory() as d:
             kr.cmd_report(None)
         legacy, integrated = json.loads(before_data), json.loads(pathlib.Path("review/data.json").read_bytes())
         def legacy_subset(old, new):
-            """Every value the 335db72 report holds is present unchanged; additive v1 fields from 01, 03 and 08 may appear."""
+            """Every value the 335db72 report holds is present unchanged; additive v1 fields may appear."""
             if isinstance(old, dict):
                 return isinstance(new, dict) and all(k in new and legacy_subset(v, new[k]) for k, v in old.items())
             if isinstance(old, list):
@@ -12018,10 +12091,10 @@ for needle in ("| `downloads.enabled` | `false` |", "| `downloads.step` | `true`
     assert needle in readme, needle
 assert "[downloads]\nenabled = false" in example and "step = true" in example
 assert "docs/superpowers" not in readme, "plan paths stay out of shipped assets"
-assert "02's" not in readme, "plan numbers stay out of shipped assets"
+assert not re.search(r"(?<!KiCad )\b\d{2}['’]s\b", readme), "internal branch labels stay out of shipped assets"  # KiCad 10's is a product version
 print("ok downloads documented")
 
-# A snapshot integrates report assets and downloads under its own report family; Ask stays an inert hook without its producer.
+# A snapshot integrates report assets, downloads and optional Ask context under its own report family.
 with _DpTmp() as t:
     old_cwd = os.getcwd()
     try:
@@ -12053,34 +12126,53 @@ with _DpTmp() as t:
                 kr.cmd_snapshot(None)
             return finalize, dict(row.split("=", 1) for row in open(output).read().splitlines())
         _dp_no_context = lambda: not list(pathlib.Path("review").rglob("*.context.json")) and not os.path.exists("review/design-context.json")
-        for n, ask in enumerate((None, {"enabled": False}, {"enabled": True})):  # 09 absent: the [ask] table never turns anything on
+        for n, ask in enumerate((None, {"enabled": False}, {"enabled": True})):
             settings = json.loads(json.dumps(snap))
             if ask is not None:
                 settings["ask"] = ask
+            ask_on = settings["ask"]["enabled"]
             shutil.rmtree("review/design", ignore_errors=True)
             finalize, outputs = _dp_snapshot(settings, f"{t}/out-ask-{n}")
             assert finalize.call_count == 1 and finalize.call_args.args[1] == "review/design/assets", finalize.call_args_list
-            assert outputs == {"built": "true", "name": "kicad-design-ccccccc.html", "thumbnails": "true", "ask": "false", "downloads": "true",
-                               "downloads_name": "kicad-design-downloads-ccccccc"}, outputs
-            assert _dp_no_context(), "06 writes no context file"
+            expected_outputs = {"built": "true", "name": "kicad-design-ccccccc.html", "thumbnails": "true",
+                                "ask": "true" if ask_on else "false", "downloads": "true",
+                                "downloads_name": "kicad-design-downloads-ccccccc"}
+            if ask_on:
+                expected_outputs["context_name"] = "kicad-design-ccccccc.context.json"
+            assert outputs == expected_outputs, outputs
             data = _dp_report_data("review/design/kicad-design-ccccccc.html")
-            assert "assets" in data and "ask" not in data["settings"], (sorted(data), sorted(data["settings"]))
+            assert "assets" in data
+            assert (data["settings"].get("ask") == {"enabled": True}) is ask_on, data["settings"].get("ask")
             assert data["report"] == {"kind": "design", "head": head, "projects": [{"index": 0, "dir": "H", "name": "H"}]}, data.get("report")
+            if ask_on:
+                context_path = pathlib.Path("review/design/kicad-design-ccccccc.context.json")
+                ctx = json.loads(context_path.read_text(encoding="utf-8"))
+                assert kr.context_bytes(ctx) <= kr.CONTEXT_LIMIT and ctx["truncated"] is False
+                assert {k: ctx[k] for k in ("version", "kind", "repo", "base", "head", "reason", "mode")} == {
+                    "version": 1, "kind": "kicad-review-design-context", "repo": "o/r", "base": None,
+                    "head": head, "reason": "design snapshot", "mode": "single"}
+                assert len(ctx["projects"]) == 1 and ctx["projects"][0]["dir"] == "H"
+                assert ctx["projects"][0]["revisions"]["base"] is None
+                assert ctx["projects"][0]["revisions"]["head"]["revision"] == head
+                assert data["projects"][0]["ask"]["nets"]["base"] is None, "single-mode Ask index must not invent a base revision"
+            else:
+                assert _dp_no_context(), "Ask-off snapshots must not write a context file"
             files = data["projects"][0]["downloads"]
             assert [(f["artifact"], f["path"]) for f in files] == [("kicad-design-downloads-ccccccc", "0/fab-H-ccccccc.zip")], files
             assert files[0]["sha256"] == hashlib.sha256(b"snapshot zip").hexdigest(), "the snapshot reads downloads-snapshot/, never the comparison's downloads/"
             assert json.loads(pathlib.Path("review/design-downloads/0/downloads.json").read_text())["head"] == head
             assert not os.path.exists("review/downloads"), "a snapshot never writes the comparison bundle"
-        # Snapshot-only run with downloads off: no bundle, no context, ask=false and no context_name.
+        # Snapshot-only Ask remains available when downloads are off.
         shutil.rmtree("review/design"); shutil.rmtree("review/design-downloads")
         det["base"], det["reason"] = None, kr.SNAPSHOT_REASON
         off = json.loads(json.dumps(snap)); off["downloads"]["enabled"] = False; off["ask"] = {"enabled": True}
         _, outputs = _dp_snapshot(off, f"{t}/out-off")
-        assert outputs["ask"] == "false" and outputs["downloads"] == "false" and "context_name" not in outputs, outputs
-        assert not os.path.exists("review/design-downloads") and _dp_no_context()
+        assert outputs["ask"] == "true" and outputs["downloads"] == "false" and outputs["context_name"] == "kicad-design-ccccccc.context.json", outputs
+        assert not os.path.exists("review/design-downloads") and pathlib.Path("review/design/kicad-design-ccccccc.context.json").is_file()
         assert "downloads" not in _dp_report_data("review/design/kicad-design-ccccccc.html")["projects"][0]
         # Comparison plus snapshot in one run: separate folders, artifact names and file hashes; neither overwrites the other.
         det["base"], det["reason"] = "b" * 40, "push: new commit vs previous branch tip"
+        shutil.rmtree("review/design")
         def _dp_report():
             write(t, {"review/detect.json": json.dumps(det)})
             with patch.dict(os.environ, {**_dp_env, "GITHUB_OUTPUT": f"{t}/out-report"}, clear=True), patch("sys.stdout", new_callable=io.StringIO), \
@@ -12128,7 +12220,7 @@ with _DpTmp() as t:
         assert kr.snapshot_download_policy({**rendered, "_snapshot_fabrication": None}) is None
     finally:
         os.chdir(old_cwd)
-print("ok DP-S3I snapshot integrates assets and downloads without Ask")
+print("ok design snapshot integrates assets, downloads and optional Ask context")
 
 # DP-S7: the reusable workflow wires the snapshot in without touching what comparison runs do.
 _wf = pathlib.Path(".github/workflows/review.yml").read_text(encoding="utf-8")
@@ -12147,10 +12239,8 @@ assert _wf.index("- name: Upload report") < _wf.index("- name: Build design snap
 assert "snapshot_only" not in _wf.split("workflow_call:")[1].split("jobs:")[0], "the reusable workflow takes no input of its own: the caller's event inputs are read"
 _caller = pathlib.Path("examples/kicad-review.yml").read_text(encoding="utf-8")
 assert "snapshot_only:" in _caller and "type: boolean" in _caller and "required: false" in _caller.split("base:")[1].split("head:")[0]
-# The optional Ask hook emits ask=false with no context_name when no context producer is available.
-# Keep the guard, name, and path contract so hosted Ask can enable context uploads later.
-# The ask=true branch below is a static reserved-contract check, not a requirement to upload real context.
-assert "          name: ${{ steps.snapshot.outputs.name }}" in _wf, "the HTML artifact must carry its design name, which 09's loadContext reads"
+# The optional Ask context is uploaded only when the snapshot producer enables it.
+assert "          name: ${{ steps.snapshot.outputs.name }}" in _wf, "the HTML artifact must carry the design name used to locate its context"
 _ctx = _wf[_wf.index("- name: Upload design snapshot context"):].split("\n      - name:")[0]
 assert "        if: steps.snapshot.outputs.ask == 'true'" in _ctx and "        continue-on-error: true" in _ctx, _ctx   # ask on: uploads; ask off: the guard skips the step
 assert "          archive: false" in _ctx and "          name: ${{ steps.snapshot.outputs.context_name }}" in _ctx, _ctx

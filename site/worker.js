@@ -321,7 +321,7 @@ async function downloadFile(owner, repo, id, index, kind, active) {
     const family = !head7 || !/^[0-9a-f]{40}$/.test(runHead) ? null : verifyReportFamily('comparison', name) ? 'review' : 'design';
     if (report.expired || !family || !/^\d{1,20}$/.test(String(runId))) return jsonError(active, 'Download unavailable');
     const bundleName = `kicad-${family}-downloads-${head7}`;
-    // Every page of the run's artifacts is read: 02 adds digest assets, so the bundle can sit past the first 100.
+    // Every page of the run's artifacts is read because the bundle can sit past the first 100 entries.
     const paged = await ghPages(gh, `${root}/runs/${runId}/artifacts`, active.token, d => d?.artifacts);
     if (!paged.ok) return jsonError(active, 'Download unavailable');
     const found = paged.items.filter((a) => !a?.expired && a?.name === bundleName && a.workflow_run?.id === runId && /^\d{1,20}$/.test(String(a.id)));
@@ -488,8 +488,8 @@ function assetError() {
     headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'private,no-store' } });
 }
 
-// 01 owns private image and 3D transport: `load` runs access and artifact validation on
-// every call, before any ETag response, and returns bytes or a failure Response.
+// Private image and 3D transport runs access and artifact validation through `load`
+// on every call, before any ETag response, and returns bytes or a failure Response.
 export async function privateAsset(request, digest, kind, load) {
   const headers = { 'Content-Type': kind === 'svg' ? 'image/svg+xml' : kind === 'board.glb' ? 'model/gltf-binary' : 'application/json',
     'Content-Security-Policy': "default-src 'none'; sandbox",

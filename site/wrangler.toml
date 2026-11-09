@@ -19,9 +19,9 @@ ALLOWED_OWNERS = "Cameronrlewis"
 # Bind only the real ID from `npx --yes wrangler@4.148.0 kv namespace create OAUTH_KV`;
 # never a placeholder, and never leave `id` out: Wrangler
 # can then try to provision a namespace itself on deploy.
-# [[kv_namespaces]]
-# binding = "OAUTH_KV"
-# id = "<real namespace id>"
+[[kv_namespaces]]
+binding = "OAUTH_KV"
+id = "e33801904b3e42babd505a960a47889e"
 
 # Shares one-use GitHub refresh token rotations across isolates; keeps nothing in storage.
 [[durable_objects.bindings]]

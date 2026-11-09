@@ -7411,6 +7411,32 @@ test('MCP shared loader keeps metadata status and refuses ZIP bodies',async()=>{
     }
   } finally {globalThis.fetch=old;}
 });
+test('snapshot context with a null base loads for Ask and MCP selection',async()=>{
+  const report={...artifactsFixture().artifacts[0],name:'kicad-design-aaaaaaa.html'};
+  const contextArtifact={id:91,name:'kicad-design-aaaaaaa.context.json',expired:false,digest:'snapshot-digest',workflow_run:{id:77}};
+  const doc=mcpDoc();
+  doc.base=null;doc.reason='design snapshot';doc.mode='single';doc.projects[0].revisions.base=null;
+  const gh=async path=>{
+    if(path.endsWith('/artifacts/90'))return new Response(JSON.stringify(report));
+    if(path.endsWith('/actions/runs/77'))return mcpRun();
+    if(path.includes('/runs/77/artifacts?'))return new Response(JSON.stringify({artifacts:[contextArtifact]}));
+    if(path.endsWith('/artifacts/91/zip'))return new Response(null,{status:302,headers:{Location:'https://ctx.blob.core.windows.net/snapshot-context'}});
+    assert.fail('unexpected snapshot context endpoint '+path);
+  };
+  const old=globalThis.fetch;
+  globalThis.fetch=async url=>{
+    assert.equal(String(url),'https://ctx.blob.core.windows.net/snapshot-context');
+    return new Response(JSON.stringify(doc));
+  };
+  try{
+    const loaded=await loadContext('Cameronrlewis','repo','90','secret',gh,verifyAs());
+    assert.equal(loaded.doc.mode,'single');assert.equal(loaded.doc.base,null);
+    assert.equal(loaded.doc.projects[0].revisions.base,null);
+    const listing=async()=>new Response(JSON.stringify({total_count:1,artifacts:[report]}));
+    const selected=await selectContext(mcpAccessFixture(),SHA,{gh:listing,loadContext:async()=>loaded});
+    assert.equal(selected.reportId,'90');assert.equal(selected.doc.head,SHA);
+  }finally{globalThis.fetch=old;}
+});
 import {budgeted,runTool as runMcpTool} from './mcp-data.js';
 test('MCP context search uses the report provenance check and a per-call GitHub budget',async()=>{
   const access={...mcpAccessFixture(),repository:{...mcpAccessFixture().repository,id:5}};
@@ -7673,6 +7699,29 @@ test('MCP find_parts searchFieldsComplete reflects properties, truncation, and i
   loaded.doc.truncated = true;
   res = designParts('find_parts', { query: '10k' }, loaded, 'https://site.example');
   assert.equal(res.searchFieldsComplete, false);
+});
+import { expandContext } from './mcp-data.js';
+test('MCP restores a producer compact context to its full shape before any tool reads it', async () => {
+  const { compact, expanded } = JSON.parse(readFileSync(new URL('./fixtures/producer-compact-context.json', import.meta.url), 'utf8'));
+  assert.equal(compact.compact, 1);
+  assert.deepEqual(expandContext(compact), expanded);
+  // Only fields the producer names as removed come back: no invented BOM fields or key, no default on a part that lacked it, nulls stay null.
+  const edge = expandContext(compact).projects.find(p => p.dir === 'E').revisions.head;
+  assert.deepEqual(edge.parts.map(x => x.bom), [{ included: true }, { included: true, value: '2k', key: 'not-a-bom-key' }, expanded.projects[1].revisions.head.parts[2].bom]);
+  assert.equal(Object.hasOwn(edge.parts[2], 'dnp'), false);
+  assert.deepEqual(edge.parts.map(x => x.page_reason), [null, null, null]);
+  const plain = mcpDoc();
+  assert.equal(expandContext(plain), plain, 'a full context is used as is');
+  const deps = { gh: async () => new Response(JSON.stringify(artifactsFixture())), loadContext: async () => ({ doc: { ...structuredClone(compact), repo: 'Cameronrlewis/repo', head: SHA }, key: 'd' }) };
+  assert.deepEqual((await selectContext(mcpAccessFixture(), SHA, deps)).doc.projects, expanded.projects);
+});
+
+test('expandContext keeps an echoed property literally named __proto__ as an own property', () => {
+  const doc = JSON.parse('{"compact":1,"version":1,"kind":"kicad-review-design-context","projects":[{"dir":"P","revisions":{"head":{"parts":[{"ref":"R1","value":"1k","properties":{},"properties_echoed":{"__proto__":"value"}}],"nets":[]},"base":null}}]}');
+  const props = expandContext(doc).projects[0].revisions.head.parts[0].properties;
+  assert.ok(Object.hasOwn(props, '__proto__'), 'own key, not the prototype setter');
+  assert.equal(Object.getOwnPropertyDescriptor(props, '__proto__').value, '1k');
+  assert.equal(Object.getPrototypeOf(props), Object.prototype);
 });
 test('MCP producer truncated fixture reports unknown total and incomplete search fields', () => {
   const fixturePath = new URL('./fixtures/producer-truncated-context.json', import.meta.url);
