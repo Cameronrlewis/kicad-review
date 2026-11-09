@@ -8150,6 +8150,8 @@ test('MCP consent renders consent page on GET and completes authorization on POS
   assert.equal(getRes.status, 200);
   // no-referrer would make browsers send Origin: null on the consent POST, which the origin check rejects.
   assert.equal(getRes.headers.get('Referrer-Policy'), 'same-origin');
+  // The post-submit redirect to the client is governed by form-action, so the registered redirect origin is allowed, nothing wider.
+  assert.match(getRes.headers.get('Content-Security-Policy'), /form-action 'self' https:\/\/client\.example;/);
   assert.match(getRes.headers.get('Content-Type') || '', /text\/html/);
   assert.match(getRes.headers.get('Set-Cookie') || '', /mc=pending-cookie-token; Path=\/authorize; HttpOnly; SameSite=Lax; Max-Age=600; Secure/);
   assert.equal(sealedPending.login, 'cam');

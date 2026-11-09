@@ -23,6 +23,10 @@ export async function consentRoute(request, env, { session, open, seal }) {
     if (!client || !client.redirectUris?.includes(auth.redirectUri) || auth.scope.length !== 1 || auth.scope[0] !== 'read:design' || url.searchParams.get('resource') !== url.origin + '/mcp') return json({ error: 'Invalid client, redirect, scope, or resource' }, 400);
     const pending = await seal({ auth, login: active.login, nonce: crypto.randomUUID(), exp: Date.now() + 600000 }, env);
     const head = new Headers({ ...headers, 'Content-Type': 'text/html; charset=utf-8' });
+    // form-action also governs the redirect after the form POST, so the client's registered redirect target is allowed too;
+    // otherwise the browser blocks the hand-back to the client (e.g. http://localhost:<port>) and a second click finds the consent used.
+    const target = new URL(auth.redirectUri), source = /^https?:$/.test(target.protocol) ? target.origin : target.protocol;
+    if (/^[a-z][a-z0-9+.-]*:(\/\/[^\s;,']+)?$/i.test(source)) head.set('Content-Security-Policy', headers['Content-Security-Policy'].replace("form-action 'self'", `form-action 'self' ${source}`));
     head.append('Set-Cookie', pendingCookie(pending, url.protocol === 'https:'));
     if (active.setCookie) head.append('Set-Cookie', active.setCookie);
     const e = escapeHtml;
