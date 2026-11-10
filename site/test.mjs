@@ -7565,7 +7565,8 @@ test('MCP actual producer design sheets and part properties',()=>{
  assertMcpLists(populated);
  assert.equal(designParts('find_parts',{query:'50V'},loaded,'https://site.example').parts.returned,1);
  loaded.doc.truncated=true;
- assert.equal(designParts('find_parts',{query:'missing'},loaded,'https://site.example').parts.total,null);
+ const absent=designParts('find_parts',{query:'missing'},loaded,'https://site.example');
+ assert.equal(absent.parts.total,0);assert.equal(absent.parts.truncated,false);
 });
 test('MCP exact part references survive display clipping and byte rejection',()=>{
   const loaded=projectionLoaded(),ref='R'+'é'.repeat(2001);
@@ -7662,16 +7663,39 @@ test('MCP get_design p.sheets fallback and sheetsIncomplete handling', () => {
   assert.equal(noSheetsOut.sheets.truncated, true);
   assert.deepEqual(noSheetsOut.sheets.items, []);
 });
-test('MCP get_design with doc.truncated sets partCount null and marks incomplete', () => {
+test('MCP get_design keeps exact list totals when doc.truncated comes only from per-item pin cuts', () => {
   const loaded = projectionLoaded();
   loaded.revision.parts = [{ uuid: 'u1', ref: 'U1', value: '10k', pins: [], pin_count: 0 }];
   loaded.doc.truncated = true;
   const out = designParts('get_design', {}, loaded, 'https://site.example');
-  assert.equal(out.partCount, null);
+  assert.equal(out.partCount, 1);
   assert.equal(out.storedPartCount, 1);
-  assert.equal(out.incomplete, true);
-  assert.equal(out.sheets.total, null);
-  assert.equal(out.sheets.truncated, true);
+  assert.equal(out.incomplete, false);
+  assert.equal(out.sheets.total, loaded.revision.sheets.length);
+  assert.equal(out.sheets.truncated, false);
+});
+test('MCP list totals stay exact when only a net pin list is cut, and per-item cuts stay reported', () => {
+  const loaded = projectionLoaded(), r = loaded.revision;
+  r.netlist_available = true;
+  r.parts = [
+    { uuid: 'u1', ref: 'U1', value: 'MCU', properties: { Tol: '1%' }, properties_truncated: false, incomplete_fields: [], pins: [{ pin: '1', net: 'GND' }], pin_count: 1 },
+    { uuid: 'u2', ref: 'U2', value: 'MCU2', properties: { Tol: '1%' }, properties_truncated: true, incomplete_fields: ['properties.Tol'], pins: [{ pin: '1', net: 'GND' }], pin_count: 70, pins_more: 69 },
+  ];
+  r.nets = [{ id: 'GND', pins: ['U1.1'], pin_records: [{ ref: 'U1', pin: '1' }], pin_count: 300, more: 299 }];
+  loaded.doc.truncated = true;
+  const found = designParts('find_parts', { query: 'MCU' }, loaded, 'https://site.example');
+  assert.equal(found.parts.total, 2);
+  assert.equal(found.parts.truncated, false);
+  assert.match(found.reason, /not proof of absence/);   // clipped part fields, not list size, earn the warning
+  assert.equal(found.searchFieldsComplete, false);
+  assert.equal(found.parts.items[1].pins.truncated, true);
+  assert.equal(found.parts.items[1].pins.total, 70);
+  assert.equal(designParts('get_design', {}, loaded, 'https://site.example').partCount, 2);
+  const net = netProjection('get_net', { net: 'GND' }, loaded, 'https://site.example');
+  assert.equal(net.pins.total, 300);
+  assert.equal(net.pins.truncated, true);
+  r.parts = [{ ...r.parts[0] }];
+  assert.equal(designParts('find_parts', { query: 'MCU' }, loaded, 'https://site.example').searchFieldsComplete, true);
 });
 test('MCP find_parts searchFieldsComplete reflects properties, truncation, and incomplete fields', () => {
   const loaded = projectionLoaded();
@@ -7680,6 +7704,7 @@ test('MCP find_parts searchFieldsComplete reflects properties, truncation, and i
   ];
   let res = designParts('find_parts', { query: '10k' }, loaded, 'https://site.example');
   assert.equal(res.searchFieldsComplete, true);
+  assert.equal(Object.hasOwn(res, 'reason'), false);
 
   delete loaded.revision.parts[0].properties;
   res = designParts('find_parts', { query: '10k' }, loaded, 'https://site.example');
@@ -7698,7 +7723,8 @@ test('MCP find_parts searchFieldsComplete reflects properties, truncation, and i
   loaded.revision.parts[0].incomplete_fields = [];
   loaded.doc.truncated = true;
   res = designParts('find_parts', { query: '10k' }, loaded, 'https://site.example');
-  assert.equal(res.searchFieldsComplete, false);
+  assert.equal(res.searchFieldsComplete, true);
+  assert.equal(Object.hasOwn(res, 'reason'), false);
 });
 import { expandContext } from './mcp-data.js';
 test('MCP restores a producer compact context to its full shape before any tool reads it', async () => {
@@ -7723,7 +7749,7 @@ test('expandContext keeps an echoed property literally named __proto__ as an own
   assert.equal(Object.getOwnPropertyDescriptor(props, '__proto__').value, '1k');
   assert.equal(Object.getPrototypeOf(props), Object.prototype);
 });
-test('MCP producer truncated fixture reports unknown total and incomplete search fields', () => {
+test('MCP producer truncated fixture reports an exact total and incomplete search fields', () => {
   const fixturePath = new URL('./fixtures/producer-truncated-context.json', import.meta.url);
   const doc = JSON.parse(readFileSync(fixturePath, 'utf8'));
   assert.equal(doc.truncated, true);
@@ -7736,8 +7762,8 @@ test('MCP producer truncated fixture reports unknown total and incomplete search
     provenance: { repo: doc.repo, commit: doc.head },
   };
   const out = designParts('find_parts', { query: 'nonexistent_part_query_xyz' }, loaded, 'https://site.example');
-  assert.equal(out.parts.total, null);
-  assert.equal(out.parts.truncated, true);
+  assert.equal(out.parts.total, 0);
+  assert.equal(out.parts.truncated, false);
   assert.equal(out.searchFieldsComplete, false);
 });
 test('MCP upstream truncation is not a complete negative result', () => {
@@ -7811,9 +7837,9 @@ test('MCP net projection nearby suggestions, link, paging and unknown tool', () 
   assert.equal(paged.nearby.truncated, true);
   loaded.doc.truncated = true;
   const missingTruncated = netProjection('get_net', { net: '3v3' }, loaded, 'https://site.example');
-  assert.equal(missingTruncated.nearby.total, null);
-  assert.equal(missingTruncated.nearby.truncated, true);
-  assert.equal(missingTruncated.incomplete, true);
+  assert.equal(missingTruncated.nearby.total, 2);
+  assert.equal(missingTruncated.nearby.truncated, false);
+  assert.equal(missingTruncated.incomplete, false);
   loaded.doc.truncated = false;
   const found = netProjection('get_net', { net: 'GND' }, loaded, 'https://site.example');
   assert.equal(found.found, true);
@@ -7828,7 +7854,7 @@ test('MCP grouped BOM follows 08 included flags and key',()=>{
  assert.equal(json.lines.items[0].quantity,2);assert.equal(json.lines.items[0].refs.total,2);assert.equal(json.lines.items[0].refs.truncated,true);
  const csv=bomProjection('get_bom',{format:'csv'},loaded,'https://site.example');
  assert.match(csv.csv,/"R1 R2","10k,é"/);assert.doesNotMatch(csv.csv,/R3/);
- loaded.doc.truncated=true;assert.equal(bomProjection('get_bom',{},loaded,'https://site.example').lines.total,null);
+ loaded.doc.truncated=true;assert.equal(bomProjection('get_bom',{},loaded,'https://site.example').lines.total,1);
  const legacy=structuredClone(loaded);legacy.revision.parts.forEach(p=>delete p.bom);
  const legacyRes=bomProjection('get_bom',{},legacy,'https://site.example');
  assert.equal(legacyRes.bom.complete,false);

@@ -281,8 +281,9 @@ export function designParts(name, args, loaded, origin) {
     ...Object.fromEntries(['value', 'footprint', 'mpn', 'lcsc'].filter(k => p[k] != null).map(k => [k, displayText(p[k], `parts.${p.ref}.${k}`, clipped)])),
     datasheet: safeDatasheet(p.datasheet),
   });
-  const { revision: r, project: p, doc } = loaded, limit = args.limit ?? 15;
-  const incomplete = !!doc.truncated;
+  const { revision: r, project: p } = loaded, limit = args.limit ?? 15;
+  // The producer never cuts the part, net or sheet lists, only per-item pins and properties, and those carry their own marks.
+  const incomplete = false;
   const parts = r.parts || [];
   const out = { provenance: loaded.provenance };
   const part = p => ({
@@ -332,21 +333,21 @@ export function designParts(name, args, loaded, origin) {
   if (name === 'find_parts') {
     const q = args.query.toLowerCase();
     const rows = parts.filter(p => [p.ref, p.value, p.mpn, ...Object.entries(p.properties || {}).flat()].some(x => String(x ?? '').toLowerCase().includes(q)));
-    const pagedRows = rows.slice(0, limit);
+    const pagedRows = rows.slice(0, limit), complete = parts.every(p => p.properties && !p.properties_truncated && !(p.incomplete_fields || []).length);
     return {
       ...out,
       parts: page(pagedRows.map(part), limit, incomplete ? null : rows.length, incomplete),
       incompleteFields: page(clipped, limit),
-      searchFieldsComplete: !incomplete && parts.every(p => p.properties && !p.properties_truncated && !(p.incomplete_fields || []).length),
-      ...(incomplete ? { reason: 'Source context is truncated; an empty match is not proof of absence.' } : {}),
+      searchFieldsComplete: complete,
+      ...(complete ? {} : { reason: 'Some part fields are clipped; an empty match is not proof of absence.' }),
     };
   }
   throw new McpError('UNKNOWN_TOOL', 'Unknown design projection');
 }
 
 export function netProjection(name, args, loaded, origin) {
-  const { revision: r, doc } = loaded, limit = args.limit ?? 15;
-  const incomplete = !!doc.truncated, parts = r.parts || [], nets = r.nets || [], out = { provenance: loaded.provenance };
+  const { revision: r } = loaded, limit = args.limit ?? 15;
+  const incomplete = false, parts = r.parts || [], nets = r.nets || [], out = { provenance: loaded.provenance };
   if (name === 'get_net') {
     if (!r.netlist_available) return { ...out, error: { code: 'INCOMPLETE', message: r.netlist_reason || 'No exported netlist' } };
     let net = nets.find(n => n.id === args.net);
@@ -411,9 +412,9 @@ export function bomLines(parts) {
 // Quote every cell verbatim; spreadsheet formula prefix neutralization is intentionally omitted for vendor compatibility.
 const csvCell = value => '"' + String(value ?? '').replaceAll('"', '""') + '"';
 export function bomProjection(name, args, loaded, origin) {
-  const { revision: r, doc } = loaded, limit = args.limit ?? 15;
+  const { revision: r } = loaded, limit = args.limit ?? 15;
   const parts = r.parts || [], legacy = parts.some(p => !p.bom);
-  const incomplete = !!doc.truncated || legacy, out = { provenance: loaded.provenance, bom: { complete: !legacy } };
+  const incomplete = legacy, out = { provenance: loaded.provenance, bom: { complete: !legacy } };
   if (name === 'get_bom') {
     const groups = bomLines(parts), rows = groups.map(g => ({ ...g, refs: page(g.refs, limit) }));
     const lines = page(rows, limit, incomplete ? null : rows.length, incomplete);
