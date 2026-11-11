@@ -7674,6 +7674,16 @@ test('MCP get_design keeps exact list totals when doc.truncated comes only from 
   assert.equal(out.sheets.total, loaded.revision.sheets.length);
   assert.equal(out.sheets.truncated, false);
 });
+test('MCP get_design reports unknown sheets when schematic pages failed, even beside per-item cuts', () => {
+  const loaded = projectionLoaded();
+  loaded.revision.sheets = [];
+  loaded.revision.incomplete = [{ document: 'schematic', reason: 'Schematic pages unavailable: x' }];
+  loaded.doc.truncated = true;
+  const out = designParts('get_design', {}, loaded, 'https://site.example');
+  assert.equal(out.sheetsIncomplete, true);
+  assert.equal(out.sheets.total, null);
+  assert.equal(out.sheets.truncated, true);
+});
 test('MCP list totals stay exact when only a net pin list is cut, and per-item cuts stay reported', () => {
   const loaded = projectionLoaded(), r = loaded.revision;
   r.netlist_available = true;

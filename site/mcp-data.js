@@ -294,7 +294,11 @@ export function designParts(name, args, loaded, origin) {
   });
   if (name === 'get_design') {
     let sheets, sheetsIncomplete = false;
-    if (Array.isArray(r.sheets)) sheets = r.sheets;
+    if (Array.isArray(r.sheets)) {
+      sheets = r.sheets;
+      // The producer stores [] with a schematic mark when sheet pages failed to load.
+      sheetsIncomplete = (r.incomplete || []).some(i => i.document === 'schematic');
+    }
     else if (Array.isArray(p.sheets)) {
       sheets = p.sheets.filter(s => s.status !== 'removed');
       sheetsIncomplete = p.sheets.some(s => !['added', 'modified', 'unchanged', 'removed'].includes(s.status));
